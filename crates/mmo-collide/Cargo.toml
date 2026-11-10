@@ -1,0 +1,21 @@
+[package]
+name = "mmo-collide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The deterministic collisions that the server and the client share: the step of a body in a static world."
+
+[dependencies]
+libm = "0.2.16"
+# The feature enhanced-determinism gives the same bits on each system. The feature parallel must stay off.
+parry3d = { version = "0.31.1", default-features = false, features = [
+  "required-features",
+  "std",
+  "alloc",
+  "enhanced-determinism",
+] }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
