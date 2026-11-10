@@ -1,0 +1,37 @@
+name: Request
+description: Ask for a thing that mmo-archi does not do yet, or for a change of a thing that it does.
+title: "A short sentence that says what mmo-archi should do"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for this idea. Tell us the need first: the problem helps us more than a solution.
+  - type: textarea
+    id: need
+    attributes:
+      label: The need
+      description: What you want to do, and what stops you now.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: How mmo-archi could serve the need, if you have an idea.
+  - type: textarea
+    id: other
+    attributes:
+      label: What you do now
+      description: The other ways that you tried, or what you do in its place today.
+  - type: dropdown
+    id: part
+    attributes:
+      label: The part of mmo-archi
+      multiple: true
+      options:
+        - A crate of the workspace
+        - The architecture of the servers
+        - The gates or the tools of the repository
+        - The documents
+        - I do not know

@@ -1,0 +1,111 @@
+#!/bin/sh
+# The guards of the gates before each commit, each one the guard of furb for the same fault, in the stack of this
+# workspace. It prints only what fails, so that the tail of a command that commits and pushes shows the push. A commit
+# checks the files that it stages, as the index holds them, and pre-merge-commit runs it for a merge that no conflict
+# stopped, which reads the index against its first parent, as a commit does. A hand run runs every guard on the whole
+# tree: sh script/hooks/pre-commit run. SKIP names the guards that a run leaves out, with commas, as SKIP=coverage.
+# The guards of the workflows, of the paths and of the width read the working tree, as the tools that they run do.
+top=$(git rev-parse --show-toplevel) || exit 1
+cd "$top" || exit 1
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/mmo-hook.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT
+if [ "${1:-}" = run ]; then
+  root=.
+  git ls-files --cached --others --exclude-standard | while IFS= read -r file; do
+    if [ -e "$file" ]; then printf '%s\n' "$file"; fi
+  done >"$tmp/files"
+  cp "$tmp/files" "$tmp/added"
+  rust=1
+  width=1
+  # The width reads the lines that the change adds to this base, the merge base with origin/main when none is given.
+  base=${RUSTWIDTH_BASE:-}
+else
+  # The first commit of a clone has no HEAD, so it reads the index against the empty tree.
+  base=HEAD
+  git rev-parse -q --verify HEAD >/dev/null || base=$(git hash-object -t tree /dev/null)
+  git diff --cached --name-only --diff-filter=ACMR "$base" >"$tmp/files"
+  git diff --cached --name-only --diff-filter=A "$base" >"$tmp/added"
+  root=$tmp/index
+  git checkout-index --prefix="$root/" --stdin <"$tmp/files" || exit 1
+  # The guards of the Rust run only when the change touches a file that the crates or their tests read.
+  rust=$(grep -cE '\.rs$|^(crates|\.cargo)/|^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|rustfmt\.toml)$' "$tmp/files")
+  width=$(($(grep -c '\.rs$' "$tmp/files") + $(grep -cxF script/rustwidth.sh "$tmp/files")))
+fi
+# The text files of the change, which the guards of the files read: a link or a binary file is no text.
+while IFS= read -r file; do
+  if [ -f "$root/$file" ] && [ ! -h "$root/$file" ] && grep -Iq '' "$root/$file"; then printf '%s\n' "$file"; fi
+done <"$tmp/files" >"$tmp/text"
+cr=$(printf '\r')
+code=0
+# Runs a guard, and prints its rule and its output when it fails.
+guard() {
+  name=$1
+  rule=$2
+  shift 2
+  case ",${SKIP:-}," in *",$name,"*) return 0 ;; esac
+  if ! "$@" >"$tmp/out" 2>&1; then
+    echo "The guard $name failed: $rule."
+    cat "$tmp/out"
+    code=1
+  fi
+}
+# Fails when the command prints a line, and prints it.
+none() {
+  found=$("$@" 2>&1)
+  [ -z "$found" ] || { printf '%s\n' "$found"; return 1; }
+}
+# Runs a command in the root of the checked files on each text file whose path the pattern matches.
+on() {
+  pattern=$1
+  shift
+  grep -E "$pattern" "$tmp/text" | tr '\n' '\000' | (cd "$root" && xargs -0 -r "$@")
+}
+large() {
+  while IFS= read -r file; do
+    if [ -f "$root/$file" ] && [ ! -h "$root/$file" ]; then
+      size=$(wc -c <"$root/$file" | tr -d ' ')
+      if [ "$size" -gt 512000 ]; then echo "$file: $((size / 1024)) KB"; fi
+    fi
+  done <"$tmp/added"
+}
+ends() {
+  while IFS= read -r file; do
+    if [ -n "$(tail -c 1 "$root/$file")" ]; then
+      echo "$file: no line end ends it"
+    elif [ "$(wc -c <"$root/$file" | tr -d ' ')" -ge 2 ] && [ -z "$(tail -c 2 "$root/$file")" ]; then
+      echo "$file: an empty line ends it"
+    fi
+  done <"$tmp/text"
+}
+mixed() {
+  while IFS= read -r file; do
+    crlf=$(grep -c "$cr\$" "$root/$file")
+    lines=$(grep -c '' "$root/$file")
+    if [ "$crlf" -gt 0 ] && [ "$crlf" -lt "$lines" ]; then echo "$file: $crlf of its $lines lines end with CRLF"; fi
+  done <"$tmp/text"
+}
+guard stray "no backup or reject file of a patch or of sed is in the change" none grep -E '(\.rej|\.orig|-E)$' "$tmp/files"
+guard large-files "no file that the change adds holds more than 500 KB" none large
+guard merge-conflict "no marker of a merge conflict stands in a file" \
+  none on . grep -HnE "^(<<<<<<<|=======|>>>>>>>)( |$cr|\$)" --
+guard trailing-whitespace "no line ends with a space or a tab" none on . grep -HnE "[[:blank:]]$cr?\$" --
+guard end-of-file "each text file ends with one line end" none ends
+guard mixed-line-ending "no file mixes CRLF and LF line ends" none mixed
+guard toml "each TOML file parses" on '\.toml$|(^|/)Cargo\.lock$' env RUST_LOG=warn taplo lint --no-schema
+# yq parses a key that a mapping holds twice and keeps both, so the query names each such mapping.
+guard yaml "each YAML file parses, with no key twice in one mapping" \
+  none on '\.ya?ml$' yq '.. | select(tag == "!!map") | select((keys | length) != (keys | unique | length))
+    | filename + ":" + (line | to_string) + ": a key stands twice in this mapping"'
+guard workflows "each workflow parses and keeps its shape" actionlint -shellcheck= -pyflakes=
+guard paths "each path that a script or a workflow names stands" sh script/paths.sh
+if [ "$width" -gt 0 ]; then
+  guard rustwidth "no comment line that the change adds to a Rust file goes past 100 characters" \
+    sh script/rustwidth.sh ${base:+"$base"}
+fi
+if [ "$rust" -gt 0 ]; then
+  guard fmt "the Rust keeps the format of rustfmt.toml" cargo fmt --all --check
+  guard lock "Cargo.lock agrees with each manifest" cargo metadata --locked --format-version 1
+  guard clippy "the Rust passes clippy with no warning" cargo clippy --workspace --all-targets --locked -- -D warnings
+  guard coverage "the tests pass and cover each line, function and region" cargo coverage
+fi
+exit "$code"

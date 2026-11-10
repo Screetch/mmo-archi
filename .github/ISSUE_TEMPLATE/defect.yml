@@ -1,0 +1,73 @@
+name: Defect
+description: Tell us about a thing in mmo-archi that does not work as it should.
+title: "A short sentence that says what goes wrong"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for this report. A clear report helps us fix the defect fast.
+        Remove each key, token and private path from what you paste here.
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Tell what mmo-archi did. Paste the exact error when there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Tell what mmo-archi should do in its place.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: The steps
+      description: The steps that make the defect occur again, one on each line, from the start.
+      placeholder: |
+        1. git clone the repository
+        2. cargo coverage
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: The version of mmo-archi
+      description: The release that you run, or the commit of your clone.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: The part of mmo-archi
+      description: Where you met the defect.
+      multiple: true
+      options:
+        - A crate of the workspace
+        - A binary of a release
+        - The gates or the tools of the repository
+        - I do not know
+  - type: input
+    id: system
+    attributes:
+      label: The system
+      description: The operating system and its version, and the version of rust when it matters.
+      placeholder: macOS 26.1 on Apple silicon, rust 1.98.1
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: A log
+      description: When it helps, the lines of the log that show the defect.
+      render: text
+  - type: textarea
+    id: more
+    attributes:
+      label: More
+      description: All else that helps, as a capture of the screen or a guess of the cause.

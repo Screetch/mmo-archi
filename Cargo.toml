@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# The one version of mmo-archi: each crate takes it.
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# The bar of the Rust of mmo-archi. A module that breaks it holds an expect at its top.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "deny"
+expect_used = "warn"
+let_underscore_must_use = "deny"
+let_underscore_untyped = "warn"
+map_err_ignore = "warn"
+str_to_string = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+needless_pass_by_value = "warn"
+unused_async = "warn"
+too_many_lines = "warn"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "warn"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# A dependency is built once and run many times: each test runs it at each run of the suite. A build for
+# development builds each dependency as a release does, so a test runs them as a user does, and the crates of the
+# workspace stay quick to build again.
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false

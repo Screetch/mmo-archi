@@ -1,0 +1,89 @@
+name: setup
+description: The rust of every gate with its cache.
+
+inputs:
+  key:
+    description: >-
+      What the build of the gate holds beyond its job and its system, as a feature of the crate, which the key of its
+      cache names: a build of other artifacts saves a cache of its own.
+    default: ""
+  shared:
+    description: >-
+      The job whose cache of rust the gate restores in place of a cache of its own, when it builds a part of what that
+      job builds: the gate never saves that cache, which holds only what the job that owns it built.
+    default: ""
+  workspaces:
+    description: >-
+      Each workspace of cargo that the gate builds, with its target, as the cache reads them: it keeps the dependencies
+      of each in its target, and removes each other one.
+    default: ". -> target"
+  hashed:
+    description: >-
+      Each file beyond the manifests of cargo that decides what the gate builds, as a script of the build, whose hash
+      the key of its cache holds.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Windows Defender scans each file that the job reads or writes. With these folders excluded, the steps that touch
+    # many files take less time: in furb, a job of Windows took 227 to 232 s with them against a median of 328 to 364 s.
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:GITHUB_WORKSPACE, $env:RUNNER_TEMP
+        Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+    # The rust of rust-toolchain.toml, with the variables of cargo that actions-rust-lang/setup-rust-toolchain v2.0.0
+    # set, at the same values, so the key of the cache stays the same. That action installed a bash of brew on each
+    # macOS job before its own scripts, in 12 s to 47 s, and these steps run in the bash of the system. The cache is
+    # the step after them, so that its key holds this rust alone.
+    - run: |
+        set_default() { if [ -z "$(printenv "$1")" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
+        set_default CARGO_INCREMENTAL 0
+        set_default CARGO_PROFILE_DEV_DEBUG 0
+        set_default CARGO_TERM_COLOR always
+        set_default RUST_BACKTRACE short
+        set_default CARGO_BUILD_WARNINGS deny
+        set_default CARGO_UNSTABLE_SPARSE_REGISTRY true
+        set_default CARGO_REGISTRIES_CRATES_IO_PROTOCOL sparse
+        echo "::add-matcher::${{ github.action_path }}/rust.json"
+        rustup show active-toolchain || rustup toolchain install
+        rustc --version --verbose
+      shell: bash
+    # The key of the cache holds a hash of each rust that rustup lists, and the image of a runner has a rust of its own,
+    # which no build uses. Two images of one runner have each another rust, so the jobs of one key saved two caches,
+    # which took the store of the repository past its 10 GB. The step removes each rust but the one of
+    # rust-toolchain.toml, so the hash is the same on each image.
+    - run: |
+        active=$(rustup show active-toolchain | cut -d ' ' -f 1)
+        rustup toolchain list --quiet | while read -r toolchain; do
+          if [ "${toolchain%% *}" != "$active" ]; then rustup toolchain uninstall "${toolchain%% *}"; fi
+        done
+      shell: bash
+    # The cache of what cargo built of the dependencies the last time.
+    # The key of the cache is the job, the system, a hash of the rust and of the variables of cargo, and a hash of
+    # each Cargo.toml, of Cargo.lock and of rust-toolchain.toml. When a lock or a manifest changes, the job restores
+    # the cache of the same job, system and rust under its old hash, and cargo builds only the crates that changed.
+    # A key of files that are not those of cargo restores nothing when one of them changes: in furb, a change of a
+    # manifest of python then made every job build every crate again, in up to 25 minutes, and a change of Cargo.lock
+    # made no new key, so main never saved the cache again and each job built the new crates each time.
+    # Only main saves the cache, and a pull request reads the cache of main.
+    # Only a job that passes saves it. A job that fails or is cancelled holds part of the build, and a key that
+    # matches whole is never saved again, so every later run would build again what that part lacks.
+    # A script of the build that starts to build a new crate changes no manifest, so with no hash of it the key stays
+    # whole and each run builds that crate and each of its dependencies again.
+    - if: inputs.hashed != ''
+      run: echo "MMO_CACHE_HASHED=${{ hashFiles(inputs.hashed) }}" >> "$GITHUB_ENV"
+      shell: bash
+    - id: rust
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        key: ${{ inputs.key }}
+        shared-key: ${{ inputs.shared }}
+        workspaces: ${{ inputs.workspaces }}
+        add-rust-environment-hash-key: true
+        env-vars: MMO_CACHE
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.shared == '' }}
+        cache-on-failure: false
+    - run: echo "RUST_CACHE_HIT=${{ steps.rust.outputs.cache-hit }}" >> "$GITHUB_ENV"
+      shell: bash

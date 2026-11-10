@@ -1,0 +1,124 @@
+name: publish
+
+# A tag vX.Y.Z publishes the version X.Y.Z of mmo-archi: it builds each binary of the workspace in release on each
+# system below, and attaches an archive of them for each system to the release of that tag on GitHub. It publishes to
+# no registry: each crate of the workspace has publish = false. The tag comes from a merge of the pull request of
+# release-please, which release.yml starts this on, or from the owner. The token of the workflow, github.token, does
+# all of it: no secret of the owner serves.
+#
+# A build on Linux links the glibc of Ubuntu 22.04, so it runs on a system with glibc 2.35 or later. The binary for
+# macOS on Intel is built on Apple silicon for its target. A run started by hand on a branch, or by a push to main that
+# changes what a release builds, builds everything and attaches nothing, which is the rehearsal of a release. A pull
+# request into main that changes what a release builds runs the same rehearsal on the systems of Linux and Windows
+# alone: a macOS runner of GitHub waits in a queue of its own, so the macOS legs run on main after the merge, and before
+# a release in the run of its tag.
+on:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - .github/workflows/publish.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+      - rust-toolchain.toml
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/publish.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/*/Cargo.toml
+      - rust-toolchain.toml
+  workflow_dispatch:
+
+# One run for one ref: a push that follows another on a branch or a pull request ends the run before it, so a rehearsal
+# of an old head holds no runner. A run on a tag is never ended, so no release stops halfway, and a run on main is
+# never ended, since only a run that ends saves the cache of rust.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  binaries:
+    name: the binaries for ${{ matrix.system }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"os":"ubuntu-22.04","system":"linux-x64-gnu"},{"os":"ubuntu-22.04-arm","system":"linux-arm64-gnu"},{"os":"windows-latest","system":"win32-x64-msvc"}]' || '[{"os":"ubuntu-22.04","system":"linux-x64-gnu"},{"os":"ubuntu-22.04-arm","system":"linux-arm64-gnu"},{"os":"macos-latest","system":"darwin-arm64"},{"os":"macos-latest","system":"darwin-x64","target":"x86_64-apple-darwin"},{"os":"windows-latest","system":"win32-x64-msvc"}]') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Before the setup, so the key of the cache of rust names the target.
+      - if: matrix.target
+        run: echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup
+      - if: matrix.target
+        run: rustup target add "${{ matrix.target }}"
+      # A tag publishes the version that it names, and no other: each crate takes the version of the workspace.
+      - if: github.ref_type == 'tag'
+        run: |
+          test "$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | join(" ")')" = "${GITHUB_REF_NAME#v}"
+      - run: cargo build --release --locked --workspace --bins
+      # The archive holds each binary that a crate of the workspace names. A workspace with no binary, as the one of
+      # today, attaches nothing, and says so.
+      - env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          names=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name')
+          if [ -z "$names" ]; then
+            echo "::notice title=no binary::The workspace holds no binary yet, so the release of $SYSTEM attaches nothing."
+            exit 0
+          fi
+          built="target/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
+          end=; [ "$RUNNER_OS" = Windows ] && end=.exe
+          folder="mmo-archi-$SYSTEM"
+          mkdir -p "$RUNNER_TEMP/pack/$folder" "$RUNNER_TEMP/out"
+          for name in $names; do cp "$built/$name$end" "$RUNNER_TEMP/pack/$folder/"; done
+          cp CHANGELOG.md "$RUNNER_TEMP/pack/$folder/"
+          tar -C "$RUNNER_TEMP/pack" -czf "$RUNNER_TEMP/out/$folder.tar.gz" "$folder"
+          (cd "$RUNNER_TEMP/out" && shasum -a 256 "$folder.tar.gz" > "$folder.tar.gz.sha256")
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ matrix.system }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: ignore
+
+  release:
+    name: attach to the release
+    if: github.ref_type == 'tag'
+    needs: [binaries]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+      # release-please makes the release of its tag. A tag that the owner pushed by hand has none yet, so the job makes
+      # it. A run again after a failure replaces each file that the release holds.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+          mkdir -p dist
+          files=$(find dist -type f | sort)
+          if [ -z "$files" ]; then
+            echo "::notice title=no binary::The workspace holds no binary yet, so the release $GITHUB_REF_NAME holds no archive."
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          gh release upload "$GITHUB_REF_NAME" $files --clobber --repo "$GITHUB_REPOSITORY"

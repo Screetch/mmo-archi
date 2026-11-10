@@ -1,0 +1,10 @@
+[package]
+name = "mmo-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The placeholder of the workspace: it gives every gate a target until the first crate of the game stands."
+
+[lints]
+workspace = true

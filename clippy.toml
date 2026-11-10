@@ -1,0 +1,13 @@
+# The bar of the Rust of mmo-archi, beside the lints of Cargo.toml, which the skill rust says.
+too-many-lines-threshold = 60
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+disallowed-methods = [
+  { path = "std::thread::sleep", reason = "an ear awaits; a poll with sleep hides a hang" },
+  { path = "futures::executor::block_on", reason = "never block the life or the reactor" },
+  { path = "tokio::runtime::Runtime::block_on", reason = "never block the life or the reactor" },
+  { path = "tokio::runtime::Handle::block_on", reason = "never block the life or the reactor" },
+  { path = "tokio::task::LocalSet::block_on", reason = "never block the life or the reactor" },
+  { path = "std::thread::park_timeout", reason = "an ear awaits; a park on a timer hides a hang" },
+  { path = "std::process::Child::try_wait", reason = "await tokio::process::Child::wait under a timeout" },
+]

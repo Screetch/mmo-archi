@@ -1,0 +1,165 @@
+name: gates
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  # Each night every job runs on main, whatever changed: it proves each system on the sum of the day, and it saves a
+  # fresh cache of rust for each job.
+  schedule:
+    - cron: "30 2 * * *"
+
+# One run of the gates for one branch: a push that follows another ends the run before it. On main, it ends only a run
+# that waits, since a group holds one run that waits at most, and the run in progress goes to its end. Only a run of
+# main that passes saves the caches of rust, and a run that a push ends during its save leaves a key that no later run
+# can save.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  # The step clear of each job deletes the old cache of rust of that job, on main.
+  actions: write
+
+env:
+  # A gate builds once and runs no debugger, so a build writes no debug information and keeps no incremental state.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_DEV_INCREMENTAL: "false"
+
+jobs:
+  scope:
+    # A runner of macOS waits in a queue of its own, for minutes. The jobs on Linux hold the whole proof of the logic;
+    # the job of the crate on macOS and on Windows proves the system alone, so a pull request and a push to main run it
+    # only when a path that they change can behave in another way there, which script/scope.sh says. A run by hand, and
+    # the run of each night, run every job.
+    # The commit of a pull request is the merge of its branch into the base, whose first parent is the base, so two
+    # commits of history hold the change. A push to main holds the commits after the head before it, which the step
+    # fetches alone, since the diff of two trees needs no history between them. A push with no head before it, or one
+    # whose head before it is gone, runs every job.
+    # A job that a push to main skips saves no cache of rust, and the cache that it saved before stays valid: its key
+    # holds each manifest and the lock of cargo, and a change of them runs every job.
+    name: the scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      crate: ${{ steps.scope.outputs.crate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: scope
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            git diff --name-only HEAD^1 HEAD | sh script/scope.sh
+          elif [ "$GITHUB_EVENT_NAME" = push ] && [ -n "${BEFORE//0/}" ] \
+            && git fetch -q --depth=1 --no-tags origin "$BEFORE" && changed=$(git diff --name-only "$BEFORE" HEAD); then
+            printf '%s\n' "$changed" | sh script/scope.sh
+          else
+            sh script/scope.sh --all
+          fi | tee -a "$GITHUB_OUTPUT"
+
+  hooks:
+    # Every guard of script/hooks/pre-commit on the whole tree, on Linux: the files, the TOML and the YAML, the
+    # workflows, the paths, the width of the comments of the Rust, the format, the lock and clippy. The suite runs the
+    # coverage, so the hooks leave it out. The width reads the lines that a pull request adds to its base, the first
+    # parent of its commit, so the job fetches two commits.
+    name: the hooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # The tools of the guards, at the versions that AGENTS.md names for the machines of the workers.
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: taplo@0.10.0,yq@4.54.2
+      # install-action gives no actionlint, so the step takes its release and checks its sum.
+      - env:
+          VERSION: "1.7.12"
+          SUM: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v$VERSION/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "$SUM  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: sh script/hooks/pre-commit run
+        env:
+          SKIP: coverage
+          RUSTWIDTH_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+      - uses: ./.github/actions/clear
+
+  suite:
+    # The tests of the workspace on Linux, in the run that measures their coverage: cargo coverage, whose bar
+    # .cargo/config.toml holds, fails under 100 percent.
+    name: the suite
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo coverage
+      - uses: ./.github/actions/clear
+
+  crate:
+    # Windows and macOS have a job of their own, since a path, a line end and a process are of another form there: it
+    # runs clippy, and the tests in the run of their coverage.
+    name: the crate on ${{ matrix.os }}
+    needs: scope
+    if: needs.scope.outputs.crate == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo coverage
+      - uses: ./.github/actions/clear
+
+  gates:
+    # The one check that stands for all the gates, so that a ruleset of main requires this check alone, and the
+    # conductor merges a PR only when it passes. A job that the scope skips passes here. It runs always, and fails when
+    # a job that it needs failed or was cancelled.
+    name: the gates
+    if: always()
+    needs: [scope, hooks, suite, crate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in failure | cancelled) echo "a job of the gates ended $r"; exit 1 ;; esac
+          done
+          echo "every job of the gates passed or was skipped: $RESULTS"

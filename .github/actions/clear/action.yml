@@ -1,0 +1,34 @@
+name: clear
+description: The cache of rust that this job restored, and that it replaces, as the clear that its save needs.
+
+inputs:
+  key:
+    description: The key that the setup of this job was given.
+    default: ""
+  shared:
+    description: The job whose cache this job restores. Such a job saves none, so it clears none.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # A change of a Cargo manifest gives each job a new key, so the store holds the old cache and the new one of each
+    # job at once. The store has a limit of 10 GB, and it ends the cache that it used least, which can be the cache of
+    # a job that waits in the queue of macOS and has not restored it yet. This step runs before the save, so a job
+    # replaces its cache with no growth of the store.
+    - if: inputs.shared == ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        KEY: ${{ inputs.key }}
+      run: |
+        case "$RUNNER_OS" in macOS) os=Darwin ;; Windows) os=Windows_NT ;; *) os=Linux ;; esac
+        prefix="v0-rust-${KEY:+$KEY-}$GITHUB_JOB-$os-"
+        old=$(gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$prefix" --limit 200 --json id,sizeInBytes,key --jq '.[] | "\(.id) \(.sizeInBytes) \(.key)"' || true)
+        echo "caches of $prefix on main:"
+        echo "$old"
+        if [ "$GITHUB_REF" = refs/heads/main ] && [ "$RUST_CACHE_HIT" != true ]; then
+          echo "$old" | while read -r id size key; do
+            if [ -n "$id" ]; then gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true; fi
+          done
+        fi

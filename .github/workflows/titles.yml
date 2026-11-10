@@ -1,0 +1,46 @@
+name: titles
+
+# A squash merge takes the title of a pull request as the commit on main, and release-please reads the type of each
+# commit there. This check fails a title that is not a conventional commit of a type that release-please reads, so no
+# title depends on memory. script/title.py holds the rule, and changelog-sections in release-please-config.json holds
+# the types. It is a workflow of its own, and not a job of gates.yml, since it runs again at each edit of the title: a
+# run of gates.yml for an edit would cancel the suite of the head, or show each of its jobs as skipped.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+  # release.yml starts it on the branch of the pull request of a release, which the token of a workflow opens, and
+  # which so starts no workflow.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  title:
+    # A branch protection requires the check by this name.
+    name: the title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            release-please-config.json
+            script/title.py
+          sparse-checkout-cone-mode: false
+      # The title comes through the environment, and never into the text of the script.
+      - env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            TITLE=$(gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" --json title --jq .title)
+          fi
+          python3 -I script/title.py "$TITLE"

@@ -1,0 +1,153 @@
+name: release
+
+# release-please keeps a pull request of the next release open on main: the one version of the workspace in each
+# manifest that names it, and CHANGELOG.md, from the commits since the last release, in the order of the manifest
+# mode of release-please-config.json. A fix or a feat raises the patch version, and a breaking change raises the minor
+# version, as bump-patch-for-minor-pre-major and bump-minor-pre-major say while the version stands below 1.0.0. Only
+# the owner raises the major version: a start by hand with a version, as gh workflow run release.yml -f
+# version=1.0.0, pushes to main an empty commit with the footer Release-As, and the next release takes that version.
+# A merge of that pull request makes the tag vX.Y.Z and its release on GitHub, and this workflow then starts
+# publish.yml on that tag, which builds the binaries of the workspace and attaches them to that release. A tag that
+# the token of a workflow pushes starts no workflow, but a start by hand does, so the start is that of publish.yml. A
+# merge of any other pull request publishes nothing.
+#
+# Each day, the job daily merges the pull request of the next release when one is open, its gates passed at its head
+# and the last gates of main passed. release-please opens that pull request only for a change that makes a version, a
+# fix, a feat or a breaking change, so a day with no such change releases nothing. A merge that the token of a workflow
+# makes starts no workflow, so the job starts this workflow on main by hand, which tags the release, and the gates of
+# main.
+# The job daily starts the gates of the head of that pull request, and waits for them: release-please moves the head
+# at each push to main, and the one head that the job merges is the one that it proves. While the job waits, it holds
+# the group of this workflow, so no run of release-please moves the head.
+# Every job here uses the token of the workflow alone, github.token: no secret of the owner serves.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version X.Y.Z of the next release, as 1.0.0. Empty keeps the rules of the config."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    name: daily
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    # The gates of a head run in a few minutes now, and wait in the queue of macOS; the bound holds a slow day.
+    timeout-minutes: 150
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      # A failed run of the gates at the head, or a red main, fails this job, so the owner sees why no release came.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          n=$(gh pr list --state open --base main --label "autorelease: pending" --json number --jq '.[0].number // empty')
+          if [ -z "$n" ]; then
+            echo "No pull request of a release is open: main holds no change that makes a version."
+            exit 0
+          fi
+          read -r sha branch <<EOF
+          $(gh pr view "$n" --json headRefOid,headRefName --jq '"\(.headRefOid) \(.headRefName)"')
+          EOF
+          run() {
+            gh run list --workflow gates.yml --commit "$sha" --event workflow_dispatch --limit 1 --json databaseId \
+              --jq '.[0].databaseId // empty'
+          }
+          id=$(run)
+          if [ -z "$id" ]; then
+            echo "#$n has no run of the gates at $sha, so the job starts one and waits for it."
+            gh workflow run gates.yml --ref "$branch"
+            for _ in $(seq 30); do
+              sleep 10
+              id=$(run)
+              if [ -n "$id" ]; then break; fi
+            done
+          fi
+          if [ -z "$id" ]; then
+            echo "::error::The run of the gates at $sha of #$n did not show in 5 minutes, so no release comes today."
+            exit 1
+          fi
+          # A watch prints each job as it ends, so a run that hangs shows in the log.
+          if ! timeout 140m gh run watch "$id" --interval 60 --exit-status; then
+            gates=$(gh run view "$id" --json status,conclusion --jq '"\(.status) \(.conclusion)"')
+            echo "::error::The gates of #$n at $sha ended with $gates (run $id), so no release comes today."
+            exit 1
+          fi
+          # A push to main cancels the run of main that waits for the run before it, so a cancelled run gives no verdict:
+          # the job reads the last run of main that ran to its end.
+          read -r main ran <<EOF
+          $(gh run list --workflow gates.yml --branch main --status completed --limit 100 --json conclusion,headSha \
+            --jq '[.[] | select(.conclusion != "cancelled" and .conclusion != "skipped")][0] // {} | "\(.conclusion // "") \(.headSha // "")"')
+          EOF
+          if [ "$main" != success ]; then
+            echo "::error::The last gates of main that ran to their end, at ${ran:-no commit}, ended with ${main:-no run}, so no release comes today."
+            exit 1
+          fi
+          gh pr merge "$n" --squash --match-head-commit "$sha"
+          gh workflow run release.yml --ref main
+          gh workflow run gates.yml --ref main
+  release-please:
+    name: release-please
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      # The footer Release-As of a commit on main gives its version to the next release, whatever its type.
+      - if: inputs.version != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s\n' "$VERSION" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::$VERSION is no version X.Y.Z."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q --allow-empty -m "chore(release): Release $VERSION" -m "Release-As: $VERSION"
+          git push origin HEAD:main
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # The pull request of release-please changes the version in Cargo.toml and Cargo.lock.
+      # A pull request that the token of a workflow opens starts no workflow, so the job starts the checks of its title
+      # and of its contract by hand on its branch, and each check stands on its head. The job daily starts the gates of the head that it merges.
+      # Each step after release-please runs only when release-please succeeded, and it reads the pull request through
+      # `|| '{}'`, since a failed or skipped step gives an empty output, which fromJSON refuses, and the runner reads the
+      # template of a step even when its condition skips it.
+      - if: steps.release.outcome == 'success' && steps.release.outputs.prs_created == 'true'
+        env:
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run titles.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          gh workflow run contract.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+      - if: steps.release.outcome == 'success' && steps.release.outputs.release_created == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"

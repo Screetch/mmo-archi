@@ -1,0 +1,6 @@
+{
+  "extensions": {
+    "pr": "extensions/pr",
+    "conductor": "extensions/conductor"
+  }
+}
