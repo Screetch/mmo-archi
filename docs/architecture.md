@@ -168,12 +168,12 @@ A zone writer runs a fixed tick of 50 ms, 20 times each second. The step of a ti
 `mmo-collide`. In each tick the writer:
 
 1. Takes at most one input of each player for this tick, from a buffer of 4 inputs.
-2. Checks each input, and moves each player with the step of `mmo-collide`.
+2. Checks each input, and moves each player with the step of `mmo-collide`. The step gives each position in whole
+   centimetres, so the state of the writer is the state that a client receives.
 3. Applies the orders that came on stream 0 since the last tick.
-4. Rounds each position to the centimetre, so the state of the writer is the state that a client receives.
-5. Puts each entity in the cell of its position in a grid of 32 m.
-6. Makes and sends the snapshot of each player.
-7. Sends the dirty characters to the keeper when the save period ends (section 9).
+4. Puts each entity in the cell of its position in a grid of 32 m.
+5. Makes and sends the snapshot of each player.
+6. Sends the dirty characters to the keeper when the save period ends (section 9).
 
 An intent never carries a position or a speed. An input carries a tick, a direction of movement, a direction of view and
 flags. The writer reads the speed from its own table. It refuses an input whose tick is more than 4 ticks from its own
@@ -397,7 +397,8 @@ inputs give the same bits on each system. These rules hold it:
   calls the functions of the crate libm.
 - The crate calls no `mul_add`, and no build of the game uses `target-cpu=native`, so the compiler makes no fused
   operation.
-- The positions are rounded to the centimetre at the end of each tick, so the client starts from the same bits.
+- The step gives each position in whole centimetres and each speed in whole centimetres each second, so the client
+  starts from the same bits.
 
 The proof is a test in the crate. In it, 1000 bodies run 200 ticks from fixed inputs, and the hash of the bits of their
 state equals one constant. The gates run it on Linux, macOS and Windows, as `script/scope.sh` says for this crate. The
