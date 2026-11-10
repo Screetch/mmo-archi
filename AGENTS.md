@@ -167,7 +167,9 @@ fix what your change broke, and report what was broken before.
 - `docker compose up -d`: start PostgreSQL and Redis for local work, as `compose.yaml` says. The tests of `mmo-store`
   run against the PostgreSQL that `DATABASE_URL` names, as `postgres://postgres:postgres@127.0.0.1:5432/postgres`, and
   each test makes a database of its own and drops it. So `cargo test`, `cargo coverage` and a commit that runs the
-  hook need `DATABASE_URL`. Give them a server that holds no data of a player.
+  hook need `DATABASE_URL`. Give them a server that holds no data of a player. The tests of `mmo-login` also start a
+  Redis of their own for each test, with the program that `REDIS_SERVER` names, or else `redis-server` of the `PATH`,
+  which `brew install redis` gives.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole. It needs cargo-llvm-cov, which
   `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
   probe.
