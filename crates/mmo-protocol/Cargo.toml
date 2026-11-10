@@ -1,0 +1,15 @@
+[package]
+name = "mmo-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The messages between a client and the servers of mmo-archi, their codec and their frames."
+
+[dependencies]
+# The format of bitcode can change between two of its versions, so a new version raises PROTOCOL.
+bitcode = "=0.6.9"
+thiserror = "2"
+
+[lints]
+workspace = true

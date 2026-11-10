@@ -146,7 +146,7 @@ A module that does not meet the lints yet says so at its top, one line for each 
     ```
 
 12. Visibility is as small as it can be. `pub` is only for the API of the crate, which its `src/lib.rs` gives, as
-    `crates/mmo-base/src/lib.rs` does. `pub(crate)` or smaller is for the rest.
+    `crates/mmo-protocol/src/lib.rs` does. `pub(crate)` or smaller is for the rest.
 
     ```rust
     pub(crate) fn merged_path(paths: &[PathBuf]) -> OsString
