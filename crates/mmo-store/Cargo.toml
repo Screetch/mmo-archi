@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The durable data of mmo-archi in PostgreSQL: its migrations and the queries of each table."
+description = "The data of mmo-archi: the migrations and the queries of PostgreSQL, and the keys of Redis."
 
 [dependencies]
 argon2 = "0.6.0"

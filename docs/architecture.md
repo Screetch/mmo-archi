@@ -118,10 +118,15 @@ writers write the directory and the presence again.
 | `directory` | channel | zone writer | none | the id of each zone that changed its writer |
 | `world:{w}:queue` | sorted set | login service | none | the queued accounts, by the time that each entered |
 | `world:{w}:admitted` | sorted set | login service | none | the admitted accounts, by the end of their slot |
+| `world:{w}:admissions` | sorted set | login service | 10 minutes | the admitted accounts, by the time of their admission |
 | `queued:{account}` | string | login service | 120 s, renewed by the client | the mark that a queued client still waits |
 | `admit:{account}` | string | login service | 60 s | the mark that the account has a slot |
 | `resume:{token}` | string | login service | 120 s | the account of a queued client that can come back |
+| `failed:{name}` | string | login service | 60 s | the count of the failed logins of a name in the last minute |
 | `chat:{channel}` | stream and channel | zone writer | the last 1000 lines | the chat |
+
+A token goes in a key as 64 hex digits in lower case. The module `keys` of `mmo-store` makes each key, so no other
+crate writes the name of a key.
 
 The zone writer sends the chat lines of its players to Redis. It also sends to its players the lines of each channel
 that they read. So the gateway keeps no list of channels.
