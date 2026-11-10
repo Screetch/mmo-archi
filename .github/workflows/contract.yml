@@ -35,7 +35,9 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-semver-checks@0.51.0
-      # The script reads each crate of the last tag through git, so the tags come with the commit that each names.
+      # The script reads each crate of the last tag through git, so the tags come with the commit that each names. With
+      # no tag on origin, a fetch of the glob v* exits 1 before the script runs, and the script passes with no tag, so
+      # the fetch runs only when a tag v* stands on origin.
       # The title comes through the environment, and never into the text of the script.
       - env:
           TITLE: ${{ github.event.pull_request.title }}
@@ -43,7 +45,9 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
+          if [ -n "$(git ls-remote --tags --refs origin 'v*')" ]; then
+            git fetch --no-tags --depth=1 origin '+refs/tags/v*:refs/tags/v*'
+          fi
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             TITLE=$(gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" --json title --jq .title)
             BASE=main
