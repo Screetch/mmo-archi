@@ -164,6 +164,10 @@ fix what your change broke, and report what was broken before.
   the conductor build only through it: with no cap, 28 rustc processes took 13.8 GB, and the machine ran out of memory.
 - `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`: the format and the lints of
   the Rust.
+- `docker compose up -d`: start PostgreSQL and Redis for local work, as `compose.yaml` says. The tests of `mmo-store`
+  run against the PostgreSQL that `DATABASE_URL` names, as `postgres://postgres:postgres@127.0.0.1:5432/postgres`, and
+  each test makes a database of its own and drops it. So `cargo test`, `cargo coverage` and a commit that runs the
+  hook need `DATABASE_URL`. Give them a server that holds no data of a player.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole. It needs cargo-llvm-cov, which
   `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
   probe.

@@ -25,7 +25,8 @@ pub use messages::{
   Snapshot, ToClient, ToLogin, ToNeighbour, ToZone,
 };
 pub use values::{
-  AccountId, Angle, CharacterId, Link, Offset, Password, Position, Tick, Token, Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, Tick, Token, Velocity,
+  ZoneId,
 };
 
 /// The version of the protocol, which each [`Hello`] carries.

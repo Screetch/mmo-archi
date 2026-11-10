@@ -1,0 +1,17 @@
+[package]
+name = "mmo-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The data of mmo-archi: the migrations and the queries of PostgreSQL, and the keys of Redis."
+
+[dependencies]
+argon2 = "0.6.0"
+mmo-protocol = { path = "../mmo-protocol" }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
+
+[lints]
+workspace = true
