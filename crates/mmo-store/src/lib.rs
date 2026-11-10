@@ -1,4 +1,5 @@
-//! The durable data of mmo-archi in PostgreSQL: the accounts, the zones and the characters.
+//! The data of mmo-archi that more than one process reads: the accounts, the zones and the
+//! characters in PostgreSQL, and the name and the format of each key of Redis in [`keys`].
 //!
 //! [`Store`] is the one home of the SQL of the game. The keeper opens it with
 //! [`Store::migrate`], which runs the migrations of `migrations/`, and each other process with
@@ -13,6 +14,7 @@
 
 mod accounts;
 mod characters;
+pub mod keys;
 mod zones;
 
 use mmo_protocol::{Epoch, ZoneId};
