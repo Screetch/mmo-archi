@@ -15,7 +15,7 @@ tests.
 
 `AGENTS.md` gives the laws of the tests, in its section The tests. Read it first.
 
-- The tests of a module of Rust stand beside it, in its `mod tests`, as in `crates/mmo-base/src/lib.rs`.
+- The tests of a module of Rust stand beside it, in its `mod tests`, as in `crates/mmo-protocol/src/codec.rs`.
 - `cargo coverage` runs every test of the workspace and fails under 100 percent, so a test that you delete can leave
   a line with no measure. Close that gap with a test at the boundary that owns the behavior, or remove the code that
   no caller needs, and never lower the bar.

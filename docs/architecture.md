@@ -152,9 +152,10 @@ The state goes on the wire in integers. A position is in centimetres as an `i32`
 an `i16`, and a direction of view as a `u16`. These integers made a full snapshot 48 percent smaller than `f32` values
 (1073 bytes against 2081 bytes for 64 entities).
 
-The protocol has one version, `PROTOCOL: u16` in `mmo-protocol`. The first message of a client is `Hello { protocol,
-build }`. A gateway accepts only its own version, and else answers with the version that it needs. The messages between
-two servers carry the same version. A change of the protocol needs a restart of the world: the operator stops the world,
+The protocol has one version, `PROTOCOL: u16` in `mmo-protocol`. The first message of each side of a link is a
+hello: the version as a `u16`, then the build as a `u32`, both little-endian and with no bitcode, so each version reads
+the version of each other. A side accepts only its own version, and else answers with its own hello, which carries the
+version that it needs. The links between two servers carry the same hello. A change of the protocol needs a restart of the world: the operator stops the world,
 deploys each process, and starts it again.
 
 A datagram of a client is `{ zone, ack, inputs }`. It holds the zone of the player, the last tick of a snapshot that the
@@ -206,7 +207,7 @@ When a player crosses a border, the writer of the zone that the player leaves, t
 
 1. It reads the entry of the next zone, the target, in the directory. When the target holds 2500 players, the source
    keeps the player at the border and tells the client why.
-2. It stops taking the inputs of the player, and sends `Transfer { character, state, version }` to the target.
+2. It stops taking the inputs of the player, and sends `Transfer { account, link, state, version }` to the target.
 3. The target adds the player, and writes the presence of the account with its own zone and epoch. It asks the keeper to
    save the character with the new zone. Then it answers `Accepted`.
 4. The source drops the player and sends the event `Moved { zone }` to the client. The client names the new zone in its
@@ -408,8 +409,7 @@ A change of `mmo-collide` changes the result of a step, so it raises the version
 ## 11. The crates
 
 The crates come in this order, each in its own pull request, and each serves the ones after it. The server stands after
-crate 8, and the client follows. The first crate replaces `crates/mmo-base`. Each new crate adds its name to
-`release-please-config.json`.
+crate 8, and the client follows. Each new crate adds its name to `release-please-config.json`.
 
 | Order | Crate | Its doors |
 | ---: | --- | --- |

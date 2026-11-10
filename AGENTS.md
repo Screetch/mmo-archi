@@ -1,10 +1,8 @@
 # mmo-archi
 
 mmo-archi is the architecture of a scalable MMORPG in Rust, at its start. The workspace of cargo, `Cargo.toml`, keeps
-each crate in `crates/`, and the crates of the game come one by one, each in a pull request. Today the workspace holds
-one crate, `crates/mmo-base`, a placeholder that gives each gate a target and the coverage a crate to count, until the
-first crate of the game takes its place. Claude Code reads this file through `CLAUDE.md`, which holds only
-`@AGENTS.md`.
+each crate in `crates/`, and the crates of the game come one by one, each in a pull request, in the order that
+`docs/architecture.md` gives. Claude Code reads this file through `CLAUDE.md`, which holds only `@AGENTS.md`.
 
 The shape of the game is fixed, and each crate serves it:
 
@@ -104,7 +102,7 @@ the fix and its proof. An answer that only explains is not done.
 
 - The tests of a crate drive it as its callers do, and assert exact values. A test never weakens an assertion to
   pass: a test that the code fails stays red until the code, or the rule that the test holds, is right.
-- The tests of a module of Rust stand beside it, in its `mod tests`, as in `crates/mmo-base/src/lib.rs`.
+- The tests of a module of Rust stand beside it, in its `mod tests`, as in `crates/mmo-protocol/src/codec.rs`.
 - `cargo coverage` runs the tests of the workspace in the run that measures them, and fails under 100 percent of the
   lines, the functions and the regions. Each job of the gates that runs the tests of the Rust runs it, so no test runs
   with no measure. A gap closes with a test, or with the removal of the code that no caller needs, and never with a
