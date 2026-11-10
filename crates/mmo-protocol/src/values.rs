@@ -19,7 +19,7 @@ pub struct ZoneId(pub i32);
 ///
 /// Each save of a zone writer carries its epoch, and the keeper refuses a save of an old epoch. So
 /// a writer that lost its zone, but still runs, writes nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Epoch(pub i64);
 
 /// The id of an account, as the table `accounts` of PostgreSQL holds it.

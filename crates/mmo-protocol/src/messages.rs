@@ -1,7 +1,8 @@
 use bitcode::{Decode, Encode};
 
 use crate::{
-  AccountId, Angle, CharacterId, Link, Offset, Password, Position, Tick, Token, Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, Tick, Token, Velocity,
+  ZoneId,
 };
 
 /// A message of a client to the login service, on a stream.
@@ -302,6 +303,93 @@ pub enum ToNeighbour {
   },
 }
 
+/// The state of a character that a save keeps, as the zone writer holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct State {
+  /// The point under the character, in whole centimetres, as the step of `mmo-collide` gives it.
+  pub position: Position,
+  /// The direction of view.
+  pub yaw: Angle,
+  /// The hit points.
+  pub hit_points: i32,
+}
+
+/// The state of one character in a [`Batch`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Save {
+  /// The character.
+  pub character: CharacterId,
+  /// Its state.
+  pub state: State,
+  /// Its version, which must be greater than the saved one.
+  pub version: i64,
+}
+
+/// The saves that a zone writer sends to the keeper, one for each character at most.
+///
+/// A batch goes in one frame, so it holds [`SAVES`] saves at most: a writer with more dirty
+/// characters sends more batches.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Batch {
+  /// The zone of the writer.
+  pub zone: ZoneId,
+  /// The epoch that the writer claimed with [`ToKeeper::Claim`].
+  pub epoch: Epoch,
+  /// The saves.
+  pub saves: Vec<Save>,
+}
+
+/// The most saves of a [`Batch`] that fit in one frame, whatever their values.
+pub const SAVES: usize = 1926;
+
+/// A message of a zone writer to the keeper.
+///
+/// The writer opens one bidirectional stream to the keeper. After the hello of each side, the
+/// keeper answers each message with one [`FromKeeper`], in the order of the messages.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum ToKeeper {
+  /// Asks for the next epoch of a zone. The writer claims it before it writes the entry of the
+  /// zone in the directory.
+  Claim {
+    /// The zone that the writer takes.
+    zone: ZoneId,
+  },
+  /// Asks the keeper to write a batch in one transaction.
+  Save(Batch),
+}
+
+/// The answer of the keeper to a [`ToKeeper`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum FromKeeper {
+  /// The keeper wrote the next epoch of the zone, so it refuses each batch of the writers before.
+  Claimed {
+    /// The epoch of the writer that claimed the zone.
+    epoch: Epoch,
+  },
+  /// The keeper wrote the batch. It wrote only the saves whose version is greater than the saved
+  /// one, so no save of the batch stays to send.
+  Saved {
+    /// The count of the characters that the keeper wrote.
+    written: u64,
+  },
+  /// The keeper wrote nothing.
+  Refused(KeeperRefusal),
+}
+
+/// Why the keeper writes nothing for a [`ToKeeper`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum KeeperRefusal {
+  /// The table `zones` holds no zone of this id.
+  NoZone,
+  /// A newer writer claimed the zone, so the writer of the batch lost it.
+  Stale {
+    /// The epoch of the last writer that claimed the zone.
+    held: Epoch,
+  },
+  /// The keeper cannot write in PostgreSQL now. The writer keeps its saves and sends them again.
+  Unavailable,
+}
+
 #[cfg(test)]
 mod tests {
   use std::fmt::Debug;
@@ -309,16 +397,20 @@ mod tests {
   use bitcode::{DecodeOwned, Encode};
 
   use super::{
-    Attach, Change, Character, Entity, FromClient, FromLogin, Input, Intents, Refusal, Relayed,
-    Snapshot, ToClient, ToLogin, ToNeighbour, ToZone,
+    Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, Input, Intents,
+    KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient, ToKeeper, ToLogin,
+    ToNeighbour, ToZone,
   };
   use crate::{
-    AccountId, Angle, CharacterId, Link, Offset, Password, Position, Tick, Token, Velocity, ZoneId,
-    datagram, decode, encode,
+    AccountId, Angle, CharacterId, Epoch, FRAME, Link, Offset, Password, Position, Tick, Token,
+    Velocity, ZoneId, datagram, decode, encode,
   };
 
   const TOKEN: Token = Token([0xa5; 32]);
   const LINK: Link = Link(0x0123_4567_89ab_cdef);
+
+  const STILL: State =
+    State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(16384), hit_points: 100 };
 
   const MALFORMED: &str = "the bytes are not a message of this version of the protocol";
 
@@ -468,5 +560,40 @@ mod tests {
         Err(MALFORMED.to_owned())
       );
     }
+  }
+  #[test]
+  fn each_message_between_a_writer_and_the_keeper_comes_back_equal() {
+    let state = State { position: Position { x: -102_400, y: 51_200, z: 25 }, ..STILL };
+    let saves = vec![
+      Save { character: CharacterId(42), state, version: 17 },
+      Save { character: CharacterId(i64::MAX), state: STILL, version: 0 },
+    ];
+    round_trip(&[
+      ToKeeper::Claim { zone: ZoneId(7) },
+      ToKeeper::Save(Batch { zone: ZoneId(7), epoch: Epoch(3), saves }),
+      ToKeeper::Save(Batch { zone: ZoneId(-1), epoch: Epoch(0), saves: vec![] }),
+    ]);
+    round_trip(&[
+      FromKeeper::Claimed { epoch: Epoch(4) },
+      FromKeeper::Saved { written: 2 },
+      FromKeeper::Refused(KeeperRefusal::NoZone),
+      FromKeeper::Refused(KeeperRefusal::Stale { held: Epoch(5) }),
+      FromKeeper::Refused(KeeperRefusal::Unavailable),
+    ]);
+  }
+
+  #[test]
+  fn a_batch_of_the_most_saves_fits_in_a_frame_whatever_their_values() {
+    let far = |at: i32, yaw: u16, id: i64| Save {
+      character: CharacterId(id),
+      state: State { position: Position { x: at, y: at, z: at }, yaw: Angle(yaw), hit_points: at },
+      version: id,
+    };
+    let ends = [far(i32::MIN, 0, i64::MIN), far(i32::MAX, u16::MAX, i64::MAX)];
+    let bytes = |count: usize| {
+      let saves = ends.into_iter().cycle().take(count).collect();
+      encode(&ToKeeper::Save(Batch { zone: ZoneId(i32::MIN), epoch: Epoch(i64::MAX), saves })).len()
+    };
+    assert_eq!([bytes(SAVES), bytes(SAVES + 1)], [FRAME - 26, FRAME + 8]);
   }
 }
