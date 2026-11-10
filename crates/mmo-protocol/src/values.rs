@@ -14,6 +14,14 @@ pub struct Tick(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct ZoneId(pub i32);
 
+/// The epoch of a zone: the count of the writers that claimed it, as the table `zones` of
+/// PostgreSQL holds it.
+///
+/// Each save of a zone writer carries its epoch, and the keeper refuses a save of an old epoch. So
+/// a writer that lost its zone, but still runs, writes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Epoch(pub i64);
+
 /// The id of an account, as the table `accounts` of PostgreSQL holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct AccountId(pub i64);

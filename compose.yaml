@@ -1,0 +1,19 @@
+# The stores of the game for local work: PostgreSQL for the durable data, and Redis for the short shared state.
+# docker compose up -d starts them. The tests of mmo-store then read
+# DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+  redis:
+    image: redis:8
+    ports:
+      - "127.0.0.1:6379:6379"
+
+volumes:
+  postgres:

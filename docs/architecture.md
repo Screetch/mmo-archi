@@ -336,7 +336,7 @@ The first tables:
 ```sql
 CREATE TABLE accounts (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  name text NOT NULL UNIQUE,
+  name text NOT NULL UNIQUE CHECK (name = lower(name)),
   password_hash text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -352,10 +352,10 @@ CREATE TABLE characters (
   account_id bigint NOT NULL REFERENCES accounts (id),
   name text NOT NULL UNIQUE,
   zone_id integer NOT NULL REFERENCES zones (id),
-  x real NOT NULL,
-  y real NOT NULL,
-  z real NOT NULL,
-  yaw real NOT NULL,
+  x integer NOT NULL,
+  y integer NOT NULL,
+  z integer NOT NULL,
+  yaw integer NOT NULL CHECK (yaw BETWEEN 0 AND 65535),
   hit_points integer NOT NULL,
   version bigint NOT NULL DEFAULT 0,
   saved_at timestamptz NOT NULL DEFAULT now()
@@ -364,8 +364,9 @@ CREATE TABLE characters (
 CREATE INDEX characters_account ON characters (account_id);
 ```
 
-The type `real` holds an `f32` with no change of its bits, so a save and a load give the same position. The name of an
-account is in lower case before it goes in the table.
+The position is in whole centimetres and the yaw in steps of 1/65536 of a turn, as the step of `mmo-collide` gives them
+and the wire carries them, so a save and a load give the same state. The name of an account is in lower case before it
+goes in the table, and the table refuses a name that is not.
 
 The migrations are SQL files in `crates/mmo-store/migrations/`, which sqlx runs in the order of their numbers. The
 keeper runs them when it starts, under the lock of sqlx, so two keepers do not run them together. The other processes

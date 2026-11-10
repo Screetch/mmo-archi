@@ -116,7 +116,13 @@ jobs:
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov
+      # The tests of mmo-store run against a real PostgreSQL. Each test makes a database of its own and drops it.
+      # One action gives the same PostgreSQL on Linux, on macOS and on Windows, where a runner has no service.
+      - id: postgres
+        uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9
       - run: cargo coverage
+        env:
+          DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
       - uses: ./.github/actions/clear
 
   crate:
@@ -143,7 +149,11 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - id: postgres
+        uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9
       - run: cargo coverage
+        env:
+          DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
       - uses: ./.github/actions/clear
 
   gates:
