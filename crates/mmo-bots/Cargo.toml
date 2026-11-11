@@ -1,0 +1,31 @@
+[package]
+name = "mmo-bots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The load test of mmo-archi: headless clients that log in, wait in the queue and play."
+
+[dependencies]
+futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
+mmo-client = { path = "../mmo-client" }
+mmo-collide = { path = "../mmo-collide" }
+mmo-protocol = { path = "../mmo-protocol" }
+mmo-store = { path = "../mmo-store" }
+redis = { version = "1.8.1", default-features = false, features = ["tokio-comp"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+mmo-client = { path = "../mmo-client", features = ["testing"] }
+mmo-store = { path = "../mmo-store", features = ["testing"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros"] }
+tempfile = "3.27.0"
+
+[[bin]]
+name = "mmo-bots"
+path = "src/bin/bots.rs"
+
+[lints]
+workspace = true

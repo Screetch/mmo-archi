@@ -185,7 +185,10 @@ fix what your change broke, and report what was broken before.
   script/local.sh stop` ends those pids alone, then checks that none stays. The variables `MMO_LOCAL_DIR`,
   `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`, `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT`,
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
-  PostgreSQL. Set the same ports for `check` and `stop`.
+  PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
+  `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
+  `MMO_LOCAL_WORLD_CAP` (100) sets the cap of the world, and `MMO_LOCAL_PROFILE=release` builds and runs the release
+  profile, which the numbers of `docs/architecture.md` need.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole. The tests of `mmo-render`
   draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe
   (`mesa-vulkan-drivers`) on Linux. It needs cargo-llvm-cov, which

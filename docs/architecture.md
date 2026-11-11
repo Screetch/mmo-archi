@@ -526,6 +526,44 @@ the hosts of the servers.
 Each zone writer reports the time of each tick in `ticks:{zone}` (section 3), and each bot reports its bytes up and down.
 The test keeps each report with the commit that it ran. A short stage 1 with 200 bots runs in the gates on Linux.
 
+### How to run it
+
+`sh script/local.sh bots <count>` runs the bots against the local stack that `sh script/local.sh start` makes. The
+bots make their accounts in PostgreSQL, since the login service makes 5 new accounts an hour for one address. Then each
+bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this
+document, `MMO_LOCAL_WORLD_CAP` for the cap of the world, and the variables `MMO_BOTS_*` that the doc of `mmo-bots`
+lists, as `MMO_BOTS_TOWN` for the bots that start in one square of 128 m. A zone writer keeps the player of a closed
+link for 30 s, so wait 35 s between two runs.
+
+### The first local results
+
+These runs used a release build, one zone, one gateway and one keeper, and the bots, on one machine of 10 cores. The
+tick is the time that the zone writer took for a whole tick. The bytes are the datagrams, with no headers. The
+machine was busy with other work in part of the runs, so a result is a range.
+
+| Bots | In town | Tick p50 (ms) | Tick p99 (ms) | Data down, mean (B/s) | Data up (B/s) | Queue |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 300, cap 300 | 0 | 2.0 | 2.5 | 1463 | 511 | 300 more bots wait |
+| 500 | 250 | 6.0 | 7.3 | 6740 | 519 | none |
+| 1000 | 0 | 6.3 to 6.8 | 15 to 20 | 2500 | 520 | none |
+| 1500 | 0 | 12.8 | 28 | 3270 | 520 | none |
+| 2000 | 0 | 17 to 28 | 59 to 100 | 900 to 4000 | 520 | none |
+| 2500 | 1250 | 41 | 93 | 2113 | 520 | none |
+
+- The first 1000 bots meet the budget of 25 ms at the 99th percentile. At 1500 bots the tick passes it, and at 2000 it
+  passes the limit of 50 ms.
+- The gateway uses the most CPU: 0.87 core for 1000 clients and 2.6 cores for 2000, against 0.24 and 0.57 core for the
+  zone writer. The bots use 1.7 cores for 2000. On one machine these processes fill the cores near 1500 bots, so the
+  tick grows from the wait for a core, not from the work of the writer.
+- A sample of the zone writer at 2000 bots puts 22 percent of the time in the tick, about 11 ms for each tick. The
+  movement takes 28 percent of the tick, and the make and encode of the snapshots 42 percent.
+- When the machine is over its load, the bots send their inputs late, the writer refuses them, and the players stand
+  still. So the data down of 2000 bots falls below that of 1000 bots, and it is no measure of the design there.
+- A crowd of 250 bots in one square of 128 m gives a mean of 337 bytes for each snapshot of the 500 bots, and the table
+  of section 7 gives 151 bytes for the same part of players in a town. The mean data down passes the target of 5 KB/s
+  there. The cause is not found yet.
+- With a cap of 300 and 600 bots, 300 bots enter within 2 s and 300 wait in the queue, as section 8 says.
+
 ## 13. The drawing
 
 The crate `mmo-render` draws the world with wgpu to a texture. It has no window: the client gives it the texture of its

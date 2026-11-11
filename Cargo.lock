@@ -1343,6 +1343,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmo-bots"
+version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "mmo-client",
+ "mmo-collide",
+ "mmo-protocol",
+ "mmo-store",
+ "redis",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mmo-client"
 version = "0.0.0"
 dependencies = [

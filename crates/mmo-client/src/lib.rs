@@ -23,8 +23,8 @@ mod input;
 mod login;
 mod play;
 mod predict;
-#[cfg(test)]
-mod testing;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 mod world;
 
 pub use camera::Camera;
