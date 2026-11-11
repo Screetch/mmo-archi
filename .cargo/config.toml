@@ -1,6 +1,8 @@
 # The one home of the bar of the coverage. `cargo coverage` runs the tests of the workspace and measures them in the
 # same run, and fails under 100 percent of the lines, the functions and the regions. The hook cargo-test and each job of
 # the gates that runs the tests run it, so no test runs with no measure.
+# One file is left out: crates/mmo-client/src/window.rs, which only moves the events of a window to the game. No test
+# opens a window, so the gates run the binary mmo-play with --demo --frames under a virtual display instead.
 [alias]
 coverage = [
   "llvm-cov",
@@ -11,4 +13,6 @@ coverage = [
   "100",
   "--fail-under-regions",
   "100",
+  "--ignore-filename-regex",
+  'mmo-client[/\\]src[/\\]window\.rs',
 ]

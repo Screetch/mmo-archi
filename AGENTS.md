@@ -30,6 +30,10 @@ The files beside the crates:
   tests of the workspace and measures them in the same run.
 - `script/` holds the tools of the gates and of the workers: scripts of sh, and `script/title.py`, which the
   `python3` of the system runs with no package.
+- `mmo-play`, the binary of `mmo-client`, is the game client: `cargo run -p mmo-client --bin mmo-play -- --demo` opens its
+  window with no server, and it logs in with the variables `MMO_PLAY_AUTHORITY`, `_LOGIN`, `_GATEWAY`, `_NAME`,
+  `_PASSWORD` and `_CHARACTER`. Never run it on a machine of the owner: it opens a window. The gates run it under a
+  virtual display.
 - `script/character.py` writes `crates/mmo-render/assets/character.glb`, the character of the game, with the
   `python3` of the system. Run it again after a change of the script, and commit the file that it writes.
 - `script/hooks/` holds the hooks of git: `pre-commit` runs the guards of the gates before a commit.
@@ -189,7 +193,8 @@ fix what your change broke, and report what was broken before.
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
   `MMO_LOCAL_WORLD_CAP` (100) sets the cap of the world, and `MMO_LOCAL_PROFILE=release` builds and runs the release
   profile, which the numbers of `docs/architecture.md` need.
-- `cargo coverage`: the tests of the workspace with their coverage, which must be whole. The tests of `mmo-render`
+- `cargo coverage`: the tests of the workspace with their coverage, which must be whole, but for
+  `crates/mmo-client/src/window.rs`, the one file that needs a window, which `.cargo/config.toml` leaves out. The tests of `mmo-render`
   draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe
   (`mesa-vulkan-drivers`) on Linux. It needs cargo-llvm-cov, which
   `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
