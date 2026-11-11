@@ -19,5 +19,9 @@ tokio = { version = "1.54.1", default-features = false, features = ["macros", "n
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 
+[[bin]]
+name = "mmo-check"
+path = "src/bin/check.rs"
+
 [lints]
 workspace = true
