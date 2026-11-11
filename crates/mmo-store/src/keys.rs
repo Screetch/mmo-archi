@@ -72,20 +72,29 @@ pub fn resume(token: &Token) -> String {
   format!("resume:{}", hex(token))
 }
 
-/// The count of the failed logins of the last minute for the name `name`, in lower case.
-pub fn failed(name: &str) -> String {
-  format!("failed:{}", name.to_lowercase())
+/// The count of the failed logins of the last minute for the name `name`, in lower case, from
+/// `address`, which counts as in [`created`].
+pub fn failed(address: IpAddr, name: &str) -> String {
+  format!("failed:{}:{}", host(address), name.to_lowercase())
+}
+
+/// The count of the failed logins of the last 10 minutes from `address` over all names, which
+/// counts as in [`created`].
+pub fn guessed(address: IpAddr) -> String {
+  format!("guessed:{}", host(address))
 }
 
 /// The count of the new accounts of the last hour from `address`. An address of IPv6 counts by its
 /// network of /64, since one host commonly holds the whole network, and an address of IPv4 in
 /// IPv6 counts as its address of IPv4.
 pub fn created(address: IpAddr) -> String {
+  format!("created:{}", host(address))
+}
+
+fn host(address: IpAddr) -> String {
   match address.to_canonical() {
-    IpAddr::V4(address) => format!("created:{address}"),
-    IpAddr::V6(address) => {
-      format!("created:{}/64", Ipv6Addr::from(u128::from(address) >> 64 << 64))
-    }
+    IpAddr::V4(address) => address.to_string(),
+    IpAddr::V6(address) => format!("{}/64", Ipv6Addr::from(u128::from(address) >> 64 << 64)),
   }
 }
 
@@ -107,8 +116,8 @@ mod tests {
   use mmo_protocol::{AccountId, Token, ZoneId};
 
   use super::{
-    DIRECTORY, admissions, admit, admitted, chat, created, failed, presence, queue, queued, resume,
-    session, zone,
+    DIRECTORY, admissions, admit, admitted, chat, created, failed, guessed, presence, queue,
+    queued, resume, session, zone,
   };
 
   #[test]
@@ -130,7 +139,9 @@ mod tests {
         queue(1),
         admitted(1),
         admissions(u32::MAX),
-        failed("AlIce"),
+        failed(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), "AlIce"),
+        failed(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6)), "bob"),
+        guessed(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
         created(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
         created(IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped())),
         created(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6))),
@@ -147,7 +158,9 @@ mod tests {
         "world:1:queue".to_owned(),
         "world:1:admitted".to_owned(),
         "world:4294967295:admissions".to_owned(),
-        "failed:alice".to_owned(),
+        "failed:192.0.2.1:alice".to_owned(),
+        "failed:2001:db8:1:2::/64:bob".to_owned(),
+        "guessed:192.0.2.1".to_owned(),
         "created:192.0.2.1".to_owned(),
         "created:192.0.2.1".to_owned(),
         "created:2001:db8:1:2::/64".to_owned(),

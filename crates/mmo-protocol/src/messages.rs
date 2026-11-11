@@ -77,8 +77,9 @@ pub enum FromLogin {
 pub enum Refusal {
   /// No account has this name and this password.
   Password,
-  /// The client tries too often: the name had 5 failed logins in the last minute, or the address
-  /// of the client made 5 accounts in the last hour.
+  /// The client tries too often: the name had 5 failed logins from the address of the client in
+  /// the last minute, the address had 30 failed logins in the last 10 minutes, or the address made
+  /// 5 accounts in the last hour.
   Throttled,
   /// An account or a character holds the name already.
   Taken,
