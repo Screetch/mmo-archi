@@ -1,6 +1,7 @@
 //! The claim of a zone: the epoch that its writer holds, and the entries that the writer keeps in
 //! Redis, its own in the directory of zones and the presence of each of its players.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Save, ZoneId};
@@ -13,6 +14,9 @@ const ENTRY_LIFE_MS: u64 = 3000;
 
 /// The life of the presence of a player, which the writer renews each 10 s.
 const PRESENCE_LIFE_S: i64 = 30;
+
+/// The life of the ticks of a zone, which each write renews: 10 minutes.
+const TICKS_LIFE_S: i64 = 10 * 60;
 
 static ENTRY: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("entry.lua")));
 
@@ -33,6 +37,9 @@ pub(crate) enum Error {
 pub(crate) enum Entry {
   /// The entry of the zone, with the count of its players.
   Zone { players: usize },
+  /// The count of the ticks of the zone in each bucket of [`keys::ticks`], to add to the counts
+  /// that Redis holds.
+  Ticks(BTreeMap<u32, u64>),
   /// The presence of these players, which the writer holds now.
   Present(Vec<(AccountId, CharacterId)>),
   /// The end of the presence of these accounts.
@@ -90,8 +97,18 @@ impl Claim {
           held => Err(Error::Superseded { zone: self.zone, held, own: self.epoch }),
         }
       }
+      Entry::Ticks(counts) if counts.is_empty() => Ok(()),
       Entry::Present(players) if players.is_empty() => Ok(()),
       Entry::Absent(accounts) if accounts.is_empty() => Ok(()),
+      Entry::Ticks(counts) => {
+        let key = keys::ticks(self.zone);
+        let mut batch = redis::pipe();
+        for (bucket, count) in counts {
+          batch.hincr(&key, bucket, count).ignore();
+        }
+        batch.expire(&key, TICKS_LIFE_S).ignore();
+        Ok(batch.exec_async(&mut redis).await?)
+      }
       Entry::Present(players) => {
         let mut batch = redis::pipe();
         for (account, character) in players {
@@ -115,6 +132,8 @@ impl Claim {
 
 #[cfg(test)]
 mod tests {
+  use std::collections::BTreeMap;
+
   use futures_util::StreamExt;
   use mmo_protocol::Batch;
   use mmo_protocol::{AccountId, CharacterId, Epoch, ZoneId};
@@ -131,9 +150,7 @@ mod tests {
     Claim::open(&redis.url(), MEADOW, Epoch(epoch), "zone-1:4433".to_owned()).await
   }
 
-  fn fields<const N: usize>(
-    fields: [(&str, &str); N],
-  ) -> std::collections::BTreeMap<String, String> {
+  fn fields<const N: usize>(fields: [(&str, &str); N]) -> BTreeMap<String, String> {
     fields.into_iter().map(|(key, value)| (key.to_owned(), value.to_owned())).collect()
   }
 
@@ -210,6 +227,19 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
+  async fn the_ticks_of_a_writer_add_up_in_one_hash_that_lives_10_minutes(_: PgPool) {
+    let redis = Redis::start().await;
+    let claim = claim(&redis, 1).await.expect("a claim");
+    assert_eq!(hash(&redis, "ticks:1").await, fields([]));
+    claim.write(Entry::Ticks(BTreeMap::new())).await.expect("no tick");
+    assert_eq!(life(&redis, "ticks:1").await, -2);
+    claim.write(Entry::Ticks(BTreeMap::from([(3, 18), (7, 2)]))).await.expect("20 ticks");
+    claim.write(Entry::Ticks(BTreeMap::from([(3, 20)]))).await.expect("20 ticks more");
+    assert_eq!(hash(&redis, "ticks:1").await, fields([("3", "38"), ("7", "2")]));
+    assert!((599_000..=600_000).contains(&life(&redis, "ticks:1").await));
+  }
+
+  #[sqlx::test(migrations = false)]
   async fn a_writer_names_each_command_that_redis_refuses(_: PgPool) {
     let redis = Redis::start().await;
     let open = async |url: &str| Claim::open(url, MEADOW, Epoch(1), String::new()).await;
@@ -224,6 +254,9 @@ mod tests {
     let url = user(&redis, "noexpire", &["-expire"]).await;
     let claim = open(&url).await.expect("a claim");
     let refused = claim.write(Entry::Present(present)).await.err();
+    assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
+    let ticks = BTreeMap::from([(3, 1)]);
+    let refused = claim.write(Entry::Ticks(ticks)).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
     let url = user(&redis, "nodel", &["-del"]).await;
     let claim = open(&url).await.expect("a claim");

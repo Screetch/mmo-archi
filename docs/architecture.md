@@ -49,7 +49,7 @@ writer writes the entry of its own zone.
 | --- | --- | --- | --- |
 | Login service | the accounts, the new characters, the sessions, the queue and the set of admitted players | PostgreSQL, Redis | Another copy serves the clients. The queue stays in Redis. |
 | Gateway | nothing | Redis, the message | Its clients connect to another gateway. The game loses no data. |
-| Zone writer | the state of its zone, its entry in the directory, the presence of its players | Redis, PostgreSQL, the messages of its players | A new writer takes the zone in about 10 s. Players lose 10 s of play at most. |
+| Zone writer | the state of its zone, its entry in the directory, the times of its ticks, the presence of its players | Redis, PostgreSQL, the messages of its players | A new writer takes the zone in about 10 s. Players lose 10 s of play at most. |
 | Keeper | the saves of the characters, the items and the epoch of each zone in PostgreSQL | the save batches | The zone writers keep the dirty state and send it again. No save is lost. |
 
 ### The login service
@@ -133,6 +133,7 @@ writers write the directory and the presence again.
 | `session:{token}` | hash | login service | 24 h, or until logout | account, character, zone |
 | `presence:{account}` | hash | zone writer | 30 s, renewed each 10 s | character, zone, epoch |
 | `zone:{id}` | hash | zone writer | 3 s, renewed each 1 s | address, epoch, players |
+| `ticks:{zone}` | hash | zone writer | 10 minutes, renewed each 1 s | the count of the ticks of the writer in each bucket of 250 µs, from 0 to 99.75 ms, which the load test reads |
 | `directory` | channel | zone writer | none | the id of each zone that changed its writer |
 | `world:{w}:queue` | sorted set | login service | none | the queued accounts, by the time that each entered |
 | `world:{w}:admitted` | sorted set | login service | none | the admitted accounts, by the end of their slot |
@@ -521,5 +522,5 @@ the hosts of the servers.
 | 4 | 6000 | the queue | 1000 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
 | 5 | 5000, with faults | the recovery | after a stop of a zone writer, the bots play again within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
 
-Each zone writer reports the time of each tick, and each bot reports its bytes up and down. The test keeps each report
-with the commit that it ran. A short stage 1 with 200 bots runs in the gates on Linux.
+Each zone writer reports the time of each tick in `ticks:{zone}` (section 3), and each bot reports its bytes up and down.
+The test keeps each report with the commit that it ran. A short stage 1 with 200 bots runs in the gates on Linux.

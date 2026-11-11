@@ -11,11 +11,12 @@
 //! The writer keeps its state as sections 2, 5 and 9 of `docs/architecture.md` say. When it
 //! starts it claims its zone from the keeper, which gives it the next epoch, and it writes its
 //! entry in the directory of zones in Redis. It stops when a newer epoch holds the zone, in the
-//! directory or in a refusal of the keeper. Each second it renews its entry. Each 10 s, and when a
-//! player logs out, it sends the players whose state changed to the keeper, each row with its
-//! version, and it keeps the presence of each player in Redis. While the keeper does not take a
-//! batch, the zone keeps the last state of each of those players, and sends it again at the next
-//! save. It reads these variables of its environment:
+//! directory or in a refusal of the keeper. Each second it renews its entry, and adds the time of
+//! each tick that it ran to the hash that `mmo_store::keys::ticks` names, for the load test.
+//! Each 10 s, and when a player logs out, it sends the players whose state changed to the keeper,
+//! each row with its version, and it keeps the presence of each player in Redis. While the keeper
+//! does not take a batch, the zone keeps the last state of each of those players, and sends it
+//! again at the next save. It reads these variables of its environment:
 //!
 //! - `ZONE_ID`: the id of the zone in the table `zones`, as `1`.
 //! - `ZONE_ADDRESS`: the address and the UDP port of the links, as `0.0.0.0:4434`.
