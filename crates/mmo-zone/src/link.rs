@@ -6,18 +6,19 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use mmo_protocol::{
-  AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, Save, ToZone,
-  decode, encode, frame,
+  AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, SAVES, Save,
+  ToZone, decode, encode, frame,
 };
 use mmo_store::{Saved, Store};
 use quinn::{
   Connection, ConnectionError, Endpoint, Incoming, ReadError, RecvStream, VarInt, WriteError,
 };
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time;
 
 use crate::Error;
 use crate::claim::{self, Claim, Entry};
+use crate::keeper::{self, Keeper};
 use crate::zone::{Gateway, Leaver, Refusal, TICKS_PER_SECOND, Zone};
 
 /// The time of one tick: the zone runs 20 ticks each second, as the step of `mmo-collide` does.
@@ -95,17 +96,26 @@ enum Event {
   },
   Saved {
     batch: Batch,
-    result: Result<u64, mmo_store::Error>,
+    result: Result<u64, keeper::Error>,
   },
   Entries(Result<(), claim::Error>),
   Closed(Gateway),
 }
 
-/// Runs the tick of `zone`, and takes the links of the gateways, each in a task of its own, until
-/// the endpoint closes, or a newer writer holds the zone.
-pub(crate) async fn serve(endpoint: Endpoint, zone: Zone, store: Store, claim: Claim) -> Error {
+/// What a zone writer holds once it claimed its zone: the zone, the store that it reads the last
+/// saves from, its claim in Redis, and its link to the keeper, which writes its saves.
+pub(crate) struct Claimed {
+  pub(crate) zone: Zone,
+  pub(crate) store: Store,
+  pub(crate) claim: Claim,
+  pub(crate) keeper: Keeper,
+}
+
+/// Runs the tick of the zone, and takes the links of the gateways, each in a task of its own,
+/// until the endpoint closes, or a newer writer holds the zone.
+pub(crate) async fn serve(endpoint: Endpoint, claimed: Claimed) -> Error {
   let (events, mut heard) = unbounded_channel();
-  let mut writer = Writer::new(zone, store, claim, events);
+  let mut writer = Writer::new(claimed, events);
   let mut count = 0;
   let mut clock = time::interval(TICK);
   loop {
@@ -132,6 +142,8 @@ struct Writer {
   zone: Zone,
   store: Store,
   claim: Claim,
+  /// The batches for the task that sends them to the keeper, one after the other.
+  batches: UnboundedSender<Batch>,
   events: UnboundedSender<Event>,
   gateways: BTreeMap<Gateway, Connection>,
   /// The ticks since the last save, from 0 to `SAVE_EVERY - 1`.
@@ -141,8 +153,12 @@ struct Writer {
 }
 
 impl Writer {
-  fn new(zone: Zone, store: Store, claim: Claim, events: UnboundedSender<Event>) -> Self {
-    Self { zone, store, claim, events, gateways: BTreeMap::new(), ticks: 0, owed: BTreeMap::new() }
+  fn new(claimed: Claimed, events: UnboundedSender<Event>) -> Self {
+    let Claimed { zone, store, claim, keeper } = claimed;
+    let (batches, sent) = unbounded_channel();
+    tokio::spawn(deliver(keeper, sent, events.clone()));
+    let (gateways, owed) = (BTreeMap::new(), BTreeMap::new());
+    Self { zone, store, claim, batches, events, gateways, ticks: 0, owed }
   }
 
   /// Takes an event, and gives the fault that stops the zone writer when the event brings one.
@@ -235,19 +251,12 @@ impl Writer {
     });
   }
 
-  /// Sends `saves` to the store in a task, so the tick goes on.
-  fn send(&self, saves: Vec<Save>) {
-    if saves.is_empty() {
-      return;
+  /// Sends `saves` to the keeper in batches of `SAVES` at most, so each batch fits in one frame.
+  fn send(&self, saves: &[Save]) {
+    for saves in saves.chunks(SAVES) {
+      // The send fails only when the zone writer stopped, and then no one needs the batch.
+      drop(self.batches.send(self.claim.batch(saves.to_vec())));
     }
-    let store = self.store.clone();
-    let events = self.events.clone();
-    let batch = self.claim.batch(saves);
-    tokio::spawn(async move {
-      let result = store.save(&batch).await;
-      // The send fails only when the zone writer stopped, and then no one needs the result.
-      drop(events.send(Event::Saved { batch, result }));
-    });
   }
 
   /// Sends the last state of each player that left, and ends the presence of a player that the
@@ -265,13 +274,14 @@ impl Writer {
       }
     }
     self.write(Entry::Absent(absent));
-    self.send(saves);
+    self.send(&saves);
   }
 
-  /// The store takes a batch, or refuses it. A newer writer of the zone ends this one. Any other
-  /// refusal changes nothing, so each state that the store does not hold goes again at the next
-  /// save, and a player that left keeps its presence until then.
-  fn saved(&mut self, batch: &Batch, result: Result<u64, mmo_store::Error>) -> Option<Error> {
+  /// The keeper takes a batch, or refuses it. A newer writer of the zone ends this one. Any other
+  /// refusal, and a fault of the link to the keeper, change nothing, so the zone keeps the last
+  /// state of each player that the keeper does not hold, and sends it again at the next save. A
+  /// player that left keeps its presence until then.
+  fn saved(&mut self, batch: &Batch, result: Result<u64, keeper::Error>) -> Option<Error> {
     match result {
       Ok(_) => {
         self.zone.saved(&batch.saves);
@@ -280,10 +290,12 @@ impl Writer {
         self.write(Entry::Absent(absent));
         None
       }
-      Err(error @ mmo_store::Error::Epoch { .. }) => Some(error.into()),
+      Err(keeper::Error::Stale { held }) => {
+        Some(claim::Error::Superseded { zone: batch.zone, held: held.0, own: batch.epoch }.into())
+      }
       Err(error) => {
         eprintln!(
-          "the store refuses {} saves, and the zone writer sends them again: {error}",
+          "the keeper takes no batch of {} saves, and the zone writer sends them again: {error}",
           batch.saves.len()
         );
         None
@@ -296,7 +308,7 @@ impl Writer {
   fn keep(&mut self) {
     let mut saves = self.zone.dirty();
     saves.extend(self.owed.values().filter_map(|leaver| leaver.save));
-    self.send(saves);
+    self.send(&saves);
     self.write(Entry::Present(self.zone.present()));
   }
 
@@ -326,6 +338,20 @@ impl Writer {
       self.keep();
     }
     self.leave();
+  }
+}
+
+/// Sends each batch to the keeper in turn, and tells the zone writer its result, until the writer
+/// stops.
+async fn deliver(
+  mut keeper: Keeper,
+  mut batches: UnboundedReceiver<Batch>,
+  events: UnboundedSender<Event>,
+) {
+  while let Some(batch) = batches.recv().await {
+    let result = keeper.save(batch.clone()).await;
+    // The send fails only when the zone writer stopped, and then no one needs the result.
+    drop(events.send(Event::Saved { batch, result }));
   }
 }
 
@@ -395,11 +421,12 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::RefCell;
   use std::collections::BTreeMap;
 
   use mmo_protocol::{
     AccountId, Angle, CharacterId, FromClient, Input, Intents, Link, PROTOCOL, Password, Position,
-    Relayed, State, Tick, ToZone, ZoneId, frame,
+    Relayed, SAVES, Save, State, Tick, ToZone, ZoneId, frame,
   };
   use mmo_store::testing::Redis;
   use mmo_store::{Saved, Store};
@@ -407,9 +434,9 @@ mod tests {
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-  use super::{Claim, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, serve};
+  use super::{Claim, Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
   use crate::config::Config;
-  use crate::peer::{Peer, World, hash, var};
+  use crate::peer::{Keeper, Peer, World, hash, var};
   use crate::zone::Zone;
 
   const MEADOW: ZoneId = ZoneId(1);
@@ -417,9 +444,11 @@ mod tests {
   const START: State =
     State { position: Position { x: 0, y: 0, z: 10_000 }, yaw: Angle(0), hit_points: 100 };
 
-  /// A world of one zone with one character, and its Redis.
+  /// A world of one zone with one character, its Redis and its keeper.
   struct Meadow {
+    world: World,
     redis: Redis,
+    keeper: Keeper,
     store: Store,
     account: AccountId,
     character: CharacterId,
@@ -431,19 +460,29 @@ mod tests {
       store.add_zone(MEADOW, "meadow").await.expect("a zone");
       let account = store.create_account("alice", Password("one".to_owned())).await.expect("one");
       let character = store.create_character(account, "Brom", MEADOW, START).await.expect("Brom");
-      Self { redis: Redis::start().await, store, account, character }
+      let world = World::new();
+      let keeper = Keeper::start(&world, store.clone());
+      Self { world, redis: Redis::start().await, keeper, store, account, character }
+    }
+
+    /// The endpoint of a zone writer, and what it holds once it claimed the zone from the keeper.
+    async fn claimed(&self) -> (Endpoint, Claimed) {
+      let mut vars = self.world.vars("127.0.0.1:0", "postgres://zone@localhost/game", "nope");
+      vars.insert(0, ("ZONE_KEEPER", self.keeper.address()));
+      let config = Config::read(var(vars)).expect("a config");
+      let endpoint = Endpoint::server(config.server, config.address).expect("an endpoint");
+      let mut keeper = keeper::Keeper::new(endpoint.clone(), config.client, config.keeper, true);
+      let epoch = keeper.claim(MEADOW).await.expect("an epoch");
+      let address = "zone-1:4433".to_owned();
+      let claim = Claim::open(&self.redis.url(), MEADOW, epoch, address).await.expect("a claim");
+      let store = self.store.clone();
+      (endpoint, Claimed { zone: Zone::new(MEADOW), store, claim, keeper })
     }
 
     /// A writer that claims the zone, and the events that its tasks send.
-    async fn claim(&self) -> Claim {
-      let epoch = self.store.claim(MEADOW).await.expect("an epoch");
-      let address = "zone-1:4433".to_owned();
-      Claim::open(&self.redis.url(), MEADOW, epoch, address).await.expect("a claim")
-    }
-
     async fn writer(&self) -> (Writer, UnboundedReceiver<Event>) {
       let (events, heard) = unbounded_channel();
-      let writer = Writer::new(Zone::new(MEADOW), self.store.clone(), self.claim().await, events);
+      let writer = Writer::new(self.claimed().await.1, events);
       (writer, heard)
     }
 
@@ -453,12 +492,6 @@ mod tests {
       writer.admit(GATE, Link(1), self.account, &saved).expect("a player");
       saved
     }
-  }
-
-  fn endpoint(world: &World) -> Endpoint {
-    let vars = world.vars("127.0.0.1:0", "postgres://zone@localhost/game", "redis://localhost");
-    let config = Config::read(var(vars)).expect("a config");
-    Endpoint::server(config.server, config.address).expect("an endpoint")
   }
 
   /// Runs ticks of `writer` from `first` to `last`, as the player of link 1 walks east.
@@ -502,11 +535,10 @@ mod tests {
     pool: PgPool,
   ) -> Result<(), mmo_store::Error> {
     let meadow = Meadow::new(pool).await;
-    let world = World::new();
-    let endpoint = endpoint(&world);
+    let world = &meadow.world;
+    let (endpoint, claimed) = meadow.claimed().await;
     let address = endpoint.local_addr().expect("an address");
-    let claim = meadow.claim().await;
-    let zone = tokio::spawn(serve(endpoint.clone(), Zone::new(MEADOW), meadow.store, claim));
+    let zone = tokio::spawn(serve(endpoint.clone(), claimed));
     let gateways = world.gateway(true);
     let hello = |version: u16| {
       let [low, high] = version.to_le_bytes();
@@ -596,9 +628,8 @@ mod tests {
       ]
     );
 
-    let world = World::new();
-    let endpoint = endpoint(&world);
-    let gateways = world.gateway(true);
+    let (endpoint, _) = meadow.claimed().await;
+    let gateways = meadow.world.gateway(true);
     let peer = Peer::link(&gateways, endpoint.local_addr().expect("an address"));
     let accepted = async { endpoint.accept().await.expect("a gateway").await.expect("a link") };
     let (peer, connection) = tokio::join!(peer, accepted);
@@ -617,7 +648,7 @@ mod tests {
   async fn a_writer_that_stops_loses_at_most_10_s_and_its_successor_starts_from_the_last_save(
     pool: PgPool,
   ) {
-    let meadow = Meadow::new(pool).await;
+    let mut meadow = Meadow::new(pool).await;
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
     walk(&mut writer, 1, SAVE_EVERY);
@@ -632,6 +663,7 @@ mod tests {
     assert_eq!(lost, 199);
     assert!(lost <= i32::try_from(SAVE_EVERY).expect("200"), "a stop loses {lost} ticks");
     drop(writer);
+    meadow.keeper.ended().await;
 
     let (mut next, _heard) = meadow.writer().await;
     let last = meadow.join(&mut next).await;
@@ -653,9 +685,7 @@ mod tests {
     let fault = hear(&mut writer, &mut heard, saved_event).await;
     assert_eq!(
       fault.as_deref(),
-      Some(
-        "the database refuses the zone writer: zone 1 is at epoch 2, and the batch is of epoch 1"
-      )
+      Some("zone 1 is held by a writer of epoch 2, which is newer than the epoch 1")
     );
 
     let (mut other, mut heard) = meadow.writer().await;
@@ -704,10 +734,8 @@ mod tests {
     meadow.join(&mut writer).await;
     walk(&mut writer, 1, 3);
     let moved = writer.zone.dirty();
-    let refused = Event::Saved {
-      batch: writer.claim.batch(moved),
-      result: Err(mmo_store::Error::Behind { version: 1 }),
-    };
+    let refused =
+      Event::Saved { batch: writer.claim.batch(moved), result: Err(keeper::Error::Unavailable) };
     assert!(writer.hear(refused).is_none());
     let redis = claim::Error::Redis(redis::Client::open("nope").expect_err("a bad URL"));
     assert!(writer.hear(Event::Entries(Err(redis))).is_none());
@@ -718,7 +746,7 @@ mod tests {
     assert_eq!(writer.owed.len(), 1);
     let refused = Event::Saved {
       batch: writer.claim.batch(vec![writer.owed[&1].save.expect("a save")]),
-      result: Err(mmo_store::Error::Behind { version: 1 }),
+      result: Err(keeper::Error::Unavailable),
     };
     assert!(writer.hear(refused).is_none());
     assert_eq!(writer.owed.len(), 1);
@@ -730,15 +758,62 @@ mod tests {
     writer.write(Entry::Absent(Vec::new()));
   }
 
+  /// Doc lines 105-110: the keeper stops and comes back, and each zone writer sends it again the
+  /// last state of each player that it did not save.
+  #[sqlx::test(migrations = false)]
+  async fn a_keeper_that_stops_and_comes_back_loses_no_save(pool: PgPool) {
+    let mut meadow = Meadow::new(pool).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    meadow.join(&mut writer).await;
+    walk(&mut writer, 1, 3);
+    meadow.keeper.stop();
+    writer.keep();
+    assert_eq!(hear(&mut writer, &mut heard, saved_event).await, None);
+    walk(&mut writer, 4, 6);
+    let logout = ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout });
+    assert!(writer.hear(Event::Message(GATE, logout)).is_none());
+    assert_eq!(hear(&mut writer, &mut heard, saved_event).await, None);
+    let key = format!("presence:{}", meadow.account.0);
+    let unsaved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
+    assert_eq!(
+      (unsaved.version, writer.owed.len(), hash(&meadow.redis, &key).await.len()),
+      (0, 1, 3)
+    );
+
+    meadow.keeper.resume(meadow.store.clone());
+    writer.keep();
+    let empty = |writer: &Writer, _: &Event| writer.owed.is_empty();
+    assert_eq!(hear(&mut writer, &mut heard, empty).await, None);
+    let saved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
+    assert_eq!((saved.version, saved.state.position.x), (2, 180));
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn the_writer_sends_its_saves_in_batches_that_each_fit_in_a_frame(pool: PgPool) {
+    let meadow = Meadow::new(pool).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    let count = i64::try_from(SAVES).expect("1926") + 1;
+    let save = |character| Save { character: CharacterId(character), state: START, version: 1 };
+    writer.send(&(1..=count).map(save).collect::<Vec<_>>());
+    let batches = RefCell::new(Vec::new());
+    let both = |_: &Writer, event: &Event| {
+      if let Event::Saved { batch, result } = event {
+        batches.borrow_mut().push((batch.saves.len(), result.as_ref().ok().copied()));
+      }
+      batches.borrow().len() == 2
+    };
+    assert_eq!(hear(&mut writer, &mut heard, both).await, None);
+    assert_eq!(batches.into_inner(), [(SAVES, Some(1)), (1, Some(0))]);
+  }
+
   #[sqlx::test(migrations = false)]
   async fn a_writer_that_a_newer_epoch_holds_ends_the_serve_of_its_links(pool: PgPool) {
     let meadow = Meadow::new(pool).await;
-    let claim = meadow.claim().await;
+    let (endpoint, claimed) = meadow.claimed().await;
     let url = meadow.redis.url();
     let newer = Claim::open(&url, MEADOW, mmo_protocol::Epoch(9), "z:1".to_owned());
     newer.await.expect("a claim of a newer epoch");
-    let endpoint = endpoint(&World::new());
-    let fault = serve(endpoint, Zone::new(MEADOW), meadow.store.clone(), claim).await;
+    let fault = serve(endpoint, claimed).await;
     assert_eq!(
       fault.to_string(),
       "zone 1 is held by a writer of epoch 9, which is newer than the epoch 1"

@@ -137,18 +137,15 @@ async fn answered(store: &Store, message: ToKeeper) -> FromKeeper {
     ToKeeper::Claim { zone } => store.claim(zone).await.map(|epoch| FromKeeper::Claimed { epoch }),
     ToKeeper::Save(batch) => store.save(&batch).await.map(|written| FromKeeper::Saved { written }),
   };
-  done.unwrap_or_else(|error| FromKeeper::Refused(refusal(error)))
+  done.unwrap_or_else(|error| FromKeeper::Refused(refusal(&error)))
 }
 
-fn refusal(error: mmo_store::Error) -> KeeperRefusal {
-  match error {
-    mmo_store::Error::NoZone { .. } => KeeperRefusal::NoZone,
-    mmo_store::Error::Epoch { held, .. } => KeeperRefusal::Stale { held },
-    error => {
-      eprintln!("the keeper cannot write in PostgreSQL: {error}");
-      KeeperRefusal::Unavailable
-    }
+fn refusal(error: &mmo_store::Error) -> KeeperRefusal {
+  let refusal = error.refusal();
+  if refusal == KeeperRefusal::Unavailable {
+    eprintln!("the keeper cannot write in PostgreSQL: {error}");
   }
+  refusal
 }
 
 #[cfg(test)]

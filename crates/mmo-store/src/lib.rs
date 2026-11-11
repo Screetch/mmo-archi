@@ -19,7 +19,7 @@ pub mod keys;
 pub mod testing;
 mod zones;
 
-use mmo_protocol::{Epoch, ZoneId};
+use mmo_protocol::{Epoch, KeeperRefusal, ZoneId};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
@@ -72,6 +72,20 @@ pub enum Error {
   Database(#[from] sqlx::Error),
 }
 
+impl Error {
+  /// The refusal that the keeper answers to a zone writer for this error: a zone that the table
+  /// does not hold, a batch of an old epoch, or else a fault of PostgreSQL, after which the writer
+  /// sends its batch again.
+  #[must_use]
+  pub const fn refusal(&self) -> KeeperRefusal {
+    match *self {
+      Self::NoZone { .. } => KeeperRefusal::NoZone,
+      Self::Epoch { held, .. } => KeeperRefusal::Stale { held },
+      _ => KeeperRefusal::Unavailable,
+    }
+  }
+}
+
 /// The connections to the database of the game.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -117,7 +131,7 @@ fn taken(error: sqlx::Error, name: &str) -> Error {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    AccountId, Angle, Batch, CharacterId, Epoch, Password, Position, State, ZoneId,
+    AccountId, Angle, Batch, CharacterId, Epoch, KeeperRefusal, Password, Position, State, ZoneId,
   };
   use sqlx::PgPool;
 
@@ -160,7 +174,17 @@ mod tests {
     let closed = "attempted to acquire a connection on a closed pool";
     let mut expected = vec![Some(closed.to_owned()); 10];
     expected[0] = Some(format!("while executing migrations: {closed}"));
+    let unavailable =
+      refusals.iter().flatten().all(|refused| refused.refusal() == KeeperRefusal::Unavailable);
     assert_eq!(refusals.map(|refused| refused.map(|error| error.to_string())).to_vec(), expected);
+    assert!(unavailable, "a closed pool is a fault of PostgreSQL");
     Ok(())
+  }
+
+  #[test]
+  fn the_keeper_refuses_a_lost_zone_and_an_old_epoch_as_such() {
+    let epoch = Error::Epoch { zone: ZoneId(1), held: Epoch(2), given: Epoch(1) };
+    let refusals = [Error::NoZone { zone: ZoneId(1) }, epoch].map(|error| error.refusal());
+    assert_eq!(refusals, [KeeperRefusal::NoZone, KeeperRefusal::Stale { held: Epoch(2) }]);
   }
 }

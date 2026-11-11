@@ -1,7 +1,7 @@
 //! The zone writer of mmo-archi: the one authority of the state of one zone.
 //!
 //! It runs the zone on a fixed tick of 50 ms. It takes the links of the gateways on QUIC: each
-//! [`ToZone::Join`](mmo_protocol::ToZone) loads the last save of a character from PostgreSQL with
+//! [`ToZone::Join`](mmo_protocol::ToZone) reads the last save of a character from PostgreSQL with
 //! `mmo-store`, and the zone takes the player when the save is in this zone and the zone holds
 //! fewer than 2500 players. At each tick it takes at most one input of each player, moves each
 //! body with the step of `mmo-collide`, and sends to each player a
@@ -9,23 +9,28 @@
 //! it, as a delta against the last snapshot that its client acknowledged.
 //!
 //! The writer keeps its state as sections 2, 5 and 9 of `docs/architecture.md` say. When it
-//! starts it claims its zone with [`Store::claim`](mmo_store::Store::claim), which gives it the
-//! next epoch, and it writes its entry in the directory of zones in Redis. It stops when a newer
-//! epoch holds the zone, in the directory or in a refusal of the store. Each second it renews its
-//! entry. Each 10 s, and when a player logs out, it saves the players whose state changed, each
-//! row with its version, and it keeps the presence of each player in Redis. It reads these
-//! variables of its environment:
+//! starts it claims its zone from the keeper, which gives it the next epoch, and it writes its
+//! entry in the directory of zones in Redis. It stops when a newer epoch holds the zone, in the
+//! directory or in a refusal of the keeper. Each second it renews its entry. Each 10 s, and when a
+//! player logs out, it sends the players whose state changed to the keeper, each row with its
+//! version, and it keeps the presence of each player in Redis. While the keeper does not take a
+//! batch, the zone keeps the last state of each of those players, and sends it again at the next
+//! save. It reads these variables of its environment:
 //!
 //! - `ZONE_ID`: the id of the zone in the table `zones`, as `1`.
 //! - `ZONE_ADDRESS`: the address and the UDP port of the links, as `0.0.0.0:4434`.
 //! - `ZONE_PUBLIC`: the address that the gateways dial, as `zone-1.internal:4434`.
-//! - `DATABASE_URL`: the database of the game, as `postgres://zone@db/game`.
+//! - `DATABASE_URL`: the database of the game, which the writer only reads, as
+//!   `postgres://zone@db/game`.
 //! - `REDIS_URL`: the Redis of the game, as `redis://redis:6379`.
+//! - `ZONE_KEEPER`: the address of the keeper, as `keeper.internal:4433`. The name of the host is
+//!   the name that the certificate of the keeper must hold.
 //! - `ZONE_CERTIFICATE` and `ZONE_KEY`: the PEM files of the certificate chain of the zone writer
-//!   and of its private key.
+//!   and of its private key. The writer shows them to each gateway and to the keeper.
 //! - `ZONE_AUTHORITY`: the PEM file of the certificates that sign the certificate of each
-//!   gateway. The zone writer refuses each peer whose certificate they do not sign, so only a
-//!   gateway of the operator relays the intents of a player.
+//!   gateway and of the keeper. The zone writer refuses each peer whose certificate they do not
+//!   sign, so only a gateway of the operator relays the intents of a player, and only the keeper of
+//!   the operator takes the saves.
 //!
 //! It runs until a fault stops it. Then it writes the fault on its standard error and exits with
 //! the code 1, and the process manager starts it again.
@@ -33,6 +38,7 @@
 mod claim;
 mod config;
 mod interest;
+mod keeper;
 mod link;
 #[cfg(test)]
 mod peer;
@@ -48,6 +54,8 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::claim::Claim;
 use crate::config::Config;
+use crate::keeper::Keeper;
+use crate::link::Claimed;
 use crate::zone::Zone;
 
 /// The most connections of the zone writer to PostgreSQL. It reads a character at each join.
@@ -62,6 +70,8 @@ enum Error {
   Store(#[from] mmo_store::Error),
   #[error(transparent)]
   Claim(#[from] claim::Error),
+  #[error(transparent)]
+  Keeper(#[from] keeper::Error),
   #[error("the zone writer cannot take links on its address: {0}")]
   Address(#[from] io::Error),
   #[error("the endpoint of the links closed")]
@@ -78,23 +88,23 @@ async fn main() -> ExitCode {
 /// Runs the zone writer until a fault stops it, and gives that fault.
 async fn write(var: impl Fn(&str) -> Option<String>) -> Error {
   match open(var).await {
-    Ok((endpoint, zone, store, claim)) => link::serve(endpoint, zone, store, claim).await,
+    Ok((endpoint, claimed)) => link::serve(endpoint, claimed).await,
     Err(error) => error,
   }
 }
 
 /// Opens each part of the zone writer. It binds its address before it claims its zone, so a writer
 /// that cannot take links takes no epoch.
-async fn open(
-  var: impl Fn(&str) -> Option<String>,
-) -> Result<(Endpoint, Zone, Store, Claim), Error> {
+async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Claimed), Error> {
   let config = Config::read(var)?;
   let pool = PgPoolOptions::new().max_connections(CONNECTIONS).connect_lazy_with(config.database);
   let store = Store::open(pool).await?;
   let endpoint = Endpoint::server(config.server, config.address)?;
-  let epoch = store.claim(config.zone).await?;
+  let ipv4 = config.address.is_ipv4();
+  let mut keeper = Keeper::new(endpoint.clone(), config.client, config.keeper, ipv4);
+  let epoch = keeper.claim(config.zone).await?;
   let claim = Claim::open(&config.redis, config.zone, epoch, config.public).await?;
-  Ok((endpoint, Zone::new(config.zone), store, claim))
+  Ok((endpoint, Claimed { zone: Zone::new(config.zone), store, claim, keeper }))
 }
 
 #[cfg(test)]
@@ -115,7 +125,7 @@ mod tests {
   use tokio::time;
 
   use super::{Error, write};
-  use crate::peer::{Peer, World, hash, var};
+  use crate::peer::{Keeper, Peer, World, hash, var};
 
   /// The bound of a walk of 26 ticks, which takes 1.3 s.
   const WALK: Duration = Duration::from_secs(20);
@@ -178,7 +188,9 @@ mod tests {
     let world = World::new();
     let address = free();
     let redis = Redis::start().await;
-    let vars = world.vars(&address, connect.to_url_lossy().as_str(), &redis.url());
+    let keeper = Keeper::start(&world, store.clone());
+    let mut vars = world.vars(&address, connect.to_url_lossy().as_str(), &redis.url());
+    vars.insert(0, ("ZONE_KEEPER", keeper.address()));
     let zone = tokio::spawn(write(var(vars)));
     let mut peer = Peer::link(&world.gateway(true), address.parse().expect("an address")).await;
     peer.greet().await;
@@ -261,16 +273,19 @@ mod tests {
       matches!(in_use, Error::Address(ref error) if error.kind() == io::ErrorKind::AddrInUse),
       "{in_use}"
     );
-    let mut faults = Vec::new();
-    for _ in 0..2 {
-      let vars = world.vars(&free(), database.as_str(), "nope");
-      faults.push(write(var(vars)).await.to_string());
-      store.add_zone(ZoneId(1), "meadow").await.ok();
-    }
+    let keeper = Keeper::start(&world, store.clone());
+    let claim = async || {
+      let mut vars = world.vars(&free(), database.as_str(), "nope");
+      vars.insert(0, ("ZONE_KEEPER", keeper.address()));
+      write(var(vars)).await.to_string()
+    };
+    let mut faults = vec![claim().await];
+    store.add_zone(ZoneId(1), "meadow").await?;
+    faults.push(claim().await);
     assert_eq!(
       faults,
       [
-        "the database refuses the zone writer: no zone has the id 1",
+        "the keeper holds no zone of the id that the zone writer claims",
         "Redis refuses the zone writer: Redis URL did not parse - InvalidClientConfig",
       ]
     );
