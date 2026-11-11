@@ -7,6 +7,15 @@ use crate::{
 /// A message of a client to the login service, on a stream.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToLogin {
+  /// Makes an account, then enters the queue as [`ToLogin::Login`] does. The name holds 3 to 16
+  /// letters and digits of ASCII, and the login service puts it in lower case. One address makes 5
+  /// accounts each hour at most.
+  NewAccount {
+    /// The name of the account.
+    name: String,
+    /// The password of the account.
+    password: Password,
+  },
   /// Signs in to an account. The login service puts the name in lower case before it compares it.
   Login {
     /// The name of the account.
@@ -23,6 +32,13 @@ pub enum ToLogin {
   /// Says that the client still waits in the queue, and asks for its place. A queued client sends
   /// it each 5 s, and the login service removes from the queue a client that sends none for 120 s.
   Wait,
+  /// Makes a character of the admitted account at the start of the world, and gets the list of
+  /// [`FromLogin::Characters`] again. The name holds 3 to 16 letters of ASCII, and the login
+  /// service writes it with its first letter in upper case and the rest in lower case.
+  NewCharacter {
+    /// The name of the character.
+    name: String,
+  },
   /// Selects the character to play, from the list of [`FromLogin::Characters`].
   Select {
     /// The character to play.
@@ -35,7 +51,8 @@ pub enum ToLogin {
 pub enum FromLogin {
   /// The login service refuses the last message of the client.
   Refused(Refusal),
-  /// The world is full, and the account waits in its queue.
+  /// The account waits in the queue of the world. Each login enters the queue, also when the world
+  /// has a free slot, so no login passes an account that waits.
   Queued {
     /// The place of the account: the first account of the queue is at 0.
     position: u32,
@@ -60,8 +77,13 @@ pub enum FromLogin {
 pub enum Refusal {
   /// No account has this name and this password.
   Password,
-  /// The name had 5 failed logins in the last minute.
+  /// The client tries too often: the name had 5 failed logins in the last minute, or the address
+  /// of the client made 5 accounts in the last hour.
   Throttled,
+  /// An account or a character holds the name already.
+  Taken,
+  /// The name breaks the rule of [`ToLogin::NewAccount`] or of [`ToLogin::NewCharacter`].
+  Name,
   /// The account is online, and a second session would make a second copy of its character.
   Online,
   /// The account holds no character with this id.
@@ -328,14 +350,18 @@ mod tests {
   #[test]
   fn each_message_of_the_login_link_comes_back_equal() {
     round_trip(&[
+      ToLogin::NewAccount { name: "ada".to_owned(), password: Password("pass word".to_owned()) },
       ToLogin::Login { name: "ada".to_owned(), password: Password("pass word".to_owned()) },
       ToLogin::Resume { token: TOKEN },
       ToLogin::Wait,
+      ToLogin::NewCharacter { name: "Brom".to_owned() },
       ToLogin::Select { character: CharacterId(42) },
     ]);
     let refusals = [
       Refusal::Password,
       Refusal::Throttled,
+      Refusal::Taken,
+      Refusal::Name,
       Refusal::Online,
       Refusal::Character,
       Refusal::Expired,

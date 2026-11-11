@@ -47,19 +47,21 @@ writer writes the entry of its own zone.
 
 | Process | It alone writes | It reads | When it stops |
 | --- | --- | --- | --- |
-| Login service | the accounts, the sessions, the queue and the set of admitted players | PostgreSQL, Redis | Another copy serves the clients. The queue stays in Redis. |
+| Login service | the accounts, the new characters, the sessions, the queue and the set of admitted players | PostgreSQL, Redis | Another copy serves the clients. The queue stays in Redis. |
 | Gateway | nothing | Redis, the message | Its clients connect to another gateway. The game loses no data. |
 | Zone writer | the state of its zone, its entry in the directory, the presence of its players | Redis, PostgreSQL, the messages of its players | A new writer takes the zone in about 10 s. Players lose 10 s of play at most. |
-| Keeper | the characters, the items and the epoch of each zone in PostgreSQL | the save batches | The zone writers keep the dirty state and send it again. No save is lost. |
+| Keeper | the saves of the characters, the items and the epoch of each zone in PostgreSQL | the save batches | The zone writers keep the dirty state and send it again. No save is lost. |
 
 ### The login service
 
-The login service checks a name and a password, and gives a session. It owns the admission queue of section 8. It keeps
+The login service makes the accounts and the characters, checks a name and a password, and gives a session. It owns the
+admission queue of section 8. It keeps
 in its memory nothing that a client needs. Each copy reads and writes Redis, so any copy serves any client. The operator
 runs two copies or more.
 
 A password goes in the table `accounts` as an argon2id hash in the PHC format, with 19 MiB of memory, 2 passes and 1
-lane. One check took 9.8 ms on one core (section 7). A client sends at most 5 failed logins each minute for one name.
+lane. One check took 9.8 ms on one core (section 7). A client sends at most 5 failed logins each minute for one name,
+and one address makes at most 5 accounts each hour.
 
 After a login, the player selects a character. The login service reads the characters of the account and writes the
 session `session:{token}` with the account, the character and the zone of the character. The token is 32 random bytes
@@ -97,7 +99,8 @@ snapshot.
 
 ### The keeper
 
-The keeper is the one writer of the game data in PostgreSQL: the characters, the items and the epoch of each zone. It
+The keeper is the one writer of the game data in PostgreSQL: the saves of the characters, the items and the epoch of
+each zone. The login service only adds a new character, at version 0, which no zone writer holds yet. The keeper
 runs the migrations when it starts (section 9). It receives the save batches of the zone writers, writes each batch in
 one transaction, and acknowledges it. One keeper keeps the count of connections to PostgreSQL small, 16 at most.
 
@@ -123,6 +126,7 @@ writers write the directory and the presence again.
 | `admit:{account}` | string | login service | 60 s | the mark that the account has a slot |
 | `resume:{token}` | string | login service | 120 s | the account of a queued client that can come back |
 | `failed:{name}` | string | login service | 60 s | the count of the failed logins of a name in the last minute |
+| `created:{address}` | string | login service | 1 h | the count of the accounts that an address made in the last hour |
 | `chat:{channel}` | stream and channel | zone writer | the last 1000 lines | the chat |
 
 A token goes in a key as 64 hex digits in lower case. The module `keys` of `mmo-store` makes each key, so no other
@@ -138,7 +142,30 @@ PostgreSQL holds the durable data. Section 9 gives the tables.
 Each link uses QUIC, with the crate quinn 0.11. QUIC gives TLS 1.3, congestion control, reliable streams and unreliable
 datagrams on one connection, so the game has one network stack.
 
-A client opens one connection to a gateway:
+A client first opens one connection to the login service, with one stream. It sends each `ToLogin` and gets a
+`FromLogin` for each, in the order of section 8:
+
+```mermaid
+sequenceDiagram
+  participant C as client
+  participant L as login service
+  C->>L: NewAccount or Login
+  L-->>C: Queued, then Characters when the account gets a slot
+  C->>L: NewCharacter
+  L-->>C: Characters
+  C->>L: Select
+  L-->>C: Session
+```
+
+- `NewAccount` makes an account, and `Login` signs in to one. Each enters the queue of the world.
+- While the account waits, the client sends `Wait` each 5 s. On a new connection, it comes back to its place with
+  `Resume`.
+- When the account has a slot, `NewCharacter` makes a character, and `Select` gives the session token that the client
+  gives to a gateway.
+- A refusal gives its cause: a wrong password, too many tries, a name that is taken or that is not valid, an account
+  that is online, a character of another account, or a place or a slot that ended.
+
+Then the client opens one connection to a gateway:
 
 - Stream 0, which is reliable and ordered, carries the first message, the orders, the chat and the events, as a move to
   another zone.
@@ -316,6 +343,14 @@ entered.
 - Each login enters the queue with `ZADD NX`, also when the world has a free slot, so no login passes an account that
   waits. The next run of the script admits it. An account has one place at most, and a client that comes back keeps its
   first place. An account whose presence stands gets no place.
+- A new account enters the queue as a login does. The name of an account holds 3 to 16 letters and digits of ASCII.
+- An address makes 5 accounts each hour at most, as `created:{address}` counts them. Each try with a valid name counts,
+  also a try with a name that is taken, so the limit also slows a search for the names that exist. An address of IPv6
+  counts by its network of /64, since one host often holds the whole network.
+- A new character is made only while its account has a slot, so the cap of the world limits it as it limits a login.
+  Its name holds 3 to 16 letters of ASCII, with the first letter in upper case and the rest in lower case. It starts
+  in the zone and at the point that the operator gives to the login service. The client then gets the list of the
+  characters of the account again.
 - The client renews `queued:{account}` each 5 s. In the same request it gets its position from `ZRANK` and the length of
   the queue. It also gets an estimate of its wait from the admissions of the last 10 minutes.
 - Each second, each copy of the login service runs one Lua script, which Redis runs as one atomic step. The script reads

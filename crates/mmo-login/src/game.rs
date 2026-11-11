@@ -1,6 +1,6 @@
 //! The fixture of the tests of the crate: a Redis of each test alone, and its database.
 
-use std::net::TcpListener;
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::process::Stdio;
 
 use mmo_protocol::{AccountId, Angle, FromLogin, Password, Position, ToLogin, ZoneId};
@@ -10,10 +10,17 @@ use sqlx::PgPool;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 
-use crate::{Client, Login, World};
+use crate::{Client, Login, Start, World};
 
 pub(crate) const START: State =
   State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
+
+/// The start of the new characters of world 1, in the zone that [`Game::new`] adds.
+pub(crate) const MEADOW: Start =
+  Start { zone: ZoneId(7), position: Position { x: 1200, y: -300, z: 50 } };
+
+/// The address of the clients of the tests.
+pub(crate) const HOME: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
 /// A Redis of one test alone, which ends with the test, and a PostgreSQL database of the test.
 /// `REDIS_SERVER` names the program of Redis, or else `redis-server` of the `PATH` runs.
@@ -65,7 +72,7 @@ impl Game {
 
   /// A copy of the login service of world 1 with a cap of `cap` accounts.
   pub(crate) fn copy(&self, cap: u32) -> Login {
-    Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap })
+    Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap }, MEADOW)
   }
 
   /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
@@ -73,7 +80,7 @@ impl Game {
     let user = format!("denied{denied}");
     self.deny(&user, denied).await;
     let redis = Self::connect(self.port, &user).await;
-    Login::new(self.store.clone(), redis, World { id: 1, cap: 1 })
+    Login::new(self.store.clone(), redis, World { id: 1, cap: 1 }, MEADOW)
   }
 
   /// Takes from `user` of Redis the commands that the rule of ACL `denied` names.
@@ -98,7 +105,7 @@ impl Game {
     let mut entered = Vec::new();
     for name in names {
       let mut client = Client::default();
-      let answer = copy.answer(&mut client, login(name)).await.expect("an answer");
+      let answer = copy.answer(&mut client, HOME, login(name)).await.expect("an answer");
       entered.push((client, answer));
     }
     entered
@@ -111,7 +118,7 @@ impl Game {
   ) -> Vec<FromLogin> {
     let mut answers = Vec::new();
     for (client, _) in clients {
-      answers.push(copy.answer(client, ToLogin::Wait).await.expect("an answer"));
+      answers.push(copy.answer(client, HOME, ToLogin::Wait).await.expect("an answer"));
     }
     answers
   }
