@@ -3,8 +3,8 @@
 
 use std::sync::LazyLock;
 
-use mmo_protocol::{AccountId, CharacterId, Epoch, ZoneId};
-use mmo_store::{Batch, Save, keys};
+use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Save, ZoneId};
+use mmo_store::keys;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
 
@@ -116,9 +116,10 @@ impl Claim {
 #[cfg(test)]
 mod tests {
   use futures_util::StreamExt;
+  use mmo_protocol::Batch;
   use mmo_protocol::{AccountId, CharacterId, Epoch, ZoneId};
+  use mmo_store::keys;
   use mmo_store::testing::Redis;
-  use mmo_store::{Batch, keys};
   use sqlx::PgPool;
 
   use super::{Claim, Entry, Error};

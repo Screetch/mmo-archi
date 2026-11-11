@@ -6,10 +6,10 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use mmo_protocol::{
-  AccountId, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, ToZone, decode,
-  encode, frame,
+  AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, Save, ToZone,
+  decode, encode, frame,
 };
-use mmo_store::{Batch, Save, Saved, Store};
+use mmo_store::{Saved, Store};
 use quinn::{
   Connection, ConnectionError, Endpoint, Incoming, ReadError, RecvStream, VarInt, WriteError,
 };

@@ -5,10 +5,10 @@ use std::mem;
 
 use mmo_collide::{Body, Solid, Terrain, step};
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Snapshot, Tick,
-  Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Save, Snapshot,
+  State, Tick, Velocity, ZoneId,
 };
-use mmo_store::{Save, Saved, State};
+use mmo_store::Saved;
 
 use crate::interest::Grid;
 use crate::view::{History, Sent};
