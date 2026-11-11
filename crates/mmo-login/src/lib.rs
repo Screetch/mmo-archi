@@ -53,6 +53,16 @@ const CREATION_WINDOW: u64 = 60 * 60;
 /// The count of characters in the name of a new account or of a new character.
 const NAME: RangeInclusive<usize> = 3..=16;
 
+/// The count of characters that the password of a new account holds at least.
+const PASSWORD_MIN: usize = 8;
+
+/// The count of bytes that the password of a new account holds at most, which bounds the input of
+/// one hash.
+const PASSWORD_MAX: usize = 128;
+
+/// The count of characters that one account holds at most.
+const CHARACTERS: usize = 8;
+
 /// The hit points of a new character.
 const HIT_POINTS: i32 = 100;
 
@@ -162,8 +172,8 @@ impl Login {
   }
 
   /// Makes the account of `name` and enters it in the queue, as a login does. Each try of an
-  /// address with a valid name counts, also a try of a taken name, so the throttle also slows a
-  /// search of the names that exist.
+  /// address with a valid name and a valid password counts, also a try of a taken name, so the
+  /// throttle also slows a search of the names that exist.
   async fn new_account(
     &self,
     client: &mut Client,
@@ -173,6 +183,9 @@ impl Login {
   ) -> Result<FromLogin, Error> {
     if !NAME.contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
       return Ok(FromLogin::Refused(Refusal::Name));
+    }
+    if password.0.chars().count() < PASSWORD_MIN || password.0.len() > PASSWORD_MAX {
+      return Ok(FromLogin::Refused(Refusal::Weak));
     }
     let created = [(keys::created(from), CREATION_WINDOW)];
     if counted(&mut self.redis.clone(), &created).await?.iter().any(|&made| made > CREATIONS) {
@@ -246,16 +259,21 @@ impl Login {
 
   /// Makes a character of the admitted account at the start of the world, and lists the characters
   /// of the account again. The name is written with its first letter in upper case and the rest
-  /// in lower case, so two names never differ by their case alone.
+  /// in lower case, so two names never differ by their case alone. An account that holds 8
+  /// characters gets no more.
   async fn new_character(&self, client: &mut Client, name: &str) -> Result<FromLogin, Error> {
-    let Client::Admitted { account, .. } = *client else {
+    let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
     };
+    let (account, held) = (*account, characters.len());
     if !NAME.contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphabetic()) {
       return Ok(FromLogin::Refused(Refusal::Name));
     }
     if !self.redis.clone().exists::<_, bool>(keys::admit(account)).await? {
       return Ok(Self::expired(client));
+    }
+    if held >= CHARACTERS {
+      return Ok(FromLogin::Refused(Refusal::Limit));
     }
     let name = name[..1].to_ascii_uppercase() + &name[1..].to_ascii_lowercase();
     let state = State { position: self.start.position, yaw: Angle(0), hit_points: HIT_POINTS };
@@ -397,6 +415,69 @@ mod tests {
     );
     let window: i64 = game.redis.clone().ttl(keys::created(HOME)).await?;
     assert!((3590..=3600).contains(&window), "the window ends in {window} s");
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_new_account_needs_a_password_of_8_characters_and_128_bytes(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let copy = game.copy(1);
+    let (wide, wider) = ("é".repeat(64), "é".repeat(65));
+    let (long, longer) = ("a".repeat(128), "a".repeat(129));
+    let weak = Some(Refusal::Weak);
+    let tries = [
+      ("", weak),
+      ("1234567", weak),
+      ("ééééééé", weak),
+      (longer.as_str(), weak),
+      (wider.as_str(), weak),
+      ("12345678", None),
+      (wide.as_str(), None),
+      (long.as_str(), None),
+    ];
+    let mut answers = Vec::new();
+    for (number, (password, _)) in tries.iter().enumerate() {
+      let message = ToLogin::NewAccount {
+        name: format!("user{number}"),
+        password: Password((*password).to_owned()),
+      };
+      let answer = copy.answer(&mut Client::default(), HOME, message).await?;
+      answers.push(if let FromLogin::Refused(why) = answer { Some(why) } else { None });
+    }
+    assert_eq!(answers, tries.map(|(_, refused)| refused));
+    let made = [
+      game.store.sign_in("user0", Password(String::new())).await?,
+      game.store.sign_in("user7", Password(long)).await?,
+    ];
+    assert_eq!(made.map(|account| account.is_some()), [false, true]);
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn an_account_holds_8_characters_at_most(pool: PgPool) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let copy = game.copy(1);
+    let mut client = Client::default();
+    copy.answer(&mut client, HOME, login("ada")).await?;
+    copy.admit().await?;
+    copy.ready(&mut client).await?;
+    let names = ["Alpha", "Bravo", "Cael", "Dara", "Elan", "Finn", "Gale", "Hana", "Iris"];
+    let mut answers = Vec::new();
+    for name in names {
+      let answer = copy.answer(&mut client, HOME, new_character(name)).await?;
+      answers.push(match answer {
+        FromLogin::Characters(listed) => Ok(listed.len()),
+        other => Err(other),
+      });
+    }
+    let mut expected: Vec<_> = (1..=8).map(Ok).collect();
+    expected.push(Err(FromLogin::Refused(Refusal::Limit)));
+    assert_eq!(answers, expected);
+    assert_eq!(game.store.characters(ada).await?.len(), 8);
+    assert!(matches!(&client, Client::Admitted { characters, .. } if characters.len() == 8));
     Ok(())
   }
 

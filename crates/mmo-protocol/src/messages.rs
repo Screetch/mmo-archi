@@ -8,8 +8,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToLogin {
   /// Makes an account, then enters the queue as [`ToLogin::Login`] does. The name holds 3 to 16
-  /// letters and digits of ASCII, and the login service puts it in lower case. One address makes 5
-  /// accounts each hour at most.
+  /// letters and digits of ASCII, and the login service puts it in lower case. The password holds
+  /// 8 characters at least and 128 bytes at most. One address makes 5 accounts each hour at most.
   NewAccount {
     /// The name of the account.
     name: String,
@@ -34,7 +34,8 @@ pub enum ToLogin {
   Wait,
   /// Makes a character of the admitted account at the start of the world, and gets the list of
   /// [`FromLogin::Characters`] again. The name holds 3 to 16 letters of ASCII, and the login
-  /// service writes it with its first letter in upper case and the rest in lower case.
+  /// service writes it with its first letter in upper case and the rest in lower case. An account
+  /// holds 8 characters at most.
   NewCharacter {
     /// The name of the character.
     name: String,
@@ -91,6 +92,11 @@ pub enum Refusal {
   Character,
   /// The place in the queue or the slot in the world ended, so the client logs in again.
   Expired,
+  /// The password of [`ToLogin::NewAccount`] holds fewer than 8 characters, or more than 128
+  /// bytes.
+  Weak,
+  /// The account holds 8 characters already, so [`ToLogin::NewCharacter`] makes no more.
+  Limit,
 }
 
 /// A character of an account, as the login service lists it.
@@ -366,6 +372,8 @@ mod tests {
       Refusal::Online,
       Refusal::Character,
       Refusal::Expired,
+      Refusal::Weak,
+      Refusal::Limit,
     ];
     round_trip(&refusals.map(FromLogin::Refused));
     round_trip(&[
