@@ -2,9 +2,9 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use mmo_protocol::{AccountId, Angle, FromLogin, Password, Position, ToLogin, ZoneId};
+use mmo_protocol::{AccountId, Angle, FromLogin, Password, Position, State, ToLogin, ZoneId};
+use mmo_store::Store;
 use mmo_store::testing::Redis;
-use mmo_store::{State, Store};
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 

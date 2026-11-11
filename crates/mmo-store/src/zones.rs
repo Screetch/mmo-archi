@@ -1,28 +1,6 @@
-use mmo_protocol::{CharacterId, Epoch, ZoneId};
+use mmo_protocol::{Batch, Epoch, Save, ZoneId};
 
-use crate::{Error, State, Store};
-
-/// The state of one character in a [`Batch`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Save {
-  /// The character.
-  pub character: CharacterId,
-  /// Its state.
-  pub state: State,
-  /// Its version, which must be greater than the saved one.
-  pub version: i64,
-}
-
-/// The saves that a zone writer sends to the keeper, one for each character at most.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Batch {
-  /// The zone of the writer.
-  pub zone: ZoneId,
-  /// The epoch that the writer claimed with [`Store::claim`].
-  pub epoch: Epoch,
-  /// The saves.
-  pub saves: Vec<Save>,
-}
+use crate::{Error, Store};
 
 /// One statement, so one transaction: it locks the row of the zone, and writes only when the batch
 /// carries the epoch of that row.
@@ -87,11 +65,10 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-  use mmo_protocol::{Angle, CharacterId, Epoch, Password, Position, ZoneId};
+  use mmo_protocol::{Angle, Batch, CharacterId, Epoch, Password, Position, Save, State, ZoneId};
   use sqlx::PgPool;
 
-  use super::{Batch, Save};
-  use crate::{Error, Saved, State, Store};
+  use crate::{Error, Saved, Store};
 
   const START: State =
     State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };

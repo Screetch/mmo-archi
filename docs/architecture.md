@@ -112,6 +112,13 @@ each zone. The login service only adds a new character, at version 0, which no z
 runs the migrations when it starts (section 9). It receives the save batches of the zone writers, writes each batch in
 one transaction, and acknowledges it. One keeper keeps the count of connections to PostgreSQL small, 16 at most.
 
+A zone writer opens one stream to the keeper. After the hello of each side, it sends a claim of its zone or a save
+batch, and the keeper answers each in the order of the messages: the epoch that it wrote, the count of the characters
+that it wrote, or a refusal. A batch goes in one frame, so it holds 1926 saves at most, and a writer with more dirty
+characters sends more batches. The keeper refuses a peer that shows no certificate that the authority of the operator
+signed, so only a zone writer of the operator writes the game data. When PostgreSQL fails, the keeper refuses the
+message as unavailable, and the writer keeps its saves and sends them again.
+
 When the keeper stops, each zone writer keeps in memory the last state of each dirty character. That is one row for each
 character, so the memory does not grow with time. It sends the rows again when the keeper comes back. An act that needs
 a commit before the player sees it, as a trade, fails with a message to try again later. A logout waits for its save.

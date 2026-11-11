@@ -1,17 +1,6 @@
-use mmo_protocol::{AccountId, Angle, Character, CharacterId, Position, ZoneId};
+use mmo_protocol::{AccountId, Angle, Character, CharacterId, Position, State, ZoneId};
 
 use crate::{Error, Store, taken};
-
-/// The state of a character that a save keeps, as the zone writer holds it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct State {
-  /// The point under the character, in whole centimetres, as the step of `mmo-collide` gives it.
-  pub position: Position,
-  /// The direction of view.
-  pub yaw: Angle,
-  /// The hit points.
-  pub hit_points: i32,
-}
 
 /// A character as its last save left it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +101,10 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-  use mmo_protocol::{Angle, Character, CharacterId, Password, Position, ZoneId};
+  use mmo_protocol::{Angle, Character, CharacterId, Password, Position, State, ZoneId};
   use sqlx::PgPool;
 
-  use super::{Saved, State};
+  use super::Saved;
   use crate::{Error, Store};
 
   const START: State =

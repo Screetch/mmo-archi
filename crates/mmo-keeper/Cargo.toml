@@ -1,0 +1,25 @@
+[package]
+name = "mmo-keeper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The keeper of mmo-archi: the one process that writes the game data in PostgreSQL."
+
+[dependencies]
+mmo-protocol = { path = "../mmo-protocol" }
+mmo-store = { path = "../mmo-store" }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7.20", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate"] }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

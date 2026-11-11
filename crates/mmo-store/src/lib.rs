@@ -9,8 +9,8 @@
 //!   [`Store::create_character`] and [`Store::characters`].
 //! - A zone writer: [`Store::load`], when it takes a zone or a player.
 //! - The keeper: [`Store::add_zone`], [`Store::claim`], which gives a writer the next
-//!   [`Epoch`](mmo_protocol::Epoch) of its zone, and [`Store::save`], which writes the [`Batch`]
-//!   of a writer.
+//!   [`Epoch`](mmo_protocol::Epoch) of its zone, and [`Store::save`], which writes the
+//!   [`Batch`](mmo_protocol::Batch) of a writer.
 
 mod accounts;
 mod characters;
@@ -23,8 +23,7 @@ use mmo_protocol::{Epoch, ZoneId};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
-pub use characters::{Saved, State};
-pub use zones::{Batch, Save};
+pub use characters::Saved;
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -117,10 +116,12 @@ fn taken(error: sqlx::Error, name: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
-  use mmo_protocol::{AccountId, Angle, CharacterId, Epoch, Password, Position, ZoneId};
+  use mmo_protocol::{
+    AccountId, Angle, Batch, CharacterId, Epoch, Password, Position, State, ZoneId,
+  };
   use sqlx::PgPool;
 
-  use super::{Batch, Error, State, Store};
+  use super::{Error, Store};
 
   #[sqlx::test(migrations = false)]
   async fn a_process_opens_only_a_database_that_the_keeper_migrated(

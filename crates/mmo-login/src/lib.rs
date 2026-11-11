@@ -18,9 +18,10 @@ use std::net::IpAddr;
 use std::ops::RangeInclusive;
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, ToLogin, Token, ZoneId,
+  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, State, ToLogin, Token,
+  ZoneId,
 };
-use mmo_store::{State, Store, keys};
+use mmo_store::{Store, keys};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 
@@ -353,9 +354,9 @@ mod tests {
   use std::net::{IpAddr, Ipv4Addr};
 
   use mmo_protocol::{
-    Angle, Character, CharacterId, FromLogin, Password, Refusal, ToLogin, Token, ZoneId,
+    Angle, Character, CharacterId, FromLogin, Password, Refusal, State, ToLogin, Token, ZoneId,
   };
-  use mmo_store::{Saved, State, Store, keys};
+  use mmo_store::{Saved, Store, keys};
   use redis::AsyncCommands;
   use sqlx::PgPool;
 

@@ -11,6 +11,8 @@
 //! - A gateway and a zone writer: [`ToZone`], and a [`Relayed`] for each message that the gateway
 //!   relays between one link and the writer.
 //! - Two zone writers: [`ToNeighbour`], on a stream.
+//! - A zone writer and the keeper: [`ToKeeper`] and [`FromKeeper`], on one stream that the writer
+//!   opens.
 //!
 //! The state of the world goes on the wire in integers: [`Position`], [`Offset`], [`Velocity`]
 //! and [`Angle`].
@@ -21,8 +23,9 @@ mod values;
 
 pub use codec::{DATAGRAM, Error, FRAME, Frames, Hello, datagram, decode, encode, frame};
 pub use messages::{
-  Attach, Change, Character, Entity, FromClient, FromLogin, Input, Intents, Refusal, Relayed,
-  Snapshot, ToClient, ToLogin, ToNeighbour, ToZone,
+  Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, Input, Intents,
+  KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient, ToKeeper, ToLogin,
+  ToNeighbour, ToZone,
 };
 pub use values::{
   AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, Tick, Token, Velocity,
