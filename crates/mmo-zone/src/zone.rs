@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use mmo_collide::{Body, Solid, Terrain, step};
+use mmo_collide::{Body, Terrain, step};
 use mmo_protocol::{
   AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Save, Snapshot,
   State, Tick, Velocity, ZoneId,
@@ -24,14 +24,6 @@ const KEPT: u32 = 30 * TICKS_PER_SECOND;
 
 /// The zone takes an input whose tick is at most this many ticks after its present tick.
 const REACH: u32 = 4;
-
-/// The side of the square of a zone, in metres. Its corner is at the origin.
-const SIDE: f32 = 1024.0;
-
-/// The blocks on the ground: the x and the z of the middle of each, and its height, in metres.
-/// Each is 4 m wide on the axes x and z.
-const BLOCKS: [[f32; 3]; 4] =
-  [[500.0, 500.0, 2.0], [540.0, 520.0, 0.3], [470.0, 560.0, 1.0], [600.0, 450.0, 3.0]];
 
 /// The number that the zone writer gives to the link of a gateway, which relays the links of its
 /// clients.
@@ -334,16 +326,10 @@ fn speed(from: i32, to: i32) -> i16 {
   i16::try_from((to - from) * ticks).expect("a step moves a body by less than 4 m")
 }
 
-/// The ground of the zone: a flat square, with a few blocks on it.
+/// The ground of the zone, which each client builds in the same way.
 #[expect(clippy::expect_used, reason = "a ground of boxes names no corner of a mesh")]
 fn ground() -> Terrain {
-  let half = SIDE / 2.0;
-  let floor = Solid::Cuboid { center: [half, -0.5, half], half_extents: [half, 0.5, half] };
-  let blocks = BLOCKS.map(|[x, z, top]| Solid::Cuboid {
-    center: [x, top / 2.0, z],
-    half_extents: [2.0, top / 2.0, 2.0],
-  });
-  Terrain::new(&[[floor].as_slice(), &blocks].concat()).expect("a ground of boxes is valid")
+  Terrain::new(&mmo_collide::ground()).expect("a ground of boxes is valid")
 }
 
 #[cfg(test)]

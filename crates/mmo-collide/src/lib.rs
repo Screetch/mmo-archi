@@ -6,6 +6,7 @@
 //! is rounded to the centimetre. So a client that predicts its body and the zone writer that
 //! decides it agree. A change of the result of a step changes the version of the protocol.
 
+mod ground;
 mod terrain;
 
 use core::f32::consts::TAU;
@@ -13,6 +14,7 @@ use core::f32::consts::TAU;
 use parry3d::math::Vector;
 use parry3d::shape::Capsule;
 
+pub use ground::ground;
 use terrain::Hit;
 pub use terrain::{Solid, Terrain, TerrainError};
 
