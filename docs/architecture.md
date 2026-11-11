@@ -440,6 +440,17 @@ keeper runs them when it starts, under the lock of sqlx, so two keepers do not r
 check that the database has each migration that they need, and stop with an error when it does not. A migration only
 adds: a new column has a default, and a column goes away only after no deployed process reads it.
 
+The cap of characters of one account is 8, and the migration `0002_character_cap.sql` keeps it in the table. Its
+trigger `characters_account_cap` runs before each insert in `characters`: it locks the row of the account, counts the
+characters of the account, and refuses a ninth with a `check_violation` on the constraint name
+`characters_account_cap`. The lock makes two inserts of one account count one after the other, so two makers never pass
+the count together. `mmo-store` maps that refusal to `Error::Full`, and the login service maps `Error::Full` to the
+refusal of the limit, `Refusal::Limit`, so no client and no copy of the login service passes the cap. The number 8 lives
+in two places, the SQL of the trigger and the constant `mmo_store::CHARACTERS`, and the test
+`two_makers_of_an_account_at_7_characters_make_one_more_and_never_two` of `mmo-store` pins them together: it fills an
+account to 7 characters, makes two more at once, and asserts that one is refused and that the account then holds
+`CHARACTERS` characters.
+
 A zone writer saves at these times:
 
 - Each 10 s, in one batch: each character whose state changed since its last save. For 2500 players the batch took 5.7
