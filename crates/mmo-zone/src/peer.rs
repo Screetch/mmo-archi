@@ -1,6 +1,7 @@
 //! A world for the tests: an authority, the zone writer and a gateway with their certificates, and
 //! the link of a gateway to the zone writer.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -8,9 +9,11 @@ use std::sync::Arc;
 use mmo_protocol::{
   Frames, Hello, Intents, Link, Relayed, Snapshot, ToZone, decode, encode, frame,
 };
+use mmo_store::testing::Redis;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, ConnectionError, Endpoint, RecvStream, SendStream};
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+use redis::AsyncCommands;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::TempDir;
@@ -63,12 +66,19 @@ impl World {
   }
 
   /// The variables of the writer of zone 1 in this world, at `address` and with the database at
-  /// `database`.
-  pub(crate) fn vars(&self, address: &str, database: &str) -> Vec<(&'static str, String)> {
+  /// `database` and the Redis at `redis`.
+  pub(crate) fn vars(
+    &self,
+    address: &str,
+    database: &str,
+    redis: &str,
+  ) -> Vec<(&'static str, String)> {
     vec![
       ("ZONE_ID", "1".to_owned()),
       ("ZONE_ADDRESS", address.to_owned()),
+      ("ZONE_PUBLIC", "zone-1:4433".to_owned()),
       ("DATABASE_URL", database.to_owned()),
+      ("REDIS_URL", redis.to_owned()),
       ("ZONE_CERTIFICATE", self.path("zone.pem")),
       ("ZONE_KEY", self.path("zone.key")),
       ("ZONE_AUTHORITY", self.path("authority.pem")),
@@ -102,6 +112,20 @@ impl World {
 /// The value of each variable that `vars` holds.
 pub(crate) fn var(vars: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
   move |name| vars.iter().find(|(key, _)| *key == name).map(|(_, value)| value.clone())
+}
+
+/// The fields of a hash of `redis`.
+pub(crate) async fn hash(redis: &Redis, key: &str) -> BTreeMap<String, String> {
+  let client = redis::Client::open(redis.url()).expect("a URL");
+  let mut connection = client.get_multiplexed_async_connection().await.expect("a connection");
+  connection.hgetall(key).await.expect("a hash")
+}
+
+/// The milliseconds that the key of `redis` still lives.
+pub(crate) async fn life(redis: &Redis, key: &str) -> i64 {
+  let client = redis::Client::open(redis.url()).expect("a URL");
+  let mut connection = client.get_multiplexed_async_connection().await.expect("a connection");
+  redis::cmd("PTTL").arg(key).query_async(&mut connection).await.expect("a life")
 }
 
 /// A gateway, with the stream that it opened to the zone writer.

@@ -1,14 +1,12 @@
 //! The fixture of the tests of the crate: a Redis of each test alone, and its database.
 
-use std::net::{IpAddr, Ipv4Addr, TcpListener};
-use std::process::Stdio;
+use std::net::{IpAddr, Ipv4Addr};
 
 use mmo_protocol::{AccountId, Angle, FromLogin, Password, Position, ToLogin, ZoneId};
+use mmo_store::testing::Redis;
 use mmo_store::{State, Store};
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
-use tokio::io::{AsyncBufReadExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdout, Command};
 
 use crate::{Client, Login, Start, World};
 
@@ -25,9 +23,7 @@ pub(crate) const HOME: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// A Redis of one test alone, which ends with the test, and a PostgreSQL database of the test.
 /// `REDIS_SERVER` names the program of Redis, or else `redis-server` of the `PATH` runs.
 pub(crate) struct Game {
-  _process: Child,
-  _log: Lines<BufReader<ChildStdout>>,
-  port: u16,
+  server: Redis,
   pub(crate) redis: ConnectionManager,
   pub(crate) store: Store,
   /// The URL of the database of the test, which the keeper migrated.
@@ -42,26 +38,9 @@ impl Game {
     let database = format!("{}/{name}", base.rsplit_once('/').expect("a URL with a database").0);
     let store = Store::migrate(pool).await.expect("the keeper migrates the database");
     store.add_zone(ZoneId(7), "meadow").await.expect("a zone");
-    let port = TcpListener::bind("127.0.0.1:0")
-      .and_then(|free| free.local_addr())
-      .expect("the system gives a free port")
-      .port();
-    let program = std::env::var("REDIS_SERVER").unwrap_or(String::from("redis-server"));
-    let mut process = Command::new(program)
-      .args(["--port", &port.to_string(), "--bind", "127.0.0.1", "--save", ""])
-      .args(["--appendonly", "no"])
-      .stdout(Stdio::piped())
-      .kill_on_drop(true)
-      .spawn()
-      .expect("REDIS_SERVER, or redis-server of the PATH, starts");
-    let mut log = BufReader::new(process.stdout.take().expect("a piped log")).lines();
-    while let Some(line) = log.next_line().await.expect("the log of Redis reads") {
-      if line.contains("Ready to accept connections") {
-        break;
-      }
-    }
-    let redis = Self::connect(port, "default").await;
-    Self { _process: process, _log: log, port, redis, store, database }
+    let server = Redis::start().await;
+    let redis = Self::connect(server.port(), "default").await;
+    Self { server, redis, store, database }
   }
 
   async fn connect(port: u16, user: &str) -> ConnectionManager {
@@ -79,7 +58,7 @@ impl Game {
   pub(crate) async fn denied(&self, denied: &str) -> Login {
     let user = format!("denied{denied}");
     self.deny(&user, denied).await;
-    let redis = Self::connect(self.port, &user).await;
+    let redis = Self::connect(self.server.port(), &user).await;
     Login::new(self.store.clone(), redis, World { id: 1, cap: 1 }, MEADOW)
   }
 
@@ -94,7 +73,7 @@ impl Game {
 
   /// The URL of the Redis of the test.
   pub(crate) fn redis_url(&self) -> String {
-    format!("redis://127.0.0.1:{}", self.port)
+    self.server.url()
   }
 
   pub(crate) async fn account(&self, name: &str) -> AccountId {

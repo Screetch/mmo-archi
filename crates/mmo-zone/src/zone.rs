@@ -1,13 +1,14 @@
 //! The state of the zone, which its writer alone decides.
 
 use std::collections::BTreeMap;
+use std::mem;
 
 use mmo_collide::{Body, Solid, Terrain, step};
 use mmo_protocol::{
-  Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Snapshot, Tick, Velocity,
-  ZoneId,
+  AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Snapshot, Tick,
+  Velocity, ZoneId,
 };
-use mmo_store::Saved;
+use mmo_store::{Save, Saved, State};
 
 use crate::interest::Grid;
 use crate::view::{History, Sent};
@@ -16,7 +17,7 @@ use crate::view::{History, Sent};
 const CAP: usize = 2500;
 
 /// The ticks of one second.
-const TICKS_PER_SECOND: u32 = 20;
+pub(crate) const TICKS_PER_SECOND: u32 = 20;
 
 /// The ticks that the zone keeps the player of a link that closed: 30 s.
 const KEPT: u32 = 30 * TICKS_PER_SECOND;
@@ -46,6 +47,15 @@ pub(crate) enum Refusal {
   Full,
 }
 
+/// A player that left the zone, and the save that its last state needs. The writer keeps the
+/// presence of the account until the store acknowledges that save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Leaver {
+  pub(crate) account: AccountId,
+  /// None when the store holds the last state already.
+  pub(crate) save: Option<Save>,
+}
+
 /// The state of one zone: its players on the ground, at its present tick.
 pub(crate) struct Zone {
   id: ZoneId,
@@ -55,9 +65,15 @@ pub(crate) struct Zone {
   /// The character of each link that the zone takes messages from.
   links: BTreeMap<u64, i64>,
   history: History,
+  left: Vec<Leaver>,
 }
 
 struct Player {
+  account: AccountId,
+  /// The state that the store acknowledged last.
+  saved: State,
+  /// The version of the last save that the zone sent, which each new save passes by 1.
+  version: i64,
   body: Body,
   view: Angle,
   velocity: Velocity,
@@ -81,7 +97,44 @@ impl Zone {
       players: BTreeMap::new(),
       links: BTreeMap::new(),
       history: History::new(),
+      left: Vec::new(),
     }
+  }
+
+  /// The count of the players that the zone holds, linked or not.
+  pub(crate) fn count(&self) -> usize {
+    self.players.len()
+  }
+
+  /// The account and the character of each player that has a link.
+  pub(crate) fn present(&self) -> Vec<(AccountId, CharacterId)> {
+    let linked = |player: &&Player| matches!(player.attachment, Attachment::Linked { .. });
+    let players = self.players.iter().map(|(id, player)| (player, id));
+    players
+      .filter(|(player, _)| linked(player))
+      .map(|(p, id)| (p.account, CharacterId(*id)))
+      .collect()
+  }
+
+  /// The save of each player whose state the store does not hold, each with the next version of
+  /// its player. A save that the store does not acknowledge comes again with a greater version.
+  pub(crate) fn dirty(&mut self) -> Vec<Save> {
+    self.players.iter_mut().filter_map(|(id, player)| player.unsaved(*id)).collect()
+  }
+
+  /// Notes that the store holds `saves`, so [`Zone::dirty`] gives a player again only after it
+  /// moved.
+  pub(crate) fn saved(&mut self, saves: &[Save]) {
+    for save in saves {
+      if let Some(player) = self.players.get_mut(&save.character.0) {
+        player.saved = save.state;
+      }
+    }
+  }
+
+  /// The players that left since the last call.
+  pub(crate) fn leavers(&mut self) -> Vec<Leaver> {
+    mem::take(&mut self.left)
   }
 
   /// Takes the player of `saved` on `link`. A player that the zone holds already keeps its state,
@@ -90,6 +143,7 @@ impl Zone {
     &mut self,
     gateway: Gateway,
     link: Link,
+    account: AccountId,
     saved: &Saved,
   ) -> Result<(), Refusal> {
     if saved.zone != self.id {
@@ -106,7 +160,7 @@ impl Zone {
       }
       None if full => return Err(Refusal::Full),
       None => {
-        self.players.insert(saved.character.0, Player::new(saved, attachment));
+        self.players.insert(saved.character.0, Player::new(account, saved, attachment));
       }
     }
     self.links.insert(link.0, saved.character.0);
@@ -136,8 +190,15 @@ impl Zone {
   /// The client of `link` ends the play of its character, which leaves the zone at once.
   pub(crate) fn logout(&mut self, gateway: Gateway, link: Link) {
     if let Some(id) = self.unlink(gateway, link) {
-      self.players.remove(&id);
+      self.drop_player(id);
     }
+  }
+
+  fn drop_player(&mut self, id: i64) {
+    let left = self.players.remove(&id).into_iter();
+    self
+      .left
+      .extend(left.map(|mut player| Leaver { account: player.account, save: player.unsaved(id) }));
   }
 
   /// Keeps each input of `intents` for one of the next 4 ticks, when `intents` names this zone and
@@ -171,9 +232,12 @@ impl Zone {
   pub(crate) fn tick(&mut self) -> Vec<(Gateway, Relayed<Snapshot>)> {
     self.tick = Tick(self.tick.0 + 1);
     let now = self.tick;
-    self.players.retain(|_, player| {
-      !matches!(player.attachment, Attachment::Away { since } if now.0 - since.0 >= KEPT)
-    });
+    let expired = |player: &&Player| matches!(player.attachment, Attachment::Away { since } if now.0 - since.0 >= KEPT);
+    let gone: Vec<i64> =
+      self.players.iter().filter(|(_, p)| expired(p)).map(|(id, _)| *id).collect();
+    for id in gone {
+      self.drop_player(id);
+    }
     for player in self.players.values_mut() {
       player.step(&self.terrain, now);
     }
@@ -206,9 +270,12 @@ impl Zone {
 }
 
 impl Player {
-  fn new(saved: &Saved, attachment: Attachment) -> Self {
+  fn new(account: AccountId, saved: &Saved, attachment: Attachment) -> Self {
     let Position { x, y, z } = saved.state.position;
     Self {
+      account,
+      saved: saved.state,
+      version: saved.version,
       body: Body { position: [x, y, z], vertical_speed: 0 },
       view: saved.state.yaw,
       velocity: Velocity { x: 0, y: 0, z: 0 },
@@ -232,6 +299,19 @@ impl Player {
     let [x, y, z] = [0, 1, 2].map(|axis| speed(self.body.position[axis], moved.position[axis]));
     self.velocity = Velocity { x, y, z };
     self.body = moved;
+  }
+
+  fn state(&self) -> State {
+    let [x, y, z] = self.body.position;
+    State { position: Position { x, y, z }, yaw: self.view, hit_points: self.hit_points }
+  }
+
+  fn unsaved(&mut self, id: i64) -> Option<Save> {
+    let state = self.state();
+    (state != self.saved).then(|| {
+      self.version += 1;
+      Save { character: CharacterId(id), state, version: self.version }
+    })
   }
 
   fn entity(&self, id: CharacterId) -> Entity {
@@ -269,14 +349,15 @@ fn ground() -> Terrain {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed, Snapshot,
-    Tick, Velocity, ZoneId,
+    AccountId, Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed,
+    Snapshot, Tick, Velocity, ZoneId,
   };
-  use mmo_store::{Saved, State};
+  use mmo_store::{Save, Saved, State};
 
-  use super::{CAP, Gateway, KEPT, Refusal, Zone};
+  use super::{CAP, Gateway, KEPT, Leaver, Refusal, Zone};
 
   const MEADOW: ZoneId = ZoneId(1);
+  const ACCOUNT: AccountId = AccountId(3);
   const GATE: Gateway = Gateway(1);
   const EAST: Option<Angle> = Some(Angle(0));
   const NORTH: Angle = Angle(16384);
@@ -322,7 +403,7 @@ mod tests {
   #[test]
   fn a_player_walks_with_the_inputs_of_its_link_and_its_client_gets_each_delta() {
     let mut zone = Zone::new(MEADOW);
-    assert_eq!(zone.join(GATE, Link(1), &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
     assert_eq!(zone.tick(), [full(1, 1, vec![entity(7, 10_030, 600, NORTH)])]);
     zone.intents(GATE, Link(1), &intents(Some(1), [2, 3, 4], EAST));
@@ -348,7 +429,7 @@ mod tests {
   #[test]
   fn the_zone_takes_only_the_inputs_of_the_next_4_ticks_on_the_link_of_a_player() {
     let mut zone = Zone::new(MEADOW);
-    assert_eq!(zone.join(GATE, Link(1), &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     let elsewhere = Intents { zone: ZoneId(2), ..intents(None, [1, 2, 3], EAST) };
     zone.intents(GATE, Link(1), &elsewhere);
     zone.intents(GATE, Link(2), &intents(None, [1, 2, 3], EAST));
@@ -361,12 +442,16 @@ mod tests {
   fn the_zone_refuses_a_character_of_another_zone_and_a_player_past_its_cap() {
     let mut zone = Zone::new(MEADOW);
     let elsewhere = Saved { zone: ZoneId(2), ..saved(1, 0) };
-    assert_eq!(zone.join(GATE, Link(1), &elsewhere), Err(Refusal::Elsewhere { zone: ZoneId(2) }));
+    assert_eq!(
+      zone.join(GATE, Link(1), ACCOUNT, &elsewhere),
+      Err(Refusal::Elsewhere { zone: ZoneId(2) })
+    );
     for id in 0..CAP {
       let id = i64::try_from(id).unwrap();
-      assert_eq!(zone.join(GATE, Link(id.unsigned_abs()), &saved(id, 0)), Ok(()));
+      assert_eq!(zone.join(GATE, Link(id.unsigned_abs()), ACCOUNT, &saved(id, 0)), Ok(()));
     }
-    let refused = zone.join(GATE, Link(u64::MAX), &saved(-1, 0)).map_err(|why| why.to_string());
+    let refused =
+      zone.join(GATE, Link(u64::MAX), ACCOUNT, &saved(-1, 0)).map_err(|why| why.to_string());
     assert_eq!(refused, Err("the zone holds 2500 players".to_owned()));
     let elsewhere = Refusal::Elsewhere { zone: ZoneId(2) }.to_string();
     assert_eq!(elsewhere, "the character is in zone 2");
@@ -375,8 +460,8 @@ mod tests {
   #[test]
   fn a_player_whose_link_closes_stays_30_s_and_comes_back_to_its_state() {
     let mut zone = Zone::new(MEADOW);
-    assert_eq!(zone.join(GATE, Link(1), &saved(7, 10_000)), Ok(()));
-    assert_eq!(zone.join(GATE, Link(2), &saved(8, 10_100)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(2), ACCOUNT, &saved(8, 10_100)), Ok(()));
     zone.intents(GATE, Link(2), &intents(None, [1, 2, 3], EAST));
     zone.tick();
     zone.leave(Gateway(2), Link(2));
@@ -384,24 +469,24 @@ mod tests {
     zone.leave(GATE, Link(2));
     let both = vec![entity(7, 10_000, 0, Angle(0)), entity(8, 10_190, 0, NORTH)];
     assert_eq!(run(&mut zone, KEPT - 1), [full(1, KEPT, both.clone())]);
-    assert_eq!(zone.join(GATE, Link(3), &saved(8, 0)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(3), ACCOUNT, &saved(8, 0)), Ok(()));
     let back = run(&mut zone, 1);
     let mirrored = vec![both[1], both[0]];
     assert_eq!(back, [full(1, KEPT + 1, both), full(3, KEPT + 1, mirrored)]);
-    assert_eq!(zone.join(GATE, Link(4), &saved(8, 0)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(4), ACCOUNT, &saved(8, 0)), Ok(()));
     zone.intents(GATE, Link(3), &intents(None, [KEPT + 2; 3], EAST));
     zone.close(GATE);
     assert_eq!(run(&mut zone, KEPT - 1), []);
     zone.close(GATE);
-    assert_eq!(zone.join(GATE, Link(5), &saved(9, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(5), ACCOUNT, &saved(9, 10_000)), Ok(()));
     assert_eq!(run(&mut zone, 1), [full(5, 2 * KEPT + 1, vec![entity(9, 10_000, 0, Angle(0))])]);
   }
 
   #[test]
   fn a_player_that_logs_out_leaves_the_zone_at_once() {
     let mut zone = Zone::new(MEADOW);
-    assert_eq!(zone.join(GATE, Link(1), &saved(7, 10_000)), Ok(()));
-    assert_eq!(zone.join(GATE, Link(2), &saved(8, 10_100)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(2), ACCOUNT, &saved(8, 10_100)), Ok(()));
     zone.logout(Gateway(2), Link(2));
     zone.logout(GATE, Link(3));
     zone.logout(GATE, Link(2));
@@ -416,7 +501,7 @@ mod tests {
       state: State { position: Position { x: 49_000, y: 0, z: 50_000 }, ..saved(7, 0).state },
       ..saved(7, 0)
     };
-    assert_eq!(zone.join(GATE, Link(1), &start), Ok(()));
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &start), Ok(()));
     let mut last = Vec::new();
     for tick in 0..40 {
       zone.intents(GATE, Link(1), &intents(None, [tick + 1, tick + 2, tick + 3], EAST));
@@ -425,5 +510,50 @@ mod tests {
     let stopped =
       Entity { position: Position { x: 49_757, y: 0, z: 50_000 }, ..entity(7, 0, 0, NORTH) };
     assert_eq!(last, [full(1, 40, vec![stopped])]);
+  }
+
+  #[test]
+  fn a_player_that_moved_goes_to_the_store_again_with_a_greater_version_until_it_is_acknowledged() {
+    let mut zone = Zone::new(MEADOW);
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(2), AccountId(4), &saved(8, 10_100)), Ok(()));
+    assert_eq!(zone.dirty(), []);
+    zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
+    zone.tick();
+    let moved =
+      State { position: Position { x: 10_030, y: 0, z: 10_000 }, yaw: NORTH, hit_points: 100 };
+    let save = |version| Save { character: CharacterId(7), state: moved, version };
+    assert_eq!(zone.dirty(), [save(1)]);
+    assert_eq!(zone.dirty(), [save(2)]);
+    zone.saved(&[save(2), Save { character: CharacterId(99), ..save(1) }]);
+    assert_eq!(zone.dirty(), []);
+    zone.leave(GATE, Link(2));
+    assert_eq!((zone.count(), zone.present()), (2, vec![(ACCOUNT, CharacterId(7))]));
+  }
+
+  #[test]
+  fn a_player_that_leaves_for_good_takes_its_unsaved_state_to_the_store() {
+    let mut zone = Zone::new(MEADOW);
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(2), AccountId(4), &saved(8, 10_100)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(3), AccountId(5), &saved(9, 10_200)), Ok(()));
+    zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
+    zone.tick();
+    zone.logout(GATE, Link(1));
+    zone.logout(GATE, Link(2));
+    zone.leave(GATE, Link(3));
+    drop(run(&mut zone, KEPT));
+    let moved =
+      State { position: Position { x: 10_030, y: 0, z: 10_000 }, yaw: NORTH, hit_points: 100 };
+    let save = Save { character: CharacterId(7), state: moved, version: 1 };
+    assert_eq!(
+      zone.leavers(),
+      [
+        Leaver { account: ACCOUNT, save: Some(save) },
+        Leaver { account: AccountId(4), save: None },
+        Leaver { account: AccountId(5), save: None },
+      ]
+    );
+    assert_eq!(zone.leavers(), []);
   }
 }
