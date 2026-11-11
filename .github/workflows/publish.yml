@@ -88,7 +88,9 @@ jobs:
           # The tar of Windows reads a path with a colon, as D:\a\_temp, as the name of a remote host, so tar takes
           # paths from the folder of the runner.
           (cd "$RUNNER_TEMP" && tar -C pack -czf "out/$folder.tar.gz" "$folder")
-          (cd "$RUNNER_TEMP/out" && shasum -a 256 "$folder.tar.gz" > "$folder.tar.gz.sha256")
+          # The bash of Windows has sha256sum and no shasum, and a runner of macOS can lack sha256sum.
+          sum=sha256sum; command -v sha256sum > /dev/null || sum="shasum -a 256"
+          (cd "$RUNNER_TEMP/out" && $sum "$folder.tar.gz" > "$folder.tar.gz.sha256")
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binaries-${{ matrix.system }}
