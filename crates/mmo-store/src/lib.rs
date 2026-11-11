@@ -15,6 +15,8 @@
 mod accounts;
 mod characters;
 pub mod keys;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod zones;
 
 use mmo_protocol::{Epoch, ZoneId};

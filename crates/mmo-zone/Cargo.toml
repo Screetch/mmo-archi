@@ -8,16 +8,20 @@ description = "The zone writer of mmo-archi: the one authority of the state of o
 
 [dependencies]
 mmo-collide = { path = "../mmo-collide" }
+mmo-link = { path = "../mmo-link" }
 mmo-protocol = { path = "../mmo-protocol" }
 mmo-store = { path = "../mmo-store" }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
+futures-util = { version = "0.3.34", default-features = false }
+mmo-store = { path = "../mmo-store", features = ["testing"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate"] }
 tempfile = "3.27.0"
 

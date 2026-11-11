@@ -996,6 +996,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmo-link"
+version = "0.0.0"
+dependencies = [
+ "quinn",
+ "rcgen",
+ "rustls",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "mmo-login"
 version = "0.0.0"
 dependencies = [
@@ -1034,11 +1045,14 @@ dependencies = [
 name = "mmo-zone"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "mmo-collide",
+ "mmo-link",
  "mmo-protocol",
  "mmo-store",
  "quinn",
  "rcgen",
+ "redis",
  "rustls",
  "sqlx",
  "tempfile",

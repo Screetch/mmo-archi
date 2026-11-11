@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish.workspace = true
 description = "The data of mmo-archi: the migrations and the queries of PostgreSQL, and the keys of Redis."
 
+[features]
+# A Redis of one test alone, for the tests of the crates that use the keys.
+testing = ["tokio/process", "tokio/io-util"]
+
 [dependencies]
 argon2 = "0.6.0"
 mmo-protocol = { path = "../mmo-protocol" }

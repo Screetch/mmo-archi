@@ -98,6 +98,11 @@ reads the presence keys of its zone in Redis, and loads the last save of each of
 gateways see the change of the directory and send the players to the new writer, which sends each player a full
 snapshot.
 
+Until the keeper stands, the writer claims its epoch with `Store::claim` and saves with `Store::save` itself, with the
+same `Batch` that it will send to the keeper, so the keeper changes where the batch goes and no rule of this section.
+The writer renews the presence of each of its players each 10 s with the save, and it stops, for the process manager to
+start it again, when the store refuses a batch of its epoch or when the entry of its zone holds a newer epoch.
+
 ### The keeper
 
 The keeper is the one writer of the game data in PostgreSQL: the saves of the characters, the items and the epoch of
@@ -178,6 +183,11 @@ Then the client opens one connection to a gateway:
 A message on a stream is a frame: its length as an unsigned LEB128 number, then its bytes. A frame holds 64 KiB at most,
 and a reader closes the stream on a larger frame. A datagram holds one message with no length, of 1100 bytes at most.
 QUIC needs a path of 1200 bytes at least, so a datagram of 1100 bytes and its headers always fit.
+
+A link between two servers uses TLS with a certificate on each side: a server takes a link only from a peer whose
+certificate an authority of the operator signed, so a process that the operator did not start takes no part in the game.
+The crate `mmo-link` builds the QUIC config of such a server from the PEM files of its certificate, its key and the
+authority, so no process copies that setup.
 
 The codec is bitcode 0.6.9. On a delta of 64 entities it gave 477 bytes, and postcard 1.1.3 gave 805 bytes (section 7).
 The format of bitcode can change between its versions. So the crate `mmo-protocol` pins its version with `=`, and a new
@@ -457,19 +467,20 @@ A change of `mmo-collide` changes the result of a step, so it raises the version
 ## 11. The crates
 
 The crates come in this order, each in its own pull request, and each serves the ones after it. The server stands after
-crate 8, and the client follows. Each new crate adds its name to `release-please-config.json`.
+crate 9, and the client follows. Each new crate adds its name to `release-please-config.json`.
 
 | Order | Crate | Its doors |
 | ---: | --- | --- |
 | 1 | `mmo-protocol` | `PROTOCOL`, the messages of each stream and each datagram, `encode`, `decode`, the reader of frames |
 | 2 | `mmo-collide` | `DT`, `Body`, `Input`, `Terrain`, `step(&Terrain, Body, Input) -> Body`, `state_hash` |
 | 3 | `mmo-store` | the migrations, the queries of each table, and the name and the format of each key of Redis |
-| 4 | `mmo-keeper` | the binary of the keeper, and its messages in `mmo-protocol` |
-| 5 | `mmo-zone` | the binary of the zone writer: the tick, the interest, the deltas, the lease and the hand-off |
-| 6 | `mmo-gateway` | the binary of the gateway |
-| 7 | `mmo-login` | the binary of the login service, with the queue |
-| 8 | `mmo-bots` | the headless clients of the load test |
-| 9 | `mmo-client` | the binary of the client, with winit, wgpu and the prediction of `mmo-collide` |
+| 4 | `mmo-link` | `server`, the QUIC config of a server that takes only the peers that the authority of the operator signed |
+| 5 | `mmo-keeper` | the binary of the keeper, and its messages in `mmo-protocol` |
+| 6 | `mmo-zone` | the binary of the zone writer: the tick, the interest, the deltas, the claim, the saves, the lease and the hand-off |
+| 7 | `mmo-gateway` | the binary of the gateway |
+| 8 | `mmo-login` | the binary of the login service, with the queue |
+| 9 | `mmo-bots` | the headless clients of the load test |
+| 10 | `mmo-client` | the binary of the client, with winit, wgpu and the prediction of `mmo-collide` |
 
 `mmo-store` is the one home of each table and each key, so no other crate writes SQL or the name of a key of Redis.
 
