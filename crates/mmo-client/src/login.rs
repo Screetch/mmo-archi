@@ -45,7 +45,7 @@ pub async fn enter(
   trust: &Trust,
   address: &str,
   account: &Account,
-  queued: &mut dyn FnMut(Place),
+  queued: &mut (dyn FnMut(Place) + Send),
 ) -> Result<Token, Fault> {
   enter_with(trust, address, account, queued, WAIT).await
 }
@@ -54,7 +54,7 @@ async fn enter_with(
   trust: &Trust,
   address: &str,
   account: &Account,
-  queued: &mut dyn FnMut(Place),
+  queued: &mut (dyn FnMut(Place) + Send),
   wait: Duration,
 ) -> Result<Token, Fault> {
   let mut link = open(trust, address).await?;

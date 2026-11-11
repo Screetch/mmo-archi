@@ -28,7 +28,10 @@ keeper_port=${MMO_LOCAL_KEEPER_PORT:-54433}
 login_port=${MMO_LOCAL_LOGIN_PORT:-54434}
 zone_port=${MMO_LOCAL_ZONE_PORT:-54435}
 gateway_port=${MMO_LOCAL_GATEWAY_PORT:-54436}
-bin=${CARGO_TARGET_DIR:-$root/target}/debug
+world_cap=${MMO_LOCAL_WORLD_CAP:-100}
+# debug or release: the numbers of docs/architecture.md come from release builds.
+profile=${MMO_LOCAL_PROFILE:-debug}
+bin=${CARGO_TARGET_DIR:-$root/target}/$profile
 game=mmo
 database=postgres://postgres:postgres@127.0.0.1:$pg_port/$game
 redis=redis://127.0.0.1:$redis_port
@@ -168,7 +171,12 @@ start() {
   done
   mkdir -p "$state/redis"
   say "building the servers, which takes minutes when the build is cold"
-  (cd "$root" && sh script/build-slot.sh cargo build -p mmo-keeper -p mmo-login -p mmo-zone -p mmo-gateway -p mmo-client)
+  case $profile in
+    debug) flag= ;;
+    release) flag=--release ;;
+    *) die "MMO_LOCAL_PROFILE is debug or release" ;;
+  esac
+  (cd "$root" && sh script/build-slot.sh cargo build $flag -p mmo-keeper -p mmo-login -p mmo-zone -p mmo-gateway -p mmo-client -p mmo-bots)
   make_tls
 
   started=1
@@ -184,7 +192,7 @@ start() {
   wait_for "the migrations of the keeper" 60 zone_made
 
   launch login env MMO_LOGIN_ADDRESS="127.0.0.1:$login_port" MMO_LOGIN_CERTIFICATE="$tls/leaf.pem" \
-    MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_WORLD=1 MMO_WORLD_CAP=100 \
+    MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_WORLD=1 MMO_WORLD_CAP="$world_cap" \
     MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 "$bin/mmo-login"
   launch zone env ZONE_ID=1 ZONE_ADDRESS="127.0.0.1:$zone_port" ZONE_PUBLIC="localhost:$zone_port" \
     DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
@@ -218,6 +226,19 @@ check() {
     MMO_CHECK_GATEWAY="localhost:$gateway_port" MMO_CHECK_NAME="check$(date +%s)" \
     MMO_CHECK_PASSWORD=local-check-password MMO_CHECK_CHARACTER=Probe "$bin/mmo-check" || die "the check failed"
   say "the check passed"
+}
+
+# The load test: bots that make accounts in the database, log in through the login service, wait in its queue, link to
+# the gateway and walk. The count is the first argument, and the other variables of mmo-bots pass through the environment.
+bots() {
+  for name in login zone gateway; do
+    alive "$name" || die "$name does not run: run sh script/local.sh start first"
+  done
+  # Each bot opens a socket for its login and one for its gateway.
+  ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+  MMO_BOTS_AUTHORITY="$tls/ca.pem" MMO_BOTS_LOGIN="localhost:$login_port" MMO_BOTS_GATEWAY="localhost:$gateway_port" \
+    DATABASE_URL="$database" REDIS_URL="$redis" MMO_BOTS_ZONE=1 MMO_BOTS_COUNT="${1:?usage: sh script/local.sh bots <count>}" \
+    "$bin/mmo-bots" || die "the load test failed"
 }
 
 # Ends one process with the signal, then with KILL when it stays, and forgets its pid.
@@ -263,7 +284,8 @@ status() {
 case ${1:-} in
   start) start ;;
   check) check ;;
+  bots) bots "${2:-}" ;;
   stop) stop ;;
   status) status ;;
-  *) echo "usage: sh script/local.sh start|check|status|stop" >&2; exit 2 ;;
+  *) echo "usage: sh script/local.sh start|check|bots <count>|status|stop" >&2; exit 2 ;;
 esac
