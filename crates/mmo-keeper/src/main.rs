@@ -50,19 +50,19 @@ enum Error {
 #[expect(clippy::disallowed_methods, reason = "main starts the runtime of the keeper once")]
 #[tokio::main]
 async fn main() -> ExitCode {
-  eprintln!("the keeper stops: {}", keep(|name| env::var(name).ok()).await);
+  eprintln!("the keeper stops: {}", keep(&|name| env::var(name).ok()).await);
   ExitCode::FAILURE
 }
 
 /// Runs the keeper until a fault stops it, and gives that fault.
-async fn keep(var: impl Fn(&str) -> Option<String>) -> Error {
+async fn keep(var: &(dyn Fn(&str) -> Option<String> + Sync)) -> Error {
   match open(var).await {
     Ok((endpoint, store)) => link::serve(endpoint, store).await,
     Err(error) => error,
   }
 }
 
-async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Store), Error> {
+async fn open(var: &(dyn Fn(&str) -> Option<String> + Sync)) -> Result<(Endpoint, Store), Error> {
   let config = Config::read(var)?;
   let pool = PgPoolOptions::new().max_connections(CONNECTIONS).connect_lazy_with(config.database);
   let store = Store::migrate(pool).await?;
@@ -103,7 +103,7 @@ mod tests {
     let address =
       UdpSocket::bind("127.0.0.1:0").and_then(|free| free.local_addr()).expect("a port");
     let vars = world.vars(&address.to_string(), connect.to_url_lossy().as_str());
-    let keeper = tokio::spawn(async move { keep(var(&vars)).await });
+    let keeper = tokio::spawn(async move { keep(&var(&vars)).await });
     let writers = world.writer(true);
     let mut writer = Writer::link(&writers, address).await;
     writer.greet().await;
@@ -150,7 +150,7 @@ mod tests {
     let taken = UdpSocket::bind("127.0.0.1:0").expect("a socket");
     let address = taken.local_addr().expect("an address").to_string();
     let absent = connect.clone().database("absent").to_url_lossy();
-    let refused = keep(var(&world.vars(&address, absent.as_str()))).await;
+    let refused = keep(&var(&world.vars(&address, absent.as_str()))).await;
     assert!(
       matches!(
         refused,
@@ -160,7 +160,7 @@ mod tests {
       ),
       "{refused}"
     );
-    let in_use = keep(var(&world.vars(&address, connect.to_url_lossy().as_str()))).await;
+    let in_use = keep(&var(&world.vars(&address, connect.to_url_lossy().as_str()))).await;
     assert!(
       matches!(in_use, Error::Address(ref error) if error.kind() == io::ErrorKind::AddrInUse),
       "{in_use}"
