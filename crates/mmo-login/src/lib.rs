@@ -9,7 +9,10 @@
 //! Each login enters the queue, also when the world has a free slot, so no login passes an account
 //! that waits. [`Login::admit`] runs the admission once, and each copy runs it each second.
 
+#[cfg(test)]
+mod game;
 mod queue;
+mod server;
 
 use mmo_protocol::{AccountId, CharacterId, FromLogin, Password, Refusal, ToLogin, Token};
 use mmo_store::{Store, keys};
@@ -18,6 +21,7 @@ use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 
 use queue::Place;
 pub use queue::World;
+pub use server::{Fault, Stop, run};
 
 /// The failed logins of one name in one window, after which the login service refuses the name
 /// until the window ends.
@@ -223,122 +227,15 @@ fn token() -> Token {
 
 #[cfg(test)]
 mod tests {
-  use std::net::TcpListener;
-  use std::process::Stdio;
-
   use mmo_protocol::{
-    AccountId, Angle, Character, CharacterId, FromLogin, Password, Position, Refusal, ToLogin,
-    Token, ZoneId,
+    Character, CharacterId, FromLogin, Password, Refusal, ToLogin, Token, ZoneId,
   };
-  use mmo_store::{State, Store, keys};
+  use mmo_store::{Store, keys};
   use redis::AsyncCommands;
-  use redis::aio::ConnectionManager;
   use sqlx::PgPool;
-  use tokio::io::{AsyncBufReadExt, BufReader, Lines};
-  use tokio::process::{Child, ChildStdout, Command};
 
   use super::{Client, Error, Login, World};
-
-  const START: State =
-    State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
-
-  /// A Redis of one test alone, which ends with the test, and a PostgreSQL database of the test.
-  /// `REDIS_SERVER` names the program of Redis, or else `redis-server` of the `PATH` runs.
-  struct Game {
-    _process: Child,
-    _log: Lines<BufReader<ChildStdout>>,
-    port: u16,
-    redis: ConnectionManager,
-    store: Store,
-  }
-
-  impl Game {
-    async fn new(pool: PgPool) -> Self {
-      let store = Store::migrate(pool).await.expect("the keeper migrates the database");
-      store.add_zone(ZoneId(7), "meadow").await.expect("a zone");
-      let port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|free| free.local_addr())
-        .expect("the system gives a free port")
-        .port();
-      let program = std::env::var("REDIS_SERVER").unwrap_or(String::from("redis-server"));
-      let mut process = Command::new(program)
-        .args(["--port", &port.to_string(), "--bind", "127.0.0.1", "--save", ""])
-        .args(["--appendonly", "no"])
-        .stdout(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("REDIS_SERVER, or redis-server of the PATH, starts");
-      let mut log = BufReader::new(process.stdout.take().expect("a piped log")).lines();
-      while let Some(line) = log.next_line().await.expect("the log of Redis reads") {
-        if line.contains("Ready to accept connections") {
-          break;
-        }
-      }
-      let redis = Self::connect(port, "default").await;
-      Self { _process: process, _log: log, port, redis, store }
-    }
-
-    async fn connect(port: u16, user: &str) -> ConnectionManager {
-      let url = format!("redis://{user}:any@127.0.0.1:{port}");
-      let client = redis::Client::open(url).expect("a URL of Redis");
-      ConnectionManager::new(client).await.expect("Redis accepts the user")
-    }
-
-    /// A copy of the login service of world 1 with a cap of `cap` accounts.
-    fn copy(&self, cap: u32) -> Login {
-      Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap })
-    }
-
-    /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
-    async fn denied(&self, denied: &str) -> Login {
-      let user = format!("denied{denied}");
-      redis::cmd("ACL")
-        .arg(&["SETUSER", &user, "on", "nopass", "~*", "&*", "+@all", denied])
-        .query_async::<()>(&mut self.redis.clone())
-        .await
-        .expect("Redis makes the user");
-      let redis = Self::connect(self.port, &user).await;
-      Login::new(self.store.clone(), redis, World { id: 1, cap: 1 })
-    }
-
-    async fn account(&self, name: &str) -> AccountId {
-      self.store.create_account(name, secret()).await.expect("a free name")
-    }
-
-    async fn enter(&self, copy: &Login, names: &[&str]) -> Vec<(Client, FromLogin)> {
-      let mut entered = Vec::new();
-      for name in names {
-        let mut client = Client::default();
-        let answer = copy.answer(&mut client, login(name)).await.expect("an answer");
-        entered.push((client, answer));
-      }
-      entered
-    }
-
-    async fn waits(&self, copy: &Login, clients: &mut [(Client, FromLogin)]) -> Vec<FromLogin> {
-      let mut answers = Vec::new();
-      for (client, _) in clients {
-        answers.push(copy.answer(client, ToLogin::Wait).await.expect("an answer"));
-      }
-      answers
-    }
-  }
-
-  fn secret() -> Password {
-    Password("a long passphrase".to_owned())
-  }
-
-  fn login(name: &str) -> ToLogin {
-    ToLogin::Login { name: name.to_owned(), password: secret() }
-  }
-
-  /// The position, the length and the wait of a `Queued` answer.
-  fn place(answer: &FromLogin) -> Option<(u32, u32, u32)> {
-    match *answer {
-      FromLogin::Queued { position, length, wait, .. } => Some((position, length, wait)),
-      _ => None,
-    }
-  }
+  use crate::game::{Game, START, login, place};
 
   #[sqlx::test(migrations = false)]
   async fn the_order_of_admission_is_the_order_of_entry(pool: PgPool) -> Result<(), Error> {
