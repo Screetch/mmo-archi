@@ -313,17 +313,20 @@ Each world has a cap, 5000 at the start. The set `world:{w}:admitted` holds each
 milliseconds when its slot ends. The sorted set `world:{w}:queue` holds each queued account, with the time when it
 entered.
 
-- A client that logs in while the world is full enters the queue with `ZADD NX`. An account has one place at most, and a
-  client that comes back keeps its first place.
+- Each login enters the queue with `ZADD NX`, also when the world has a free slot, so no login passes an account that
+  waits. The next run of the script admits it. An account has one place at most, and a client that comes back keeps its
+  first place. An account whose presence stands gets no place.
 - The client renews `queued:{account}` each 5 s. In the same request it gets its position from `ZRANK` and the length of
   the queue. It also gets an estimate of its wait from the admissions of the last 10 minutes.
 - Each second, each copy of the login service runs one Lua script, which Redis runs as one atomic step. The script reads
   the time of Redis. For each admitted account whose slot ended, it extends the slot by 30 s when the presence of the
   account stands. Else it removes the account. Then it takes from the head of the queue as many accounts as the world
-  has free slots, 100 at most. It skips an account whose `queued:{account}` ended, adds each other account to the
-  admitted set with a slot of 60 s, and writes `admit:{account}`.
-- The copy of the login service that serves the client sees `admit:{account}`, makes the session and gives the token to
-  the client. The client then has 60 s to reach a gateway. When it does not, its slot ends and goes to the next account.
+  has free slots, and 100 in each second at most over all the copies, as `world:{w}:admissions` counts them. It skips
+  an account whose `queued:{account}` ended, adds each other account to the admitted set with a slot of 60 s, and
+  writes `admit:{account}`.
+- The copy of the login service that serves the client sees `admit:{account}` and sends the characters of the account.
+  When the client selects one, the copy takes `admit:{account}` away, so one slot gives one session at most, then makes
+  the session and gives the token to the client. The client then has 60 s to reach a gateway. When it does not, its slot ends and goes to the next account.
 - The zone writer renews the presence of each of its players, so the script keeps their slots. A logout removes the
   account from the admitted set at once.
 

@@ -1,0 +1,26 @@
+name: redis
+description: >-
+  The program of Redis that the tests of mmo-login start, one server for each test, as REDIS_SERVER names it. The same
+  version runs on Linux, on macOS and on Windows.
+
+runs:
+  using: composite
+  steps:
+    # The action puts redis-server on the PATH, where the tests find it. It has no build for Windows.
+    - if: runner.os != 'Windows'
+      uses: shogo82148/actions-setup-redis@d566e806806d1bac2b414538d57b2b7f721e1d83 # v1.60.0
+      with:
+        redis-version: "8.10.3"
+        auto-start: "false"
+    # On Windows the step takes the build of redis-windows, which MSYS2 makes, and checks its sum.
+    - if: runner.os == 'Windows'
+      shell: bash
+      env:
+        VERSION: "8.10.3"
+        SUM: af16df340525b431e9ec8dabfd625d5e7a233f82805b5418819904ea909c447f
+      run: |
+        curl -fsSL -o "$RUNNER_TEMP/redis.zip" \
+          "https://github.com/redis-windows/redis-windows/releases/download/$VERSION/Redis-$VERSION-Windows-x64-msys2.zip"
+        echo "$SUM  $RUNNER_TEMP/redis.zip" | sha256sum -c -
+        unzip -q "$RUNNER_TEMP/redis.zip" -d "$RUNNER_TEMP"
+        echo "REDIS_SERVER=$RUNNER_TEMP/Redis-$VERSION-Windows-x64-msys2/redis-server.exe" >> "$GITHUB_ENV"

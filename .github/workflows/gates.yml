@@ -120,6 +120,8 @@ jobs:
       # One action gives the same PostgreSQL on Linux, on macOS and on Windows, where a runner has no service.
       - id: postgres
         uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9
+      # The tests of mmo-login start a Redis of their own for each test.
+      - uses: ./.github/actions/redis
       - run: cargo coverage
         env:
           DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
@@ -151,6 +153,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - id: postgres
         uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9
+      - uses: ./.github/actions/redis
       - run: cargo coverage
         env:
           DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
