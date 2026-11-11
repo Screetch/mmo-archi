@@ -4,12 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The drawing of mmo-archi, with no window: its skinned glTF models and their poses."
+description = "The drawing of mmo-archi, with no window: its skinned glTF models and the ground, lit on wgpu."
 
 [dependencies]
-glam = "0.34.3"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = { version = "0.34.3", features = ["bytemuck"] }
 gltf = "1.4.1"
+mmo-collide = { path = "../mmo-collide" }
+pollster = "1.0.1"
 thiserror = "2.0.21"
+wgpu = "30.0.1"
 
 [dev-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }

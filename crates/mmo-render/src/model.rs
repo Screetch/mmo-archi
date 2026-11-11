@@ -39,7 +39,8 @@ pub enum Error {
 }
 
 /// The point of a mesh, as the shader reads it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct Vertex {
   /// The place in the rest pose, in metres.
   pub position: [f32; 3],

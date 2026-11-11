@@ -186,7 +186,9 @@ fix what your change broke, and report what was broken before.
   `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`, `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT`,
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
   PostgreSQL. Set the same ports for `check` and `stop`.
-- `cargo coverage`: the tests of the workspace with their coverage, which must be whole. It needs cargo-llvm-cov, which
+- `cargo coverage`: the tests of the workspace with their coverage, which must be whole. The tests of `mmo-render`
+  draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe
+  (`mesa-vulkan-drivers`) on Linux. It needs cargo-llvm-cov, which
   `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
   probe.
 - `sh script/hooks/pre-commit run`: every guard of the commit hook, on the whole tree, each one the guard of furb for
