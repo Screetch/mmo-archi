@@ -259,7 +259,7 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 mod tests {
   use std::collections::BTreeMap;
 
-  use mmo_protocol::{Angle, CharacterId, Link, Position, ZoneId, frame};
+  use mmo_protocol::{Angle, CharacterId, Link, PROTOCOL, Position, ZoneId, frame};
   use mmo_store::{Saved, State, Store};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use sqlx::PgPool;
@@ -286,10 +286,14 @@ mod tests {
     let address = endpoint.local_addr().expect("an address");
     let zone = tokio::spawn(serve(endpoint.clone(), Zone::new(ZoneId(1)), store));
     let gateways = world.gateway(true);
-    let hello = |version: u8| frame(&[version, 0, 0, 0, 0, 0]).expect("a hello");
+    let hello = |version: u16| {
+      let [low, high] = version.to_le_bytes();
+      frame(&[low, high, 0, 0, 0, 0]).expect("a hello")
+    };
+    let foreign = PROTOCOL + 1;
 
     let mut other = Peer::link(&gateways, address).await;
-    other.write(&hello(2)).await;
+    other.write(&hello(foreign)).await;
     let mut large = Peer::link(&gateways, address).await;
     large.write(&[0x81, 0x80, 0x04]).await;
     let mut wrong = Peer::link(&gateways, address).await;
@@ -300,7 +304,7 @@ mod tests {
     noisy.datagram(&[0xff]);
     let mut deaf = Peer::link(&gateways, address).await;
     deaf.recv.stop(7u32.into()).expect("an open stream");
-    deaf.write(&hello(1)).await;
+    deaf.write(&hello(PROTOCOL)).await;
     let mut gone = Peer::link(&gateways, address).await;
     gone.greet().await;
     gone.send.reset(7u32.into()).expect("an open stream");
@@ -313,10 +317,13 @@ mod tests {
     }
     let reason = |text: &str| Ok((1, text.to_owned()));
     let malformed = "the bytes are not a message of this version of the protocol";
+    let version = format!(
+      "the peer speaks version {foreign} of the protocol, and this side speaks version {PROTOCOL}"
+    );
     assert_eq!(
       reasons,
       [
-        reason("the peer speaks version 2 of the protocol, and this side speaks version 1"),
+        reason(&version),
         reason("a frame holds 65536 bytes at most"),
         reason(malformed),
         reason(malformed),
