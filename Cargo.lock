@@ -1002,10 +1002,15 @@ dependencies = [
 name = "mmo-client"
 version = "0.0.0"
 dependencies = [
+ "bitcode",
  "glam 0.34.3",
  "mmo-collide",
  "mmo-protocol",
+ "quinn",
+ "rcgen",
+ "rustls",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
