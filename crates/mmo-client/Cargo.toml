@@ -7,10 +7,17 @@ publish.workspace = true
 description = "The client of mmo-archi: its prediction, its camera and its view of the world, without a window."
 
 [dependencies]
+bitcode = "=0.6.9"
 glam = "0.34.3"
 mmo-collide = { path = "../mmo-collide" }
 mmo-protocol = { path = "../mmo-protocol" }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [lints]
 workspace = true
