@@ -193,6 +193,7 @@ pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
   use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::time::Duration;
 
   use mmo_client::World;
   use mmo_client::testing::{Fake, hold};
@@ -202,6 +203,7 @@ mod tests {
     Token, ZoneId, encode,
   };
   use tokio::sync::{oneshot, watch};
+  use tokio::time::sleep;
 
   use super::{Shared, Walk, run};
   use crate::fixture::{authority, entity, login_service, send, snapshot};
@@ -255,6 +257,8 @@ mod tests {
         text: "hi".to_owned(),
       };
       peer.write(&line).await;
+      // The bot reads a datagram before a stream, so give it the time to read the line first.
+      sleep(Duration::from_millis(300)).await;
       for one in &sent() {
         send(&peer, one);
       }
