@@ -1,8 +1,9 @@
+use std::time::Duration;
+
 use mmo_protocol::{Frames, FromKeeper, Hello, KeeperRefusal, ToKeeper, decode, encode, frame};
 use mmo_store::Store;
 use quinn::{
-  Connection, ConnectionError, Endpoint, Incoming, ReadError, RecvStream, SendStream, VarInt,
-  WriteError,
+  ConnectionError, Endpoint, Incoming, ReadError, RecvStream, SendStream, VarInt, WriteError,
 };
 use tokio_util::task::TaskTracker;
 
@@ -31,6 +32,10 @@ pub(crate) const BUILD: u32 = {
 /// close holds the text of the fault.
 const FAULT: VarInt = VarInt::from_u32(1);
 
+/// The most time that the keeper waits, after a fault, for the writer to read its last bytes and
+/// close the link: the idle timeout of QUIC.
+const GRACE: Duration = Duration::from_secs(3);
+
 /// Why the keeper ends the link of a zone writer.
 #[derive(Debug, thiserror::Error)]
 enum Fault {
@@ -57,25 +62,38 @@ pub(crate) async fn serve(endpoint: Endpoint, store: Store) -> Error {
 }
 
 async fn link(incoming: Incoming, store: Store) {
-  let fault = match incoming.await {
-    Ok(connection) => match talk(&connection, &store).await {
-      Ok(()) => return,
-      Err(fault) => {
-        connection.close(FAULT, fault.to_string().as_bytes());
-        fault
+  let connection = match incoming.await {
+    Ok(connection) => connection,
+    Err(error) => return ended(&Fault::Link(error)),
+  };
+  let fault = match connection.accept_bi().await {
+    Ok((send, recv)) => {
+      let mut stream = Stream { send, recv, frames: Frames::default() };
+      match talk(&mut stream, &store).await {
+        Ok(()) => return,
+        Err(fault) => {
+          // A close drops each byte that the writer did not read yet, as the hello that names the
+          // version of the keeper. So the keeper ends its stream and lets the writer close the
+          // link first, for GRACE at most. Each result of the two ends the wait alike.
+          stream.send.finish().ok();
+          tokio::time::timeout(GRACE, connection.closed()).await.ok();
+          fault
+        }
       }
-    },
+    }
     Err(error) => Fault::Link(error),
   };
+  connection.close(FAULT, fault.to_string().as_bytes());
+  ended(&fault);
+}
+
+fn ended(fault: &Fault) {
   eprintln!("a link of a zone writer ends: {fault}");
 }
 
-/// Answers the zone writer of a link on the stream that it opens. Each side writes its hello
-/// first, then the keeper answers each message of the writer in order, until the writer ends the
-/// stream.
-async fn talk(connection: &Connection, store: &Store) -> Result<(), Fault> {
-  let (send, recv) = connection.accept_bi().await?;
-  let mut stream = Stream { send, recv, frames: Frames::default() };
+/// Answers the zone writer on the stream that it opened. Each side writes its hello first, then
+/// the keeper answers each message of the writer in order, until the writer ends the stream.
+async fn talk(stream: &mut Stream, store: &Store) -> Result<(), Fault> {
   let hello = stream.exchange(&framed(&Hello { build: BUILD }.encode())).await?;
   Hello::decode(&hello.unwrap_or_default())?;
   let mut answer = Vec::new();

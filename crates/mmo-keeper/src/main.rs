@@ -80,10 +80,14 @@ mod tests {
   };
   use mmo_store::{Saved, Store};
   use sqlx::ConnectOptions;
+  use sqlx::migrate::MigrateError;
   use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
   use super::{Error, keep};
   use crate::peer::{World, Writer, var};
+
+  /// The code of PostgreSQL for a database that does not exist.
+  const NO_DATABASE: &str = "3D000";
 
   const START: State =
     State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
@@ -146,11 +150,15 @@ mod tests {
     let taken = UdpSocket::bind("127.0.0.1:0").expect("a socket");
     let address = taken.local_addr().expect("an address").to_string();
     let absent = connect.clone().database("absent").to_url_lossy();
-    let refused = keep(var(&world.vars(&address, absent.as_str()))).await.to_string();
-    assert_eq!(
-      refused,
-      "the database refuses the keeper: while executing migrations: error returned from \
-       database: database \"absent\" does not exist"
+    let refused = keep(var(&world.vars(&address, absent.as_str()))).await;
+    assert!(
+      matches!(
+        refused,
+        Error::Store(mmo_store::Error::Migrate(MigrateError::Execute(sqlx::Error::Database(
+          ref found
+        )))) if found.code().as_deref() == Some(NO_DATABASE)
+      ),
+      "{refused}"
     );
     let in_use = keep(var(&world.vars(&address, connect.to_url_lossy().as_str()))).await;
     assert!(
