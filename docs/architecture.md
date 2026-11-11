@@ -60,8 +60,9 @@ in its memory nothing that a client needs. Each copy reads and writes Redis, so 
 runs two copies or more.
 
 A password goes in the table `accounts` as an argon2id hash in the PHC format, with 19 MiB of memory, 2 passes and 1
-lane. One check took 9.8 ms on one core (section 7). A client sends at most 5 failed logins each minute for one name,
-and one address makes at most 5 accounts each hour.
+lane. One check took 9.8 ms on one core (section 7). One address sends at most 5 failed logins each minute for one
+name, and 30 each 10 minutes over all names. The cap of a name holds for one address alone, so a stranger who guesses a
+password cannot lock the owner of the account out. One address makes at most 5 accounts each hour.
 
 After a login, the player selects a character. The login service reads the characters of the account and writes the
 session `session:{token}` with the account, the character and the zone of the character. The token is 32 random bytes
@@ -125,11 +126,13 @@ writers write the directory and the presence again.
 | `queued:{account}` | string | login service | 120 s, renewed by the client | the mark that a queued client still waits |
 | `admit:{account}` | string | login service | 60 s | the mark that the account has a slot |
 | `resume:{token}` | string | login service | 120 s | the account of a queued client that can come back |
-| `failed:{name}` | string | login service | 60 s | the count of the failed logins of a name in the last minute |
+| `failed:{address}:{name}` | string | login service | 60 s | the count of the failed logins of a name from an address in the last minute |
+| `guessed:{address}` | string | login service | 10 minutes | the count of the failed logins of an address over all names in the last 10 minutes |
 | `created:{address}` | string | login service | 1 h | the count of the accounts that an address made in the last hour |
 | `chat:{channel}` | stream and channel | zone writer | the last 1000 lines | the chat |
 
-A token goes in a key as 64 hex digits in lower case. The module `keys` of `mmo-store` makes each key, so no other
+A token goes in a key as 64 hex digits in lower case. An address goes in a key as its address of IPv4, or as its
+network of /64 for IPv6, since one host commonly holds the whole network. The module `keys` of `mmo-store` makes each key, so no other
 crate writes the name of a key.
 
 The zone writer sends the chat lines of its players to Redis. It also sends to its players the lines of each channel

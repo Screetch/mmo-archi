@@ -28,12 +28,20 @@ use queue::Place;
 pub use queue::World;
 pub use server::{Fault, Stop, run};
 
-/// The failed logins of one name in one window, after which the login service refuses the name
-/// until the window ends.
+/// The failed logins of one name from one address in one window, after which the login service
+/// refuses the name to that address until the window ends. The name stays open to each other
+/// address, so a stranger cannot lock an account out.
 const FAILURES: u32 = 5;
 
-/// The window of the failed logins of a name, in seconds.
+/// The window of the failed logins of a name from an address, in seconds.
 const FAILURE_WINDOW: u64 = 60;
+
+/// The failed logins of one address over all names in one window, after which the login service
+/// refuses each login of the address until the window ends, so a guesser of many names stays slow.
+const GUESSES: u32 = 30;
+
+/// The window of the failed logins of an address, in seconds.
+const GUESS_WINDOW: u64 = 10 * 60;
 
 /// The new accounts of one address in one window, after which the login service refuses each new
 /// account of the address until the window ends.
@@ -118,7 +126,7 @@ impl Login {
   }
 
   /// The answer to `message` of a client at the address `from`, which moves `client` to its next
-  /// state. The throttle of new accounts counts by `from`.
+  /// state. The throttles of new accounts and of failed logins count by `from`.
   pub async fn answer(
     &self,
     client: &mut Client,
@@ -129,7 +137,7 @@ impl Login {
       ToLogin::NewAccount { name, password } => {
         self.new_account(client, from, &name, password).await
       }
-      ToLogin::Login { name, password } => self.login(client, &name, password).await,
+      ToLogin::Login { name, password } => self.login(client, from, &name, password).await,
       ToLogin::Resume { token } => self.resume(client, token).await,
       ToLogin::Wait => match *client {
         Client::Queued { account, resume } => self.place(client, account, resume, false).await,
@@ -166,7 +174,8 @@ impl Login {
     if !NAME.contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
       return Ok(FromLogin::Refused(Refusal::Name));
     }
-    if counted(&mut self.redis.clone(), &keys::created(from), CREATION_WINDOW).await? > CREATIONS {
+    let created = [(keys::created(from), CREATION_WINDOW)];
+    if counted(&mut self.redis.clone(), &created).await?.iter().any(|&made| made > CREATIONS) {
       return Ok(FromLogin::Refused(Refusal::Throttled));
     }
     match self.store.create_account(name, password).await {
@@ -176,19 +185,24 @@ impl Login {
     }
   }
 
+  /// Signs in to the account of `name` and enters it in the queue. A failed login counts for the
+  /// pair of `name` and `from`, and for `from` over all names.
   async fn login(
     &self,
     client: &mut Client,
+    from: IpAddr,
     name: &str,
     password: Password,
   ) -> Result<FromLogin, Error> {
     let mut redis = self.redis.clone();
-    let failed = keys::failed(name);
-    if redis.get::<_, Option<u32>>(&failed).await?.unwrap_or(0) >= FAILURES {
+    let (failed, guessed) = (keys::failed(from, name), keys::guessed(from));
+    let (pair, address): (Option<u32>, Option<u32>) =
+      redis::pipe().get(&failed).get(&guessed).query_async(&mut redis).await?;
+    if pair.unwrap_or(0) >= FAILURES || address.unwrap_or(0) >= GUESSES {
       return Ok(FromLogin::Refused(Refusal::Throttled));
     }
     let Some(account) = self.store.sign_in(name, password).await? else {
-      counted(&mut redis, &failed, FAILURE_WINDOW).await?;
+      counted(&mut redis, &[(failed, FAILURE_WINDOW), (guessed, GUESS_WINDOW)]).await?;
       return Ok(FromLogin::Refused(Refusal::Password));
     };
     self.place(client, account, token(), true).await
@@ -292,20 +306,21 @@ impl Login {
   }
 }
 
-/// Counts one more event in the counter `key`, whose window of `window` seconds the first event
-/// starts, and gives the count.
-async fn counted(redis: &mut ConnectionManager, key: &str, window: u64) -> Result<u32, Error> {
-  let window = SetOptions::default()
-    .conditional_set(ExistenceCheck::NX)
-    .with_expiration(SetExpiry::EX(window));
-  let (count,): (u32,) = redis::pipe()
-    .atomic()
-    .set_options(key, 0, window)
-    .ignore()
-    .incr(key, 1)
-    .query_async(redis)
-    .await?;
-  Ok(count)
+/// Counts one more event in each counter of `counters`, a key and the window in seconds that the
+/// first event of the key starts, and gives the count of each.
+async fn counted(
+  redis: &mut ConnectionManager,
+  counters: &[(String, u64)],
+) -> Result<Vec<u32>, Error> {
+  let mut pipe = redis::pipe();
+  pipe.atomic();
+  for (key, window) in counters {
+    let window = SetOptions::default()
+      .conditional_set(ExistenceCheck::NX)
+      .with_expiration(SetExpiry::EX(*window));
+    pipe.set_options(key, 0, window).ignore().incr(key, 1);
+  }
+  Ok(pipe.query_async(redis).await?)
 }
 
 #[expect(clippy::expect_used, reason = "a server whose system gives no random bytes cannot run")]
@@ -328,6 +343,9 @@ mod tests {
 
   use super::{Client, Error, Login, World};
   use crate::game::{Game, HOME, MEADOW, START, login, place, secret};
+
+  /// The address of a client that guesses the passwords of other players.
+  const STRANGER: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
 
   fn new_account(name: &str) -> ToLogin {
     ToLogin::NewAccount { name: name.to_owned(), password: secret() }
@@ -520,24 +538,51 @@ mod tests {
     Ok(())
   }
 
+  fn wrong(name: &str) -> ToLogin {
+    ToLogin::Login { name: name.to_owned(), password: Password("guess".to_owned()) }
+  }
+
   #[sqlx::test(migrations = false)]
-  async fn a_name_with_5_failed_logins_waits_for_its_window(pool: PgPool) -> Result<(), Error> {
+  async fn a_name_refused_to_one_address_signs_in_from_another(pool: PgPool) -> Result<(), Error> {
     let game = Game::new(pool).await;
     game.account("ada").await;
     let copy = game.copy(1);
     let mut client = Client::default();
-    let wrong = ToLogin::Login { name: "ADA".to_owned(), password: Password("guess".to_owned()) };
     let mut answers = Vec::new();
     for _ in 0..5 {
-      answers.push(copy.answer(&mut client, HOME, wrong.clone()).await?);
+      answers.push(copy.answer(&mut client, STRANGER, wrong("ADA")).await?);
     }
-    answers.push(copy.answer(&mut client, HOME, login("ada")).await?);
+    answers.push(copy.answer(&mut client, STRANGER, login("ada")).await?);
     let mut expected = vec![FromLogin::Refused(Refusal::Password); 5];
     expected.push(FromLogin::Refused(Refusal::Throttled));
     assert_eq!(answers, expected);
-    let window: i64 = game.redis.clone().ttl(keys::failed("ada")).await?;
-    assert!((1..=60).contains(&window), "the window ends in {window} s");
     assert_eq!(client, Client::Out);
+    let mut redis = game.redis.clone();
+    let windows: (i64, i64) =
+      (redis.ttl(keys::failed(STRANGER, "ada")).await?, redis.ttl(keys::guessed(STRANGER)).await?);
+    assert!((1..=60).contains(&windows.0), "the window of the pair ends in {} s", windows.0);
+    assert!((590..=600).contains(&windows.1), "the window of the address ends in {} s", windows.1);
+    let owner = copy.answer(&mut client, HOME, login("ada")).await?;
+    assert_eq!(place(&owner), Some((0, 1, u32::MAX)));
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn an_address_with_30_failed_logins_over_all_names_waits_for_its_window(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    game.account("ada").await;
+    let copy = game.copy(1);
+    let mut answers = Vec::new();
+    for guess in 0..30 {
+      answers.push(copy.answer(&mut Client::Out, STRANGER, wrong(&format!("n{guess}"))).await?);
+    }
+    assert_eq!(answers, vec![FromLogin::Refused(Refusal::Password); 30]);
+    let refused = copy.answer(&mut Client::Out, STRANGER, login("ada")).await?;
+    assert_eq!(refused, FromLogin::Refused(Refusal::Throttled));
+    let owner = copy.answer(&mut Client::Out, HOME, login("ada")).await?;
+    assert_eq!(place(&owner), Some((0, 1, u32::MAX)));
     Ok(())
   }
 
@@ -672,9 +717,13 @@ mod tests {
     assert_eq!(
       texts,
       [
-        denied("get", "get"),
+        denied("get", "get").map(|text| {
+          format!("Pipeline failures: [(Index 0, error: {text}), (Index 1, error: {text})]")
+        }),
         closed.clone(),
-        aborted("set", "set"),
+        denied("set", "set").map(|text| {
+          format!("Transaction aborted: [(Index 0, error: {text}), (Index 2, error: {text})]")
+        }),
         denied("@scripting", "evalsha"),
         denied("@scripting", "evalsha"),
         denied("get", "get"),
