@@ -260,7 +260,7 @@ mod tests {
         .and_then(|free| free.local_addr())
         .expect("the system gives a free port")
         .port();
-      let program = std::env::var("REDIS_SERVER").unwrap_or_else(|_| "redis-server".to_owned());
+      let program = std::env::var("REDIS_SERVER").unwrap_or(String::from("redis-server"));
       let mut process = Command::new(program)
         .args(["--port", &port.to_string(), "--bind", "127.0.0.1", "--save", ""])
         .args(["--appendonly", "no"])
