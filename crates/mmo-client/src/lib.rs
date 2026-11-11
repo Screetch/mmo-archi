@@ -10,10 +10,13 @@
 //!   move, between two snapshots.
 //! - [`enter`] signs in to the login service and waits in its queue, and [`Play`] links to a
 //!   gateway: snapshots and messages come down, and intents go up.
+//! - [`check`] proves a stack on one machine: it makes an account, and waits for the first snapshot
+//!   that shows its player. The binary `mmo-check` runs it.
 //! - [`Camera`] orbits and zooms around the player, and [`Keys`] turns the keys of the player into
 //!   a heading on the ground, from the view of the camera.
 
 mod camera;
+mod check;
 mod connect;
 mod fault;
 mod input;
@@ -25,6 +28,7 @@ mod testing;
 mod world;
 
 pub use camera::Camera;
+pub use check::{Failure, check};
 pub use connect::Trust;
 pub use fault::Fault;
 pub use input::Keys;

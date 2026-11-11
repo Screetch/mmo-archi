@@ -170,6 +170,20 @@ fix what your change broke, and report what was broken before.
   hook need `DATABASE_URL`. Give them a server that holds no data of a player. The tests of `mmo-login` also start a
   Redis of their own for each test, with the program that `REDIS_SERVER` names, or else `redis-server` of the `PATH`,
   which `brew install redis` gives.
+- `sh script/local.sh start`: build the servers and start the whole stack on this machine: PostgreSQL, Redis, the keeper,
+  the login service, one zone writer and one gateway, each with the variables that its `config.rs` reads. It makes the TLS
+  material for local work (an authority and one certificate for `localhost`, valid 30 days), and prints the addresses that
+  a client uses. It runs no `docker compose`: it starts `postgres` and `redis-server` of the machine on the ports 55432
+  and 56379, in `$TMPDIR/mmo-local`, so a store that already runs on 5432 or 6379 keeps its data. It needs initdb,
+  postgres, psql, redis-server, redis-cli, openssl and nc, and it goes through `script/build-slot.sh`, so give its bash
+  a timeout of 2400 seconds. Each process writes its log and its pid in that folder, and the other commands read them:
+  `sh script/local.sh check` makes an account and a character through the login service, links to the gateway and waits
+  for a snapshot of the zone, with the binary `mmo-check` and no window (the login service takes 5 new accounts an hour
+  from one address, so restart the stack to make more); `sh script/local.sh status` lists the processes; `sh
+  script/local.sh stop` ends those pids alone, then checks that none stays. The variables `MMO_LOCAL_DIR`,
+  `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`, `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT`,
+  `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
+  PostgreSQL. Set the same ports for `check` and `stop`.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole. It needs cargo-llvm-cov, which
   `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
   probe.
