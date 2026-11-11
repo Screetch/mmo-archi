@@ -153,7 +153,9 @@ fn refusal(error: mmo_store::Error) -> KeeperRefusal {
 
 #[cfg(test)]
 mod tests {
-  use mmo_protocol::{Batch, Epoch, FromKeeper, Hello, KeeperRefusal, ToKeeper, ZoneId, frame};
+  use mmo_protocol::{
+    Batch, Epoch, FromKeeper, Hello, KeeperRefusal, PROTOCOL, ToKeeper, ZoneId, frame,
+  };
   use mmo_store::Store;
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use sqlx::PgPool;
@@ -175,10 +177,14 @@ mod tests {
     let keeper = tokio::spawn(serve(endpoint.clone(), store));
     let writers = world.writer(true);
     let idle = Writer::link(&writers, address).await;
-    let hello = |version: u8| frame(&[version, 0, 0, 0, 0, 0]).expect("a hello");
+    let hello = |version: u16| {
+      let [low, high] = version.to_le_bytes();
+      frame(&[low, high, 0, 0, 0, 0]).expect("a hello")
+    };
+    let foreign = PROTOCOL + 1;
 
     let mut other = Writer::link(&writers, address).await;
-    other.write(&hello(1)).await;
+    other.write(&hello(foreign)).await;
     let theirs = other.read().await;
     let mut large = Writer::link(&writers, address).await;
     large.write(&[0x81, 0x80, 0x04]).await;
@@ -187,7 +193,7 @@ mod tests {
     wrong.write(&frame(&[]).expect("a frame")).await;
     let mut deaf = Writer::link(&writers, address).await;
     deaf.recv.stop(7u32.into()).expect("an open stream");
-    deaf.write(&hello(2)).await;
+    deaf.write(&hello(PROTOCOL)).await;
     let mut gone = Writer::link(&writers, address).await;
     gone.greet().await;
     let refused = gone.ask(&ToKeeper::Claim { zone: ZoneId(9) }).await;
@@ -202,7 +208,9 @@ mod tests {
     assert_eq!(
       reasons,
       [
-        reason("the peer speaks version 1 of the protocol, and this side speaks version 2"),
+        reason(&format!(
+          "the peer speaks version {foreign} of the protocol, and this side speaks version {PROTOCOL}"
+        )),
         reason("a frame holds 65536 bytes at most"),
         reason("the bytes are not a message of this version of the protocol"),
         reason("the keeper cannot write to the writer: sending stopped by peer: error 7"),

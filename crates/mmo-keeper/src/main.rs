@@ -102,8 +102,11 @@ mod tests {
     let world = World::new();
     let address =
       UdpSocket::bind("127.0.0.1:0").and_then(|free| free.local_addr()).expect("a port");
-    let vars = world.vars(&address.to_string(), connect.to_url_lossy().as_str());
-    let keeper = tokio::spawn(async move { keep(&var(&vars)).await });
+    // The keeper runs until the test aborts it, so it reads leaked variables: an async block around
+    // keep would end after its await, which no test reaches, and miss the bar of the coverage.
+    let vars = world.vars(&address.to_string(), connect.to_url_lossy().as_str()).leak();
+    let read: &'static _ = Box::leak(Box::new(var(vars)));
+    let keeper = tokio::spawn(keep(read));
     let writers = world.writer(true);
     let mut writer = Writer::link(&writers, address).await;
     writer.greet().await;
@@ -142,13 +145,15 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
-  async fn the_keeper_stops_on_a_database_that_refuses_it_and_on_an_address_in_use(
+  async fn the_keeper_stops_on_a_variable_on_a_database_that_refuses_it_and_on_an_address_in_use(
     _: PgPoolOptions,
     connect: PgConnectOptions,
   ) {
     let world = World::new();
     let taken = UdpSocket::bind("127.0.0.1:0").expect("a socket");
     let address = taken.local_addr().expect("an address").to_string();
+    let unset = keep(&var(&[])).await;
+    assert!(matches!(unset, Error::Config(_)), "{unset}");
     let absent = connect.clone().database("absent").to_url_lossy();
     let refused = keep(&var(&world.vars(&address, absent.as_str()))).await;
     assert!(
