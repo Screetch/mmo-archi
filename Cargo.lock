@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-bots"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "futures-util",
  "mmo-client",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitcode",
  "glam 0.34.3",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-collide"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libm",
  "parry3d",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-gateway"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitcode",
  "getrandom 0.4.3",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-keeper"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "mmo-protocol",
  "mmo-store",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-link"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "quinn",
  "rcgen",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-login"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "mmo-protocol",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bitcode",
  "thiserror 2.0.21",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-render"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.34.3",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "mmo-protocol",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "mmo-zone"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "futures-util",
  "mmo-collide",
