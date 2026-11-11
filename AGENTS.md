@@ -30,6 +30,8 @@ The files beside the crates:
   tests of the workspace and measures them in the same run.
 - `script/` holds the tools of the gates and of the workers: scripts of sh, and `script/title.py`, which the
   `python3` of the system runs with no package.
+- `script/character.py` writes `crates/mmo-render/assets/character.glb`, the character of the game, with the
+  `python3` of the system. Run it again after a change of the script, and commit the file that it writes.
 - `script/hooks/` holds the hooks of git: `pre-commit` runs the guards of the gates before a commit.
 - `.github/` holds the workflows, their actions, the rules of a pull request in `.github/pull_request_template.md`,
   and the forms of an issue in `.github/ISSUE_TEMPLATE/`: a defect and a request.

@@ -504,6 +504,7 @@ crate 9, and the client follows. Each new crate adds its name to `release-please
 | 8 | `mmo-login` | the binary of the login service, with the queue |
 | 9 | `mmo-bots` | the headless clients of the load test |
 | 10 | `mmo-client` | the binary of the client, with winit, wgpu and the prediction of `mmo-collide` |
+| 11 | `mmo-render` | the skinned glTF models of the game with their poses, and the drawing of the world with wgpu |
 
 `mmo-store` is the one home of each table and each key, so no other crate writes SQL or the name of a key of Redis.
 
