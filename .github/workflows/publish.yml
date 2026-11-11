@@ -74,7 +74,8 @@ jobs:
       - env:
           SYSTEM: ${{ matrix.system }}
         run: |
-          names=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name')
+          # The jq of Windows ends each line with a carriage return, which would stay in each name.
+          names=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name' | tr -d '\r')
           if [ -z "$names" ]; then
             echo "::notice title=no binary::The workspace holds no binary yet, so the release of $SYSTEM attaches nothing."
             exit 0
