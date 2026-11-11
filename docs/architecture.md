@@ -62,7 +62,9 @@ runs two copies or more.
 A password goes in the table `accounts` as an argon2id hash in the PHC format, with 19 MiB of memory, 2 passes and 1
 lane. One check took 9.8 ms on one core (section 7). One address sends at most 5 failed logins each minute for one
 name, and 30 each 10 minutes over all names. The cap of a name holds for one address alone, so a stranger who guesses a
-password cannot lock the owner of the account out. One address makes at most 5 accounts each hour.
+password cannot lock the owner of the account out. One address makes at most 5 accounts each hour. The password of a
+new account holds 8 characters at least and 128 bytes at most. A try with a password that breaks this rule makes no
+account, and it counts for no limit. A login checks no length, so an older account signs in.
 
 After a login, the player selects a character. The login service reads the characters of the account and writes the
 session `session:{token}` with the account, the character and the zone of the character. The token is 32 random bytes
@@ -170,8 +172,9 @@ sequenceDiagram
   `Resume`.
 - When the account has a slot, `NewCharacter` makes a character, and `Select` gives the session token that the client
   gives to a gateway.
-- A refusal gives its cause: a wrong password, too many tries, a name that is taken or that is not valid, an account
-  that is online, a character of another account, or a place or a slot that ended.
+- A refusal gives its cause: a wrong password, a password that is too short or too long, too many tries, a name that
+  is taken or that is not valid, an account that is online, a character of another account, an account that holds 8
+  characters already, or a place or a slot that ended.
 
 Then the client opens one connection to a gateway:
 
@@ -357,13 +360,14 @@ entered.
   waits. The next run of the script admits it. An account has one place at most, and a client that comes back keeps its
   first place. An account whose presence stands gets no place.
 - A new account enters the queue as a login does. The name of an account holds 3 to 16 letters and digits of ASCII.
-- An address makes 5 accounts each hour at most, as `created:{address}` counts them. Each try with a valid name counts,
+  Its password holds 8 characters at least and 128 bytes at most.
+- An address makes 5 accounts each hour at most, as `created:{address}` counts them. Each valid try counts,
   also a try with a name that is taken, so the limit also slows a search for the names that exist. An address of IPv6
   counts by its network of /64, since one host often holds the whole network.
 - A new character is made only while its account has a slot, so the cap of the world limits it as it limits a login.
   Its name holds 3 to 16 letters of ASCII, with the first letter in upper case and the rest in lower case. It starts
   in the zone and at the point that the operator gives to the login service. The client then gets the list of the
-  characters of the account again.
+  characters of the account again. An account holds 8 characters at most, and a ninth gets the refusal that says so.
 - The client renews `queued:{account}` each 5 s. In the same request it gets its position from `ZRANK` and the length of
   the queue. It also gets an estimate of its wait from the admissions of the last 10 minutes.
 - Each second, each copy of the login service runs one Lua script, which Redis runs as one atomic step. The script reads
