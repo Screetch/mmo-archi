@@ -3,13 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::time::Duration;
+use std::mem;
+use std::time::{Duration, Instant};
 
 use mmo_protocol::{
   AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, SAVES, Save,
   ToZone, decode, encode, frame,
 };
-use mmo_store::{Saved, Store};
+use mmo_store::{Saved, Store, keys};
 use quinn::{
   Connection, ConnectionError, Endpoint, Incoming, ReadError, RecvStream, VarInt, WriteError,
 };
@@ -148,6 +149,8 @@ struct Writer {
   gateways: BTreeMap<Gateway, Connection>,
   /// The ticks since the last save, from 0 to `SAVE_EVERY - 1`.
   ticks: u32,
+  /// The count of the ticks since the last entry, by the bucket of their time in [`keys::ticks`].
+  timing: BTreeMap<u32, u64>,
   /// The players that left, and whose last state the store did not acknowledge yet, by character.
   owed: BTreeMap<i64, Leaver>,
 }
@@ -158,7 +161,8 @@ impl Writer {
     let (batches, sent) = unbounded_channel();
     tokio::spawn(deliver(keeper, sent, events.clone()));
     let (gateways, owed) = (BTreeMap::new(), BTreeMap::new());
-    Self { zone, store, claim, batches, events, gateways, ticks: 0, owed }
+    let timing = BTreeMap::new();
+    Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed }
   }
 
   /// Takes an event, and gives the fault that stops the zone writer when the event brings one.
@@ -314,8 +318,9 @@ impl Writer {
 
   /// Runs one tick, and sends each snapshot to the gateway of its player. A gateway that a
   /// snapshot cannot reach closes, so its players leave. Each second it renews the entry of the
-  /// zone, and each 10 s it saves.
+  /// zone and adds the times of its ticks to [`keys::ticks`], and each 10 s it saves.
   fn tick(&mut self) {
+    let started = Instant::now();
     let snapshots = self.zone.tick();
     let mut lost = Vec::new();
     for (gateway, connection) in &self.gateways {
@@ -330,8 +335,11 @@ impl Writer {
     for gateway in lost {
       self.close(gateway);
     }
+    *self.timing.entry(keys::tick_bucket(started.elapsed())).or_default() += 1;
     self.ticks = (self.ticks + 1) % SAVE_EVERY;
     if self.ticks.is_multiple_of(ANNOUNCE_EVERY) {
+      let timing = mem::take(&mut self.timing);
+      self.write(Entry::Ticks(timing));
       self.write(Entry::Zone { players: self.zone.count() });
     }
     if self.ticks == 0 {
@@ -421,6 +429,7 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::Cell;
   use std::cell::RefCell;
   use std::collections::BTreeMap;
 
@@ -429,7 +438,7 @@ mod tests {
     Relayed, SAVES, Save, State, Tick, ToZone, ZoneId, frame,
   };
   use mmo_store::testing::Redis;
-  use mmo_store::{Saved, Store};
+  use mmo_store::{Saved, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -437,7 +446,7 @@ mod tests {
   use super::{Claim, Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
-  use crate::zone::Zone;
+  use crate::zone::{TICKS_PER_SECOND, Zone};
 
   const MEADOW: ZoneId = ZoneId(1);
   const GATE: Gateway = Gateway(1);
@@ -641,6 +650,29 @@ mod tests {
     assert_eq!((writer.gateways.len(), writer.zone.tick()), (0, vec![]));
     drop(peer);
     Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_writer_adds_the_time_of_each_tick_to_its_hash_in_redis_each_second(pool: PgPool) {
+    let meadow = Meadow::new(pool).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    for _ in 0..2 * TICKS_PER_SECOND {
+      writer.tick();
+    }
+    // Each second writes the ticks and the entry of the zone: 4 events, all of them writes.
+    let ended = Cell::new(0);
+    let entries = |_: &Writer, _: &Event| {
+      ended.set(ended.get() + 1);
+      ended.get() == 4
+    };
+    assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
+    let ticks = hash(&meadow.redis, "ticks:1").await;
+    let counts: Vec<(u32, u64)> = ticks
+      .iter()
+      .map(|(bucket, count)| (bucket.parse().expect("a bucket"), count.parse().expect("a count")))
+      .collect();
+    assert_eq!(counts.iter().map(|(_, count)| count).sum::<u64>(), 40);
+    assert!(counts.iter().all(|(bucket, _)| *bucket < keys::TICK_BUCKETS), "{counts:?}");
   }
 
   /// Doc line 20: a writer that stops loses 10 s of play at most.

@@ -8,6 +8,7 @@
 //! [`QUEUED`] and the id of the account, so each prefix that a script needs is public.
 
 use std::net::{IpAddr, Ipv6Addr};
+use std::time::Duration;
 
 use mmo_protocol::{AccountId, Token, ZoneId};
 
@@ -47,6 +48,27 @@ pub fn presence(account: AccountId) -> String {
 /// of players of its writer.
 pub fn zone(zone: ZoneId) -> String {
   format!("zone:{}", zone.0)
+}
+
+/// The ticks of the writer of `zone`, a hash from the number of a bucket to the count of ticks in
+/// it. Bucket `n` holds each tick that took from `n` times [`TICK_BUCKET`] up to the next bucket,
+/// and the last bucket holds each longer tick. The writer adds to it and never resets it, so a
+/// reader that wants the ticks of a run reads the hash before and after, and takes the difference.
+pub fn ticks(zone: ZoneId) -> String {
+  format!("ticks:{}", zone.0)
+}
+
+/// The time that one bucket of [`ticks`] spans.
+pub const TICK_BUCKET: Duration = Duration::from_micros(250);
+
+/// The count of buckets of [`ticks`], so the last one starts at 99.75 ms: a tick of 50 ms or more
+/// is late, and a tick of twice that or more is not told apart from a longer one.
+pub const TICK_BUCKETS: u32 = 400;
+
+/// The bucket of [`ticks`] for a tick that took `elapsed`.
+pub fn tick_bucket(elapsed: Duration) -> u32 {
+  let bucket = u32::try_from(elapsed.as_micros() / TICK_BUCKET.as_micros());
+  bucket.map_or(TICK_BUCKETS - 1, |bucket| bucket.min(TICK_BUCKETS - 1))
 }
 
 /// The queue of `world`, a sorted set of the queued accounts by the time in milliseconds when each
@@ -122,12 +144,13 @@ fn hex(token: &Token) -> String {
 #[cfg(test)]
 mod tests {
   use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+  use std::time::Duration;
 
   use mmo_protocol::{AccountId, Token, ZoneId};
 
   use super::{
-    DIRECTORY, admissions, admit, admitted, chat, created, failed, guessed, presence, queue,
-    queued, resume, session, zone,
+    DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, failed, guessed, presence,
+    queue, queued, resume, session, tick_bucket, ticks, zone,
   };
 
   #[test]
@@ -146,6 +169,7 @@ mod tests {
         queued(account),
         admit(account),
         zone(ZoneId(-3)),
+        ticks(ZoneId(3)),
         queue(1),
         admitted(1),
         admissions(u32::MAX),
@@ -165,6 +189,7 @@ mod tests {
         "queued:9223372036854775807".to_owned(),
         "admit:9223372036854775807".to_owned(),
         "zone:-3".to_owned(),
+        "ticks:3".to_owned(),
         "world:1:queue".to_owned(),
         "world:1:admitted".to_owned(),
         "world:4294967295:admissions".to_owned(),
@@ -178,5 +203,15 @@ mod tests {
         "directory".to_owned(),
       ]
     );
+  }
+
+  #[test]
+  fn a_tick_falls_in_the_bucket_of_its_quarter_of_a_millisecond_and_a_long_one_in_the_last() {
+    let micros = |micros| tick_bucket(Duration::from_micros(micros));
+    assert_eq!(
+      [micros(0), micros(249), micros(250), micros(50_000), micros(99_749), micros(99_750)],
+      [0, 0, 1, 200, 398, 399]
+    );
+    assert_eq!([micros(10_000_000), tick_bucket(Duration::MAX)], [TICK_BUCKETS - 1; 2]);
   }
 }
