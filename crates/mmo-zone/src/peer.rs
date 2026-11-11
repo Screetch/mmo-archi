@@ -1,5 +1,5 @@
-//! A world for the tests: an authority, the zone writer and a gateway with their certificates, and
-//! the link of a gateway to the zone writer.
+//! A world for the tests: an authority, the zone writer and a gateway with their certificates, the
+//! link of a gateway to the zone writer, and a keeper.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -7,16 +7,22 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  Frames, Hello, Intents, Link, Relayed, Snapshot, ToZone, decode, encode, frame,
+  Frames, FromKeeper, Hello, Intents, Link, Relayed, Snapshot, ToKeeper, ToZone, decode, encode,
+  frame,
 };
+use mmo_store::Store;
 use mmo_store::testing::Redis;
 use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{ClientConfig, Connection, ConnectionError, Endpoint, RecvStream, SendStream};
+use quinn::{
+  ClientConfig, Connection, ConnectionError, Endpoint, Incoming, RecvStream, SendStream,
+};
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use redis::AsyncCommands;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::TempDir;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::link::BUILD;
 
@@ -79,10 +85,19 @@ impl World {
       ("ZONE_PUBLIC", "zone-1:4433".to_owned()),
       ("DATABASE_URL", database.to_owned()),
       ("REDIS_URL", redis.to_owned()),
+      ("ZONE_KEEPER", "localhost:4433".to_owned()),
       ("ZONE_CERTIFICATE", self.path("zone.pem")),
       ("ZONE_KEY", self.path("zone.key")),
       ("ZONE_AUTHORITY", self.path("authority.pem")),
     ]
+  }
+
+  /// The endpoint of a keeper on a free port, which shows the certificate of the zone writer, for
+  /// the name `localhost`, and takes only a peer that the authority signed.
+  pub(crate) fn keeper(&self) -> Endpoint {
+    let file = |name: &str| self.folder.path().join(name);
+    let tls = mmo_link::server(&file("zone.pem"), &file("zone.key"), &file("authority.pem"));
+    Endpoint::server(tls.expect("a keeper"), ([127, 0, 0, 1], 0).into()).expect("an endpoint")
   }
 
   /// The endpoint of a gateway, which trusts the authority, and which shows the certificate of
@@ -106,6 +121,111 @@ impl World {
     let mut endpoint = Endpoint::client(([127, 0, 0, 1], 0).into()).expect("an endpoint");
     endpoint.set_default_client_config(ClientConfig::new(Arc::new(quic)));
     endpoint
+  }
+}
+
+/// A keeper that answers each message of a zone writer from a store, as mmo-keeper does, until
+/// the test stops it.
+pub(crate) struct Keeper {
+  endpoint: Endpoint,
+  serve: JoinHandle<()>,
+  /// Each link of a writer that ends sends a unit on it.
+  ends: UnboundedSender<()>,
+  ended: UnboundedReceiver<()>,
+}
+
+impl Keeper {
+  pub(crate) fn start(world: &World, store: Store) -> Self {
+    let endpoint = world.keeper();
+    let (ends, ended) = unbounded_channel();
+    let serve = tokio::spawn(keep(endpoint.clone(), store, ends.clone()));
+    Self { endpoint, serve, ends, ended }
+  }
+
+  /// The address that a zone writer dials, as `ZONE_KEEPER` gives it.
+  pub(crate) fn address(&self) -> String {
+    format!("localhost:{}", self.endpoint.local_addr().expect("an address").port())
+  }
+
+  /// Ends each link of the keeper, and refuses each new link until [`Keeper::resume`].
+  pub(crate) fn stop(&mut self) {
+    self.serve.abort();
+    let endpoint = self.endpoint.clone();
+    self.serve = tokio::spawn(async move {
+      loop {
+        endpoint.accept().await.expect("the endpoint of a keeper stays open").refuse();
+      }
+    });
+  }
+
+  /// Takes the links of the zone writers again, and answers them from `store`.
+  pub(crate) fn resume(&mut self, store: Store) {
+    self.serve.abort();
+    self.serve = tokio::spawn(keep(self.endpoint.clone(), store, self.ends.clone()));
+  }
+
+  /// Waits for the end of a link, which a writer that stops drops.
+  pub(crate) async fn ended(&mut self) {
+    self.ended.recv().await.expect("the keeper holds a sender");
+  }
+}
+
+impl Drop for Keeper {
+  fn drop(&mut self) {
+    self.serve.abort();
+  }
+}
+
+/// Takes the links of the zone writers, each in a task that ends with this one.
+async fn keep(endpoint: Endpoint, store: Store, ends: UnboundedSender<()>) {
+  let mut links = JoinSet::new();
+  loop {
+    let incoming = endpoint.accept().await.expect("the endpoint of a keeper stays open");
+    links.spawn(answer(incoming, store.clone(), ends.clone()));
+  }
+}
+
+/// Answers each message of a zone writer in order, until the writer drops the link.
+async fn answer(incoming: Incoming, store: Store, ends: UnboundedSender<()>) {
+  let connection = incoming.await.expect("a link");
+  let (mut send, recv) = connection.accept_bi().await.expect("a writer opens its stream at once");
+  let mut writer = Stream { recv, frames: Frames::default() };
+  // A write to a writer that dropped its link fails, and the next read ends the link.
+  drop(send.write_all(&frame(&Hello { build: 0 }.encode()).expect("a hello")).await);
+  writer.next().await;
+  while let Some(payload) = writer.next().await {
+    let answer = match decode(&payload).expect("a message of this version") {
+      ToKeeper::Claim { zone } => {
+        store.claim(zone).await.map(|epoch| FromKeeper::Claimed { epoch })
+      }
+      ToKeeper::Save(batch) => {
+        store.save(&batch).await.map(|written| FromKeeper::Saved { written })
+      }
+    };
+    let answer = answer.unwrap_or_else(|error| FromKeeper::Refused(error.refusal()));
+    drop(send.write_all(&frame(&encode(&answer)).expect("an answer")).await);
+  }
+  // The send fails only when the test dropped the keeper, and then no one waits for the end.
+  ends.send(()).ok();
+}
+
+/// The stream of a zone writer to a keeper.
+struct Stream {
+  recv: RecvStream,
+  frames: Frames,
+}
+
+impl Stream {
+  /// The payload of the next frame of the writer, or None when the link ends.
+  async fn next(&mut self) -> Option<Vec<u8>> {
+    let mut chunk = [0; 4096];
+    loop {
+      if let Some(payload) = self.frames.pop().expect("a frame of the writer") {
+        return Some(payload);
+      }
+      let size = self.recv.read(&mut chunk).await.ok().flatten()?;
+      self.frames.push(&chunk[..size]);
+    }
   }
 }
 

@@ -1059,6 +1059,7 @@ dependencies = [
  "rustls",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

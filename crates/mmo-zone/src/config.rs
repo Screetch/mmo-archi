@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use mmo_protocol::ZoneId;
-use quinn::ServerConfig;
+use quinn::{ClientConfig, ServerConfig};
 use sqlx::postgres::PgConnectOptions;
 
 /// What the zone writer reads from its environment, as the doc of the crate says.
@@ -19,8 +19,14 @@ pub(crate) struct Config {
   pub(crate) database: PgConnectOptions,
   /// The Redis of the game, as a URL.
   pub(crate) redis: String,
-  /// The QUIC of the links, which takes only a peer whose certificate the authority signed.
+  /// The address of the keeper, as `host:port`.
+  pub(crate) keeper: String,
+  /// The QUIC of the links of the gateways, which takes only a peer whose certificate the
+  /// authority signed.
   pub(crate) server: ServerConfig,
+  /// The QUIC of the link to the keeper, which shows the certificate of the zone writer and takes
+  /// only a keeper whose certificate the authority signed.
+  pub(crate) client: ClientConfig,
 }
 
 /// A variable of the environment that the zone writer cannot use.
@@ -46,10 +52,15 @@ impl Config {
     let public = value(&var, "ZONE_PUBLIC")?;
     let database = PgConnectOptions::from_str(&value(&var, "DATABASE_URL")?)?;
     let redis = value(&var, "REDIS_URL")?;
+    let keeper = value(&var, "ZONE_KEEPER")?;
     let file = |name| value(&var, name).map(PathBuf::from);
-    let server =
-      mmo_link::server(&file("ZONE_CERTIFICATE")?, &file("ZONE_KEY")?, &file("ZONE_AUTHORITY")?)?;
-    Ok(Self { zone, address, public, database, redis, server })
+    let files = [file("ZONE_CERTIFICATE")?, file("ZONE_KEY")?, file("ZONE_AUTHORITY")?];
+    let [certificate, key, authority] = &files;
+    // The two read the same files, so a file that the server cannot use fails the client alike.
+    let (server, client) = mmo_link::server(certificate, key, authority).and_then(|server| {
+      mmo_link::client(certificate, key, authority).map(|client| (server, client))
+    })?;
+    Ok(Self { zone, address, public, database, redis, keeper, server, client })
   }
 }
 
@@ -73,9 +84,8 @@ mod tests {
       vars.retain(|(key, _)| *key != name);
       vars.extend(value.map(|value| (name, value)));
       let config = Config::read(var(vars));
-      config
-        .map(|config| (config.zone.0, config.address.to_string(), config.public, config.redis))
-        .map_err(|e| e.to_string())
+      let fields = |c: Config| (c.zone.0, [c.address.to_string(), c.public, c.redis, c.keeper]);
+      config.map(fields).map_err(|e| e.to_string())
     };
     let found = [
       read("", None),
@@ -84,6 +94,7 @@ mod tests {
       read("ZONE_PUBLIC", None),
       read("DATABASE_URL", None),
       read("REDIS_URL", None),
+      read("ZONE_KEEPER", None),
       read("ZONE_CERTIFICATE", None),
       read("ZONE_KEY", None),
       read("ZONE_AUTHORITY", None),
@@ -98,12 +109,16 @@ mod tests {
     assert_eq!(
       found,
       [
-        Ok((1, "127.0.0.1:4433".to_owned(), "zone-1:4433".to_owned(), "redis://redis".to_owned())),
+        Ok((
+          1,
+          ["127.0.0.1:4433", "zone-1:4433", "redis://redis", "localhost:4433"].map(String::from)
+        )),
         unset("ZONE_ID"),
         unset("ZONE_ADDRESS"),
         unset("ZONE_PUBLIC"),
         unset("DATABASE_URL"),
         unset("REDIS_URL"),
+        unset("ZONE_KEEPER"),
         unset("ZONE_CERTIFICATE"),
         unset("ZONE_KEY"),
         unset("ZONE_AUTHORITY"),

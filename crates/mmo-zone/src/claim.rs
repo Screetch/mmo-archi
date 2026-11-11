@@ -39,7 +39,7 @@ pub(crate) enum Entry {
   Absent(Vec<AccountId>),
 }
 
-/// The zone of a writer, the epoch that the store gave it, and its connection to Redis.
+/// The zone of a writer, the epoch that the keeper gave it, and its connection to Redis.
 #[derive(Clone)]
 pub(crate) struct Claim {
   redis: ConnectionManager,
@@ -65,7 +65,7 @@ impl Claim {
     Ok(claim)
   }
 
-  /// The batch of `saves` for the store, with the epoch of this writer.
+  /// The batch of `saves` for the keeper, with the epoch of this writer.
   pub(crate) fn batch(&self, saves: Vec<Save>) -> Batch {
     Batch { zone: self.zone, epoch: self.epoch, saves }
   }

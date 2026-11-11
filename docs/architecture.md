@@ -100,10 +100,10 @@ reads the presence keys of its zone in Redis, and loads the last save of each of
 gateways see the change of the directory and send the players to the new writer, which sends each player a full
 snapshot.
 
-Until the keeper stands, the writer claims its epoch with `Store::claim` and saves with `Store::save` itself, with the
-same `Batch` that it will send to the keeper, so the keeper changes where the batch goes and no rule of this section.
-The writer renews the presence of each of its players each 10 s with the save, and it stops, for the process manager to
-start it again, when the store refuses a batch of its epoch or when the entry of its zone holds a newer epoch.
+The writer claims its epoch and sends each save batch on one link to the keeper, which shows the certificate of the
+writer. It reads the last save of a player from PostgreSQL itself, and it writes nothing there. The writer renews the
+presence of each of its players each 10 s with the save, and it stops, for the process manager to start it again, when
+the keeper refuses a batch of its epoch or when the entry of its zone holds a newer epoch.
 
 ### The keeper
 
