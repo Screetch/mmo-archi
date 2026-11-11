@@ -1,0 +1,16 @@
+[package]
+name = "mmo-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "The client of mmo-archi: its prediction, its camera and its view of the world, without a window."
+
+[dependencies]
+glam = "0.34.3"
+mmo-collide = { path = "../mmo-collide" }
+mmo-protocol = { path = "../mmo-protocol" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

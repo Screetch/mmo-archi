@@ -999,6 +999,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmo-client"
+version = "0.0.0"
+dependencies = [
+ "glam 0.34.3",
+ "mmo-collide",
+ "mmo-protocol",
+ "thiserror",
+]
+
+[[package]]
 name = "mmo-collide"
 version = "0.0.0"
 dependencies = [
