@@ -996,6 +996,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmo-gateway"
+version = "0.0.0"
+dependencies = [
+ "bitcode",
+ "getrandom 0.4.3",
+ "mmo-protocol",
+ "mmo-store",
+ "quinn",
+ "rcgen",
+ "redis",
+ "rustls",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "mmo-login"
 version = "0.0.0"
 dependencies = [
