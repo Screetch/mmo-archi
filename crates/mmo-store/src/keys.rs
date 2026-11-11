@@ -14,6 +14,16 @@ use mmo_protocol::{AccountId, Token, ZoneId};
 /// The channel on which a zone writer names each zone that changed its writer.
 pub const DIRECTORY: &str = "directory";
 
+/// The fields of [`zone`], which a zone writer writes and a gateway reads: the address that the
+/// gateways dial, the epoch of the writer, and the count of its players.
+pub const ADDRESS: &str = "address";
+pub const EPOCH: &str = "epoch";
+pub const PLAYERS: &str = "players";
+
+/// The fields of [`presence`], besides [`EPOCH`]: the character and the zone of the account.
+pub const CHARACTER: &str = "character";
+pub const ZONE: &str = "zone";
+
 /// The prefix of [`presence`].
 pub const PRESENCE: &str = "presence:";
 
