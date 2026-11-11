@@ -216,7 +216,8 @@ mod tests {
     let forest = world.zone(2).await;
     let token = world.session(11, 42, 1).await;
     let address = world.gateway();
-    let mut client = world.attached(address, token).await;
+    let (mut client, first) = world.announced(address, token).await;
+    assert_eq!(first, ToClient::Moved { zone: ZoneId(1) });
     let mut one = meadow.accept().await;
     let link = link_at(&client, &one).await;
     let join = ToZone::Join { link, account: AccountId(11), character: CharacterId(42) };
@@ -280,17 +281,23 @@ mod tests {
     let mut garbled = client().await;
     garbled.greet().await;
     garbled.write(&frame(&[]).expect("a frame")).await;
-    let mut stranger = world.attached(address, Token([0; 32])).await;
+    let mut stranger = world.attach(address, Token([0; 32])).await;
     assert_eq!(stranger.message::<ToClient>().await, ToClient::NoSession);
     let mut deaf_stranger = client().await;
     deaf_stranger.greet().await;
     deaf_stranger.recv.stop(7u32.into()).expect("an open stream");
     deaf_stranger.tell(&mmo_protocol::Attach { session: Token([0; 32]) }).await;
+    let token = world.session(11, 42, 1).await;
+    let mut deaf_player = client().await;
+    deaf_player.greet().await;
+    deaf_player.recv.stop(7u32.into()).expect("an open stream");
+    deaf_player.tell(&mmo_protocol::Attach { session: token }).await;
     let mut reasons = Vec::new();
     for peer in [&quiet, &deaf, &short, &large, &newer, &silent, &garbled, &stranger] {
       reasons.push(peer.closed().await);
     }
     reasons.push(deaf_stranger.closed().await);
+    reasons.push(deaf_player.closed().await);
     assert_eq!(
       reasons,
       [
@@ -302,6 +309,7 @@ mod tests {
         reason(ENDED),
         reason(MALFORMED),
         reason("no session has this token"),
+        reason(STOPPED),
         reason(STOPPED),
       ]
     );
@@ -334,7 +342,7 @@ mod tests {
     for keys in ["~zone:*", "~session:*"] {
       let token = world.session(11, 42, 1).await;
       world.grant(keys, "+@all").await;
-      reasons.push(world.attached(address, token).await.closed().await);
+      reasons.push(world.attach(address, token).await.closed().await);
     }
     assert_eq!(
       reasons,
@@ -468,7 +476,7 @@ mod tests {
 
     world.grant("~*", "-hmget").await;
     world.publish(1).await;
-    let cy = world.attached(address, world.session(13, 44, 7).await).await;
+    let cy = world.attach(address, world.session(13, 44, 7).await).await;
     let denied = "Redis fails: NoPerm: User gateway has no permissions to run the 'hmget' command";
     assert_eq!(cy.closed().await, reason(denied));
     one.tell(&Relayed { link, message: line(SAY) }).await;

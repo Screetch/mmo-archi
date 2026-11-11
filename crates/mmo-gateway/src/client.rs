@@ -28,15 +28,17 @@ pub(crate) async fn serve(incoming: Incoming, gateway: Arc<Gateway>) {
 }
 
 /// Takes the stream that the client opens. Each side writes its hello first, then the client
-/// sends its [`Attach`], and the gateway joins the character of its session to the zone of the
-/// session.
+/// sends its [`Attach`], and the gateway tells it the zone of its session as [`ToClient::Moved`],
+/// then joins the character of the session to that zone.
 async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infallible, Fault> {
-  let (send, mut stream) = greet(connection.accept_bi().await).await?;
+  let (mut send, mut stream) = greet(connection.accept_bi().await).await?;
   let Attach { session } = decode(&stream.next().await?)?;
   let Some(session) = gateway.session(&session).await? else {
     return Err(refuse(send).await);
   };
   let link = random();
+  let first = ToClient::Moved { zone: session.zone };
+  send.write_all(&framed(&encode(&first))).await?;
   let writer = gateway.writer(session.zone).await?;
   let (to, down) = unbounded_channel();
   writer.join(link, (session.account, session.character), to.clone());

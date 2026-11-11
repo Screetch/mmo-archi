@@ -186,8 +186,9 @@ sequenceDiagram
 
 Then the client opens one connection to a gateway:
 
-- Stream 0, which is reliable and ordered, carries the first message, the orders, the chat and the events, as a move to
-  another zone.
+- Stream 0, which is reliable and ordered, carries the orders, the chat and the events, as a move to another zone. Its
+  first message, after the attach, is `Moved { zone }` with the zone of the session, so the client knows the zone that
+  it names in each datagram.
 - The datagrams carry the intents of movement up, and the snapshots down. A lost snapshot does not stop the next one,
   since each delta starts from a snapshot that the client acknowledged.
 

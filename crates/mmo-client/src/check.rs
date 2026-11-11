@@ -34,7 +34,8 @@ pub enum Failure {
   /// The check did not end in time.
   #[error("the check does not end within {0:?}")]
   Slow(Duration),
-  /// The gateway sends a message that is no snapshot, so the player is not in the zone.
+  /// The gateway sends a message that is neither its zone nor a snapshot, so the player is not
+  /// in the zone.
   #[error("the gateway sends {0:?} in place of a snapshot")]
   Message(ToClient),
 }
@@ -71,7 +72,7 @@ async fn check_within(
           println!("the zone shows {seen} entities in the snapshot of tick {tick}");
           return Ok(());
         }
-        Down::Snapshot(_) => {}
+        Down::Snapshot(_) | Down::Message(ToClient::Moved { .. }) => {}
         Down::Message(message) => return Err(Failure::Message(message)),
       }
     }
@@ -146,6 +147,7 @@ mod tests {
 
   async fn gateway(mut peer: Peer, what: Gateway) -> Peer {
     assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
+    peer.write(&ToClient::Moved { zone: ZoneId(1) }).await;
     match what {
       Gateway::Shows => {
         for shown in [vec![], vec![entity()]] {
