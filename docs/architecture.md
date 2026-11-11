@@ -525,3 +525,17 @@ the hosts of the servers.
 
 Each zone writer reports the time of each tick in `ticks:{zone}` (section 3), and each bot reports its bytes up and down.
 The test keeps each report with the commit that it ran. A short stage 1 with 200 bots runs in the gates on Linux.
+
+## 13. The drawing
+
+The crate `mmo-render` draws the world with wgpu to a texture. It has no window: the client gives it the texture of its
+window, and a test gives it a texture of its own.
+
+- A model is a binary glTF with one skinned mesh, a colour map, a normal map and a clip named `Idle`. The character of
+  the game is `crates/mmo-render/assets/character.glb`, which `script/character.py` writes.
+- The ground is the list of solids of `mmo-collide`, so the client draws what the server collides with.
+- One pipeline draws both. The vertex stage skins each point with the joint matrices of its instance. The fragment
+  stage adds the Lambert light of the sun to the Cook-Torrance light, and a light that the sky and the ground send
+  everywhere. It bends the normal with the normal map.
+- The tests draw to a texture and read its pixels, so they need a graphics adapter. A machine gives its GPU, and the
+  gates on Linux give lavapipe, a Vulkan driver that runs on the CPU. No test opens a window.

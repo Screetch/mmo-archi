@@ -122,6 +122,11 @@ jobs:
         uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9
       # The tests of mmo-login start a Redis of their own for each test.
       - uses: ./.github/actions/redis
+      # The tests of mmo-render draw to a texture, so the runner needs a graphics adapter. Mesa gives lavapipe, a Vulkan
+      # driver that draws on the CPU. The jobs on macOS and on Windows install nothing for the tests.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
       - run: cargo coverage
         env:
           DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
