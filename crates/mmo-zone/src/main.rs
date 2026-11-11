@@ -106,10 +106,10 @@ mod tests {
 
   use mmo_protocol::{
     Angle, CharacterId, Entity, FromClient, Input, Intents, Link, Password, Position, Relayed,
-    Snapshot, Tick, ToZone, Velocity, ZoneId,
+    Snapshot, State, Tick, ToZone, Velocity, ZoneId,
   };
+  use mmo_store::Store;
   use mmo_store::testing::Redis;
-  use mmo_store::{State, Store};
   use sqlx::ConnectOptions;
   use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
   use tokio::time;

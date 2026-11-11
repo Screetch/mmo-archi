@@ -399,10 +399,10 @@ mod tests {
 
   use mmo_protocol::{
     AccountId, Angle, CharacterId, FromClient, Input, Intents, Link, PROTOCOL, Password, Position,
-    Relayed, Tick, ToZone, ZoneId, frame,
+    Relayed, State, Tick, ToZone, ZoneId, frame,
   };
   use mmo_store::testing::Redis;
-  use mmo_store::{Saved, State, Store};
+  use mmo_store::{Saved, Store};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
