@@ -49,7 +49,10 @@ impl From<Row> for Saved {
 }
 
 impl Store {
-  /// Makes a character of `account` in `zone`, with the version 0.
+  /// Makes a character of `account` in `zone`, with the version 0. The table counts the
+  /// characters of the account while it holds the row of the account, so two makers of one account
+  /// never pass the count together. It gives [`Error::Full`] when the account holds
+  /// [`CHARACTERS`](crate::CHARACTERS) already.
   pub async fn create_character(
     &self,
     account: AccountId,
@@ -72,7 +75,12 @@ impl Store {
     .fetch_one(&self.pool)
     .await
     .map(CharacterId)
-    .map_err(|error| taken(error, name))
+    .map_err(|error| match error {
+      sqlx::Error::Database(ref found) if found.constraint() == Some("characters_account_cap") => {
+        Error::Full { account }
+      }
+      error => taken(error, name),
+    })
   }
 
   /// The characters of `account`, in the order of their ids.
@@ -105,7 +113,7 @@ mod tests {
   use sqlx::PgPool;
 
   use super::Saved;
-  use crate::{Error, Store};
+  use crate::{CHARACTERS, Error, Store};
 
   const START: State =
     State { position: Position { x: 120, y: 0, z: -4500 }, yaw: Angle(u16::MAX), hit_points: 100 };
@@ -136,6 +144,32 @@ mod tests {
         Saved { character: cael, zone: ZoneId(3), state: away, version: 0 },
       ]
     );
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn two_makers_of_an_account_at_7_characters_make_one_more_and_never_two(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let store = Store::migrate(pool).await?;
+    store.add_zone(ZoneId(3), "meadow").await?;
+    let account = store.create_account("alice", Password("one".to_owned())).await?;
+    let other = store.create_account("bob", Password("two".to_owned())).await?;
+    for name in ["Alpha", "Bravo", "Cael", "Dara", "Elan", "Finn", "Gale"] {
+      store.create_character(account, name, ZoneId(3), START).await?;
+    }
+    let (first, second) = tokio::join!(
+      store.create_character(account, "Hana", ZoneId(3), START),
+      store.create_character(account, "Iris", ZoneId(3), START),
+    );
+    let refused = [first, second].into_iter().filter_map(Result::err).collect::<Vec<_>>();
+    assert!(matches!(refused[..], [Error::Full { account: held }] if held == account));
+    assert_eq!(
+      refused[0].to_string(),
+      format!("the account {} holds 8 characters already", account.0)
+    );
+    assert_eq!(store.characters(account).await?.len(), CHARACTERS);
+    store.create_character(other, "Jade", ZoneId(3), START).await?;
     Ok(())
   }
 

@@ -471,6 +471,10 @@ mod tests {
   async fn a_fault_of_a_store_ends_the_link_of_its_client(pool: PgPool) -> Result<(), Fault> {
     let game = Game::new(pool.clone()).await;
     let ada = game.account("ada").await;
+    sqlx::query("ALTER TABLE characters DISABLE TRIGGER characters_account_cap")
+      .execute(&pool)
+      .await
+      .map_err(mmo_store::Error::from)?;
     sqlx::query(
       "INSERT INTO characters (account_id, name, zone_id, x, y, z, yaw, hit_points) \
        SELECT $1, lpad(n::text, 40, '0'), 7, 0, 0, 0, 0, 100 FROM generate_series(1, 2000) n",
