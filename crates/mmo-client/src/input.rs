@@ -2,6 +2,19 @@
 
 use mmo_protocol::Angle;
 
+/// A movement key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+  /// Walks toward where the camera looks.
+  Forward,
+  /// Walks away from where the camera looks.
+  Back,
+  /// Walks to the left of the camera.
+  Left,
+  /// Walks to the right of the camera.
+  Right,
+}
+
 /// The movement keys that are down.
 #[expect(clippy::struct_excessive_bools, reason = "each of the four keys is down or up")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -17,6 +30,16 @@ pub struct Keys {
 }
 
 impl Keys {
+  /// Puts the key of `direction` down, or up.
+  pub fn set(&mut self, direction: Direction, down: bool) {
+    match direction {
+      Direction::Forward => self.forward = down,
+      Direction::Back => self.back = down,
+      Direction::Left => self.left = down,
+      Direction::Right => self.right = down,
+    }
+  }
+
   /// The heading of the walk for a camera that looks along `yaw`, in radians, or `None` when no
   /// key is down or two opposite keys cancel each other. Two keys at an angle give the heading
   /// between them.
@@ -31,7 +54,7 @@ impl Keys {
 mod tests {
   use mmo_protocol::Angle;
 
-  use super::Keys;
+  use super::{Direction, Keys};
 
   const FORWARD: Keys = Keys { forward: true, back: false, left: false, right: false };
 
@@ -47,6 +70,18 @@ mod tests {
       heading(Keys { forward: true, right: true, ..Keys::default() }, 0.0),
       Some(Angle(8192))
     );
+  }
+
+  #[test]
+  fn a_key_goes_down_and_up_by_its_direction() {
+    let mut keys = Keys::default();
+    for direction in [Direction::Forward, Direction::Back, Direction::Left, Direction::Right] {
+      keys.set(direction, true);
+    }
+    assert_eq!(keys, Keys { forward: true, back: true, left: true, right: true });
+    keys.set(Direction::Back, false);
+    keys.set(Direction::Left, false);
+    assert_eq!(keys, Keys { forward: true, back: false, left: false, right: true });
   }
 
   #[test]

@@ -126,10 +126,14 @@ jobs:
       # driver that draws on the CPU. The jobs on macOS and on Windows install nothing for the tests.
       - run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers xvfb \
+            libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2
       - run: cargo coverage
         env:
           DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
+      # No test opens a window, and cargo coverage leaves out the file that does. So the binary of the game runs the demo
+      # under a virtual display: it opens a window, draws 60 frames to it, and exits with 0.
+      - run: xvfb-run -a cargo run --locked -p mmo-client --bin mmo-play -- --demo --frames 60
       - uses: ./.github/actions/clear
 
   crate:

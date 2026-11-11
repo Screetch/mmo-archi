@@ -3,7 +3,7 @@
 use std::future::pending;
 use std::time::Duration;
 
-use mmo_protocol::{FromLogin, Password, ToLogin, Token};
+use mmo_protocol::{CharacterId, FromLogin, Password, ToLogin, Token};
 use tokio::time::sleep;
 
 use crate::Fault;
@@ -37,16 +37,25 @@ pub struct Place {
   pub wait: u32,
 }
 
+/// The session that the login service gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Session {
+  /// The token that the client gives to a gateway.
+  pub token: Token,
+  /// The character that the session plays.
+  pub character: CharacterId,
+}
+
 /// Signs in to the login service at `address`, as `host:port`, waits in the queue of the world,
-/// makes the character when the account has none of that name, selects it, and gives the token of
-/// the session for a gateway. It calls `queued` with the place of the account in the queue each
+/// makes the character when the account has none of that name, selects it, and gives the
+/// [`Session`] for a gateway. It calls `queued` with the place of the account in the queue each
 /// time that the login service gives it, which is each 5 s while the account waits.
 pub async fn enter(
   trust: &Trust,
   address: &str,
   account: &Account,
   queued: &mut (dyn FnMut(Place) + Send),
-) -> Result<Token, Fault> {
+) -> Result<Session, Fault> {
   enter_with(trust, address, account, queued, WAIT).await
 }
 
@@ -56,7 +65,7 @@ async fn enter_with(
   account: &Account,
   queued: &mut (dyn FnMut(Place) + Send),
   wait: Duration,
-) -> Result<Token, Fault> {
+) -> Result<Session, Fault> {
   let mut link = open(trust, address).await?;
   let Account { name, password, create, .. } = account.clone();
   let mut outgoing = Some(if create {
@@ -64,7 +73,7 @@ async fn enter_with(
   } else {
     ToLogin::Login { name, password }
   });
-  let (mut waiting, mut made) = (false, false);
+  let (mut waiting, mut made, mut selected) = (false, false, None);
   loop {
     if let Some(message) = outgoing.take() {
       link.write(&message).await?;
@@ -85,6 +94,7 @@ async fn enter_with(
       FromLogin::Characters(characters) => {
         waiting = false;
         let found = characters.iter().find(|one| one.name.eq_ignore_ascii_case(&account.character));
+        selected = found.map(|one| one.id);
         outgoing = Some(match found {
           Some(one) => ToLogin::Select { character: one.id },
           None if !made => ToLogin::NewCharacter { name: account.character.clone() },
@@ -92,7 +102,10 @@ async fn enter_with(
         });
         made |= found.is_none();
       }
-      FromLogin::Session { token } => return Ok(token),
+      FromLogin::Session { token } => {
+        let named = || Fault::NoCharacter(account.character.clone());
+        return selected.map(|character| Session { token, character }).ok_or_else(named);
+      }
     }
   }
 }
@@ -105,10 +118,14 @@ mod tests {
 
   use mmo_protocol::frame;
 
-  use super::{Account, Place, WAIT, enter, enter_with};
+  use super::{Account, Place, Session, WAIT, enter, enter_with};
   use crate::testing::{Fake, hold};
 
   const TOKEN: Token = Token([9; 32]);
+
+  fn session() -> Session {
+    Session { token: TOKEN, character: CharacterId(42) }
+  }
 
   fn account(create: bool) -> Account {
     Account {
@@ -123,7 +140,7 @@ mod tests {
     Character { id: CharacterId(42), name: name.to_owned() }
   }
 
-  async fn run(fake: &Fake, account: &Account) -> (Result<Token, String>, Vec<Place>) {
+  async fn run(fake: &Fake, account: &Account) -> (Result<Session, String>, Vec<Place>) {
     let mut places = Vec::new();
     let wait = Duration::from_millis(20);
     let token =
@@ -150,7 +167,7 @@ mod tests {
       peer
     });
     let (token, places) = run(&fake, &account(false)).await;
-    assert_eq!(token, Ok(TOKEN));
+    assert_eq!(token, Ok(session()));
     let place = |position| Place { position, length: 9, wait: 30 };
     assert_eq!(places, [place(4), place(3)]);
     fake.end().await;
@@ -172,7 +189,7 @@ mod tests {
       peer.write(&FromLogin::Session { token: TOKEN }).await;
       peer
     });
-    assert_eq!(run(&fake, &account(true)).await, (Ok(TOKEN), vec![]));
+    assert_eq!(run(&fake, &account(true)).await, (Ok(session()), vec![]));
     fake.end().await;
   }
 
@@ -197,6 +214,14 @@ mod tests {
     let (token, _) = run(&stubborn, &account(false)).await;
     assert_eq!(token, Err("the account has no character named brom".to_owned()));
     stubborn.end().await;
+    let hasty = Fake::start(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      peer.write(&FromLogin::Session { token: TOKEN }).await;
+      peer
+    });
+    let (token, _) = run(&hasty, &account(false)).await;
+    assert_eq!(token, Err("the account has no character named brom".to_owned()));
+    hasty.end().await;
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
@@ -211,7 +236,7 @@ mod tests {
       peer
     });
     let token = enter(&fake.trust, &fake.address, &account(false), &mut drop).await;
-    assert_eq!(token.ok(), Some(TOKEN));
+    assert_eq!(token.ok(), Some(session()));
     fake.end().await;
   }
 

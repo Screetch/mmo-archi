@@ -10,35 +10,17 @@
 //! - `MMO_CHECK_NAME`, `MMO_CHECK_PASSWORD` and `MMO_CHECK_CHARACTER`: the new account and its
 //!   character. The login service refuses a name that an account holds already.
 
-use std::path::Path;
 use std::time::Duration;
 
-use mmo_protocol::{Password, ToClient};
+use mmo_protocol::ToClient;
 use tokio::time::timeout;
 
-use crate::{Account, Down, Fault, Play, Trust, enter};
+use crate::settings::Settings;
+use crate::{Down, Failure, Play, enter};
 
 /// The time that the check waits for the world: the queue admits an account within 1 s, and the
 /// first snapshot comes within 50 ms of the join of the zone writer.
 const LIMIT: Duration = Duration::from_secs(10);
-
-/// Why the check does not reach the world.
-#[derive(Debug, thiserror::Error)]
-pub enum Failure {
-  /// The environment lacks a variable of the check.
-  #[error("the variable {0} is not set")]
-  Unset(&'static str),
-  /// The client cannot reach a server, or the login service refuses it.
-  #[error(transparent)]
-  Fault(#[from] Fault),
-  /// The check did not end in time.
-  #[error("the check does not end within {0:?}")]
-  Slow(Duration),
-  /// The gateway sends a message that is neither its zone nor a snapshot, so the player is not
-  /// in the zone.
-  #[error("the gateway sends {0:?} in place of a snapshot")]
-  Message(ToClient),
-}
 
 /// Runs the check as the environment that `read` gives configures it, and prints what it proved.
 pub async fn check(read: &dyn Fn(&str) -> Option<String>) -> Result<(), Failure> {
@@ -49,22 +31,14 @@ async fn check_within(
   read: &dyn Fn(&str) -> Option<String>,
   limit: Duration,
 ) -> Result<(), Failure> {
-  let text = |name: &'static str| read(name).ok_or(Failure::Unset(name));
-  let trust = Trust::from_pem(Path::new(&text("MMO_CHECK_AUTHORITY")?))?;
-  let (login, gateway) = (text("MMO_CHECK_LOGIN")?, text("MMO_CHECK_GATEWAY")?);
-  let account = Account {
-    name: text("MMO_CHECK_NAME")?,
-    password: Password(text("MMO_CHECK_PASSWORD")?),
-    character: text("MMO_CHECK_CHARACTER")?,
-    create: true,
-  };
+  let Settings { trust, login, gateway, account } = Settings::read("MMO_CHECK", read, true)?;
   let seen = async {
-    let token = enter(&trust, &login, &account, &mut |_| ()).await?;
+    let session = enter(&trust, &login, &account, &mut |_| ()).await?;
     println!(
       "the login service made {} with {} and gave a session",
       account.name, account.character
     );
-    let mut play = Play::attach(&trust, &gateway, token).await?;
+    let mut play = Play::attach(&trust, &gateway, session.token).await?;
     loop {
       match play.next().await? {
         Down::Snapshot(snapshot) if !snapshot.entered.is_empty() => {

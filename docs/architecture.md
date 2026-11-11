@@ -578,3 +578,15 @@ window, and a test gives it a texture of its own.
   everywhere. It bends the normal with the normal map.
 - The tests draw to a texture and read its pixels, so they need a graphics adapter. A machine gives its GPU, and the
   gates on Linux give lavapipe, a Vulkan driver that runs on the CPU. No test opens a window.
+
+The binary `mmo-play` of `mmo-client` opens the window with winit and draws the scene of the game with this crate.
+
+- `Game` of `mmo-client` takes the messages of the gateway, runs the prediction of section 5 on the inputs of the player,
+  sends the intents, and gives the scene of each frame: the other characters where the last snapshots put them, and the
+  player where the prediction puts it. It holds no window, so tests prove it.
+- The file `window.rs` is the only code that needs a window. It moves the keys and the pointer to the game, and the scene
+  to the renderer. `cargo coverage` leaves that file out. The gates run `mmo-play --demo --frames 60` under a virtual
+  display instead, which opens a window and draws 60 frames with no server.
+- The controls are the arrows, W A S D and Z Q S D to walk, the right button of the mouse with a move of the pointer to turn
+  the camera, and the wheel to zoom. The variables `MMO_PLAY_*` name the account and the servers, as `MMO_CHECK_*` do for
+  the check.

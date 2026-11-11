@@ -132,7 +132,7 @@ async fn play(
     out.place.get_or_insert(place);
   };
   let token = tokio::select! {
-    token = enter(&shared.trust, &shared.login, &bot.account, queued) => token?,
+    session = enter(&shared.trust, &shared.login, &bot.account, queued) => session?.token,
     _ = stop.changed() => return Err(Error::Queued),
   };
   out.waited = Some(started.elapsed());
