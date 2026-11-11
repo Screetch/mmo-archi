@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
 
-use mmo_protocol::{FRAME, Frames, Hello, decode, encode, frame};
+use mmo_protocol::{FRAME, Frames, Hello, Position, ZoneId, decode, encode, frame};
 use mmo_store::Store;
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream, ServerConfig};
 use redis::aio::ConnectionManager;
@@ -16,7 +16,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sqlx::PgPool;
 use tokio::time::interval;
 
-use crate::{Client, Login, World};
+use crate::{Client, Login, Start, World};
 
 /// The signal on which a copy of the login service stops, as the end of `tokio::signal::ctrl_c`.
 pub type Stop = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
@@ -88,6 +88,7 @@ struct Config {
   database: String,
   redis: String,
   world: World,
+  start: Start,
 }
 
 impl Config {
@@ -104,6 +105,10 @@ impl Config {
         id: parsed("MMO_WORLD", &text("MMO_WORLD")?)?,
         cap: parsed("MMO_WORLD_CAP", &text("MMO_WORLD_CAP")?)?,
       },
+      start: Start {
+        zone: ZoneId(parsed("MMO_START_ZONE", &text("MMO_START_ZONE")?)?),
+        position: position("MMO_START_POSITION", &text("MMO_START_POSITION")?)?,
+      },
     })
   }
 
@@ -116,7 +121,16 @@ impl Config {
     let store = Store::open(pool).await?;
     let redis = ConnectionManager::new(redis::Client::open(self.redis)?).await?;
     let endpoint = Endpoint::server(tls, self.address)?;
-    Ok((endpoint, Login::new(store, redis, self.world)))
+    Ok((endpoint, Login::new(store, redis, self.world, self.start)))
+  }
+}
+
+/// The position that `text` gives as `x,y,z` in centimetres.
+fn position(name: &'static str, text: &str) -> Result<Position, Fault> {
+  let numbers: Vec<i32> = text.split(',').map(|one| parsed(name, one)).collect::<Result<_, _>>()?;
+  match numbers[..] {
+    [x, y, z] => Ok(Position { x, y, z }),
+    _ => Err(Fault::Invalid { name, why: "a position is x,y,z in whole centimetres".to_owned() }),
   }
 }
 
@@ -132,6 +146,8 @@ fn parsed<T: FromStr<Err: Display>>(name: &'static str, text: &str) -> Result<T,
 ///   certificate of TLS and of its key.
 /// - `DATABASE_URL` and `REDIS_URL`: the stores of the game. The keeper migrates the database.
 /// - `MMO_WORLD` and `MMO_WORLD_CAP`: the id of the world and the most accounts that it admits.
+/// - `MMO_START_ZONE` and `MMO_START_POSITION`: the zone, and the point of the zone as `x,y,z` in
+///   centimetres, where each new character starts.
 ///
 /// Each client opens one stream, sends its [`Hello`] in a frame, then each [`ToLogin`] in a frame.
 /// The copy answers with its hello, then with a `FromLogin` for each message, and with the
@@ -189,6 +205,7 @@ async fn talk(incoming: Incoming, login: &Login) -> Result<(), Fault> {
     connection.closed().await;
     return Err(fault.into());
   }
+  let from = connection.remote_address().ip();
   let mut client = Client::default();
   let mut each = interval(TICK);
   loop {
@@ -198,7 +215,7 @@ async fn talk(incoming: Incoming, login: &Login) -> Result<(), Fault> {
           ended(&connection, send).await;
           return Ok(());
         };
-        Some(login.answer(&mut client, decode(&payload)?).await?)
+        Some(login.answer(&mut client, from, decode(&payload)?).await?)
       }
       _ = each.tick() => login.ready(&mut client).await?,
     };
@@ -251,7 +268,7 @@ mod tests {
   use sqlx::PgPool;
 
   use super::{Config, Fault, run, serve};
-  use crate::game::{Game, START, login};
+  use crate::game::{Game, MEADOW, START, login};
   use crate::{Login, World};
 
   /// A certificate of TLS for `localhost`, and its files of PEM in a folder of the test alone.
@@ -363,7 +380,7 @@ mod tests {
     }
   }
 
-  const MINE: [u8; 6] = [1, 0, 7, 0, 0, 0];
+  const MINE: [u8; 6] = [2, 0, 7, 0, 0, 0];
 
   #[sqlx::test(migrations = false)]
   async fn a_client_waits_for_its_slot_and_gets_a_session_over_quic(
@@ -403,7 +420,7 @@ mod tests {
     quiet.send.finish().expect("the stream ends");
     outcomes.push(format!("{:?}", quiet.read().await).into());
     let mut other = Peer::new(address, &tls).await;
-    other.send(&frame(&[2, 0, 7, 0, 0, 0]).expect("a frame")).await;
+    other.send(&frame(&[3, 0, 7, 0, 0, 0]).expect("a frame")).await;
     let theirs = other.read().await.expect("a frame").expect("a hello");
     outcomes.push(format!("{:?}", Hello::decode(&theirs)).into());
     other.connection.close(0_u32.into(), b"another version");
@@ -500,6 +517,8 @@ mod tests {
       ("REDIS_URL", "redis://127.0.0.1:1".to_owned()),
       ("MMO_WORLD", "1".to_owned()),
       ("MMO_WORLD_CAP", "5000".to_owned()),
+      ("MMO_START_ZONE", "7".to_owned()),
+      ("MMO_START_POSITION", "1200,-300,50".to_owned()),
     ]);
     for (name, value) in changed {
       held.insert(name, (*value).to_owned());
@@ -521,6 +540,7 @@ mod tests {
         database: full["DATABASE_URL"].clone(),
         redis: "redis://127.0.0.1:1".to_owned(),
         world: World { id: 1, cap: 5000 },
+        start: MEADOW,
       })
     );
     let mut refusals = Vec::new();
@@ -528,8 +548,16 @@ mod tests {
       let read = Config::read(&|wanted| (wanted != *name).then(|| full[wanted].clone()));
       refusals.push(read.err().map(|fault| fault.to_string()));
     }
-    for name in ["MMO_LOGIN_ADDRESS", "MMO_WORLD", "MMO_WORLD_CAP"] {
-      let wrong = variables(&tls, &[(name, "-1")]);
+    let wrongs = [
+      ("MMO_LOGIN_ADDRESS", "-1"),
+      ("MMO_WORLD", "-1"),
+      ("MMO_WORLD_CAP", "-1"),
+      ("MMO_START_ZONE", "z"),
+      ("MMO_START_POSITION", "1,2"),
+      ("MMO_START_POSITION", "1,2,z"),
+    ];
+    for (name, value) in wrongs {
+      let wrong = variables(&tls, &[(name, value)]);
       refusals.push(
         Config::read(&|wanted| wrong.get(wanted).cloned()).err().map(|fault| fault.to_string()),
       );
@@ -543,6 +571,11 @@ mod tests {
         "the variable MMO_LOGIN_ADDRESS is not set",
         "the variable MMO_LOGIN_CERTIFICATE is not set",
         "the variable MMO_LOGIN_KEY is not set",
+        "the variable MMO_START_POSITION holds no valid value: a position is x,y,z in whole centimetres",
+        "the variable MMO_START_POSITION holds no valid value: invalid digit found in string",
+        "the variable MMO_START_POSITION is not set",
+        "the variable MMO_START_ZONE holds no valid value: invalid digit found in string",
+        "the variable MMO_START_ZONE is not set",
         "the variable MMO_WORLD holds no valid value: invalid digit found in string",
         "the variable MMO_WORLD is not set",
         "the variable MMO_WORLD_CAP holds no valid value: invalid digit found in string",

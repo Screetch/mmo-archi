@@ -33,4 +33,4 @@ pub use values::{
 ///
 /// A change of a message, of the codec, of the version of bitcode or of the step of `mmo-collide`
 /// raises it. A new version needs a restart of the world, since a side accepts only its own.
-pub const PROTOCOL: u16 = 1;
+pub const PROTOCOL: u16 = 2;

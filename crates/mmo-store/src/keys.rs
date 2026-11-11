@@ -7,6 +7,8 @@
 //! A Lua script that Redis runs makes the key of an account from its prefix, as
 //! [`QUEUED`] and the id of the account, so each prefix that a script needs is public.
 
+use std::net::{IpAddr, Ipv6Addr};
+
 use mmo_protocol::{AccountId, Token, ZoneId};
 
 /// The channel on which a zone writer names each zone that changed its writer.
@@ -75,6 +77,18 @@ pub fn failed(name: &str) -> String {
   format!("failed:{}", name.to_lowercase())
 }
 
+/// The count of the new accounts of the last hour from `address`. An address of IPv6 counts by its
+/// network of /64, since one host commonly holds the whole network, and an address of IPv4 in
+/// IPv6 counts as its address of IPv4.
+pub fn created(address: IpAddr) -> String {
+  match address.to_canonical() {
+    IpAddr::V4(address) => format!("created:{address}"),
+    IpAddr::V6(address) => {
+      format!("created:{}/64", Ipv6Addr::from(u128::from(address) >> 64 << 64))
+    }
+  }
+}
+
 /// The lines of the chat `channel`, a stream, and the channel of Redis on which each line goes.
 pub fn chat(channel: &str) -> String {
   format!("chat:{channel}")
@@ -88,11 +102,13 @@ fn hex(token: &Token) -> String {
 
 #[cfg(test)]
 mod tests {
+  use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
   use mmo_protocol::{AccountId, Token, ZoneId};
 
   use super::{
-    DIRECTORY, admissions, admit, admitted, chat, failed, presence, queue, queued, resume, session,
-    zone,
+    DIRECTORY, admissions, admit, admitted, chat, created, failed, presence, queue, queued, resume,
+    session, zone,
   };
 
   #[test]
@@ -115,6 +131,9 @@ mod tests {
         admitted(1),
         admissions(u32::MAX),
         failed("AlIce"),
+        created(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        created(IpAddr::V6(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped())),
+        created(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6))),
         chat("trade"),
         DIRECTORY.to_owned(),
       ],
@@ -129,6 +148,9 @@ mod tests {
         "world:1:admitted".to_owned(),
         "world:4294967295:admissions".to_owned(),
         "failed:alice".to_owned(),
+        "created:192.0.2.1".to_owned(),
+        "created:192.0.2.1".to_owned(),
+        "created:2001:db8:1:2::/64".to_owned(),
         "chat:trade".to_owned(),
         "directory".to_owned(),
       ]

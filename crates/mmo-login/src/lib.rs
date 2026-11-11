@@ -1,5 +1,5 @@
-//! The login service of mmo-archi: it checks a name and a password against `mmo-store`, keeps the
-//! admission queue of each world in Redis, and gives a session.
+//! The login service of mmo-archi: it makes the accounts and the characters in `mmo-store`, checks
+//! a name and a password, keeps the admission queue of each world in Redis, and gives a session.
 //!
 //! [`Login`] keeps no state of a client in its memory. Each copy reads and writes Redis, so any
 //! copy serves any client, and a copy that stops loses no place in the queue. A [`Client`] is the
@@ -14,8 +14,13 @@ mod game;
 mod queue;
 mod server;
 
-use mmo_protocol::{AccountId, CharacterId, FromLogin, Password, Refusal, ToLogin, Token};
-use mmo_store::{Store, keys};
+use std::net::IpAddr;
+use std::ops::RangeInclusive;
+
+use mmo_protocol::{
+  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, ToLogin, Token, ZoneId,
+};
+use mmo_store::{State, Store, keys};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 
@@ -30,8 +35,30 @@ const FAILURES: u32 = 5;
 /// The window of the failed logins of a name, in seconds.
 const FAILURE_WINDOW: u64 = 60;
 
+/// The new accounts of one address in one window, after which the login service refuses each new
+/// account of the address until the window ends.
+const CREATIONS: u32 = 5;
+
+/// The window of the new accounts of an address, in seconds.
+const CREATION_WINDOW: u64 = 60 * 60;
+
+/// The count of characters in the name of a new account or of a new character.
+const NAME: RangeInclusive<usize> = 3..=16;
+
+/// The hit points of a new character.
+const HIT_POINTS: i32 = 100;
+
 /// The life of a session, in seconds.
 const SESSION: i64 = 24 * 60 * 60;
+
+/// The place where each new character of a world starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Start {
+  /// The zone of each new character.
+  pub zone: ZoneId,
+  /// The point of the zone where each new character stands.
+  pub position: Position,
+}
 
 /// A fault of a store, which ends the connection of the client.
 #[derive(Debug, thiserror::Error)]
@@ -72,12 +99,14 @@ pub struct Login {
   store: Store,
   redis: ConnectionManager,
   world: World,
+  start: Start,
 }
 
 impl Login {
-  /// A copy that reads the accounts in `store` and keeps the queue of `world` in `redis`.
-  pub fn new(store: Store, redis: ConnectionManager, world: World) -> Self {
-    Self { store, redis, world }
+  /// A copy that keeps the accounts and the characters in `store`, keeps the queue of `world` in
+  /// `redis`, and makes each new character at `start`.
+  pub fn new(store: Store, redis: ConnectionManager, world: World, start: Start) -> Self {
+    Self { store, redis, world, start }
   }
 
   /// Runs the admission of the world once: it renews each slot that ended while the presence of
@@ -88,9 +117,18 @@ impl Login {
     self.world.admit(&mut self.redis.clone()).await
   }
 
-  /// The answer to `message`, which moves `client` to its next state.
-  pub async fn answer(&self, client: &mut Client, message: ToLogin) -> Result<FromLogin, Error> {
+  /// The answer to `message` of a client at the address `from`, which moves `client` to its next
+  /// state. The throttle of new accounts counts by `from`.
+  pub async fn answer(
+    &self,
+    client: &mut Client,
+    from: IpAddr,
+    message: ToLogin,
+  ) -> Result<FromLogin, Error> {
     match message {
+      ToLogin::NewAccount { name, password } => {
+        self.new_account(client, from, &name, password).await
+      }
       ToLogin::Login { name, password } => self.login(client, &name, password).await,
       ToLogin::Resume { token } => self.resume(client, token).await,
       ToLogin::Wait => match *client {
@@ -98,6 +136,7 @@ impl Login {
         Client::Admitted { account, .. } => self.admitted(client, account).await,
         Client::Out => Ok(Self::expired(client)),
       },
+      ToLogin::NewCharacter { name } => self.new_character(client, &name).await,
       ToLogin::Select { character } => self.select(client, character).await,
     }
   }
@@ -114,6 +153,29 @@ impl Login {
     self.admitted(client, account).await.map(Some)
   }
 
+  /// Makes the account of `name` and enters it in the queue, as a login does. Each try of an
+  /// address with a valid name counts, also a try of a taken name, so the throttle also slows a
+  /// search of the names that exist.
+  async fn new_account(
+    &self,
+    client: &mut Client,
+    from: IpAddr,
+    name: &str,
+    password: Password,
+  ) -> Result<FromLogin, Error> {
+    if !NAME.contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+      return Ok(FromLogin::Refused(Refusal::Name));
+    }
+    if counted(&mut self.redis.clone(), &keys::created(from), CREATION_WINDOW).await? > CREATIONS {
+      return Ok(FromLogin::Refused(Refusal::Throttled));
+    }
+    match self.store.create_account(name, password).await {
+      Ok(account) => self.place(client, account, token(), true).await,
+      Err(mmo_store::Error::Taken { .. }) => Ok(FromLogin::Refused(Refusal::Taken)),
+      Err(fault) => Err(fault.into()),
+    }
+  }
+
   async fn login(
     &self,
     client: &mut Client,
@@ -126,17 +188,7 @@ impl Login {
       return Ok(FromLogin::Refused(Refusal::Throttled));
     }
     let Some(account) = self.store.sign_in(name, password).await? else {
-      let window = SetOptions::default()
-        .conditional_set(ExistenceCheck::NX)
-        .with_expiration(SetExpiry::EX(FAILURE_WINDOW));
-      redis::pipe()
-        .atomic()
-        .set_options(&failed, 0, window)
-        .ignore()
-        .incr(&failed, 1)
-        .ignore()
-        .exec_async(&mut redis)
-        .await?;
+      counted(&mut redis, &failed, FAILURE_WINDOW).await?;
       return Ok(FromLogin::Refused(Refusal::Password));
     };
     self.place(client, account, token(), true).await
@@ -176,6 +228,28 @@ impl Login {
     let characters = listed.iter().map(|one| one.id).collect();
     *client = Client::Admitted { account, characters };
     Ok(FromLogin::Characters(listed))
+  }
+
+  /// Makes a character of the admitted account at the start of the world, and lists the characters
+  /// of the account again. The name is written with its first letter in upper case and the rest
+  /// in lower case, so two names never differ by their case alone.
+  async fn new_character(&self, client: &mut Client, name: &str) -> Result<FromLogin, Error> {
+    let Client::Admitted { account, .. } = *client else {
+      return Ok(Self::expired(client));
+    };
+    if !NAME.contains(&name.len()) || !name.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+      return Ok(FromLogin::Refused(Refusal::Name));
+    }
+    if !self.redis.clone().exists::<_, bool>(keys::admit(account)).await? {
+      return Ok(Self::expired(client));
+    }
+    let name = name[..1].to_ascii_uppercase() + &name[1..].to_ascii_lowercase();
+    let state = State { position: self.start.position, yaw: Angle(0), hit_points: HIT_POINTS };
+    match self.store.create_character(account, &name, self.start.zone, state).await {
+      Ok(_) => self.admitted(client, account).await,
+      Err(mmo_store::Error::Taken { .. }) => Ok(FromLogin::Refused(Refusal::Taken)),
+      Err(fault) => Err(fault.into()),
+    }
   }
 
   /// Makes the session of `character`. The slot of the account gives one session at most, so two
@@ -218,6 +292,22 @@ impl Login {
   }
 }
 
+/// Counts one more event in the counter `key`, whose window of `window` seconds the first event
+/// starts, and gives the count.
+async fn counted(redis: &mut ConnectionManager, key: &str, window: u64) -> Result<u32, Error> {
+  let window = SetOptions::default()
+    .conditional_set(ExistenceCheck::NX)
+    .with_expiration(SetExpiry::EX(window));
+  let (count,): (u32,) = redis::pipe()
+    .atomic()
+    .set_options(key, 0, window)
+    .ignore()
+    .incr(key, 1)
+    .query_async(redis)
+    .await?;
+  Ok(count)
+}
+
 #[expect(clippy::expect_used, reason = "a server whose system gives no random bytes cannot run")]
 fn token() -> Token {
   let mut bytes = [0; 32];
@@ -227,15 +317,116 @@ fn token() -> Token {
 
 #[cfg(test)]
 mod tests {
+  use std::net::{IpAddr, Ipv4Addr};
+
   use mmo_protocol::{
-    Character, CharacterId, FromLogin, Password, Refusal, ToLogin, Token, ZoneId,
+    Angle, Character, CharacterId, FromLogin, Password, Refusal, ToLogin, Token, ZoneId,
   };
-  use mmo_store::{Store, keys};
+  use mmo_store::{Saved, State, Store, keys};
   use redis::AsyncCommands;
   use sqlx::PgPool;
 
   use super::{Client, Error, Login, World};
-  use crate::game::{Game, START, login, place};
+  use crate::game::{Game, HOME, MEADOW, START, login, place, secret};
+
+  fn new_account(name: &str) -> ToLogin {
+    ToLogin::NewAccount { name: name.to_owned(), password: secret() }
+  }
+
+  fn new_character(name: &str) -> ToLogin {
+    ToLogin::NewCharacter { name: name.to_owned() }
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_new_account_enters_the_queue_and_an_address_makes_5_each_hour(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    game.account("ada").await;
+    let copy = game.copy(1);
+    let mut client = Client::default();
+    let made = copy.answer(&mut client, HOME, new_account("Bob")).await?;
+    let FromLogin::Queued { position: 0, length: 1, wait: u32::MAX, resume } = made else {
+      panic!("the first place of the queue, and not {made:?}");
+    };
+    let bob = game.store.sign_in("bob", secret()).await?.expect("the account of bob");
+    assert_eq!(client, Client::Queued { account: bob, resume });
+    let long = "c".repeat(17);
+    let mut answers = Vec::new();
+    for name in ["ADA", "cy", &long, "cy-d", "dée", "dee", "eve", "fay", "gil"] {
+      let answer = copy.answer(&mut Client::default(), HOME, new_account(name)).await?;
+      answers.push(place(&answer).ok_or(answer));
+    }
+    let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let answer = copy.answer(&mut Client::default(), other, new_account("gil")).await?;
+    answers.push(place(&answer).ok_or(answer));
+    let none = u32::MAX;
+    let name = Err(FromLogin::Refused(Refusal::Name));
+    assert_eq!(
+      answers,
+      [
+        Err(FromLogin::Refused(Refusal::Taken)),
+        name.clone(),
+        name.clone(),
+        name.clone(),
+        name,
+        Ok((1, 2, none)),
+        Ok((2, 3, none)),
+        Ok((3, 4, none)),
+        Err(FromLogin::Refused(Refusal::Throttled)),
+        Ok((4, 5, none)),
+      ]
+    );
+    let window: i64 = game.redis.clone().ttl(keys::created(HOME)).await?;
+    assert!((3590..=3600).contains(&window), "the window ends in {window} s");
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn an_admitted_account_makes_its_characters_at_the_start_of_the_world(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let bob = game.account("bob").await;
+    game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
+    let copy = game.copy(1);
+    let mut client = Client::default();
+    copy.answer(&mut client, HOME, login("ada")).await?;
+    let queued = copy.answer(&mut client.clone(), HOME, new_character("Brom")).await?;
+    copy.admit().await?;
+    copy.ready(&mut client).await?;
+    let answers = [
+      queued,
+      copy.answer(&mut client, HOME, new_character("bROM")).await?,
+      copy.answer(&mut client, HOME, new_character("DARA")).await?,
+      copy.answer(&mut client, HOME, new_character("Br")).await?,
+      copy.answer(&mut client, HOME, new_character("Br0m")).await?,
+    ];
+    let listed = game.store.characters(ada).await?;
+    let brom = listed.first().map(|one| one.id).expect("a character of ada");
+    assert_eq!(
+      answers,
+      [
+        FromLogin::Refused(Refusal::Expired),
+        FromLogin::Characters(vec![Character { id: brom, name: "Brom".to_owned() }]),
+        FromLogin::Refused(Refusal::Taken),
+        FromLogin::Refused(Refusal::Name),
+        FromLogin::Refused(Refusal::Name),
+      ]
+    );
+    assert_eq!(client, Client::Admitted { account: ada, characters: vec![brom] });
+    let state = State { position: MEADOW.position, yaw: Angle(0), hit_points: 100 };
+    assert_eq!(
+      game.store.load(&[brom]).await?,
+      [Saved { character: brom, zone: MEADOW.zone, state, version: 0 }]
+    );
+    let () = game.redis.clone().del(keys::admit(ada)).await?;
+    let ended = copy.answer(&mut client, HOME, new_character("Cael")).await?;
+    assert_eq!(ended, FromLogin::Refused(Refusal::Expired));
+    assert_eq!((client, game.store.characters(ada).await?.len()), (Client::Out, 1));
+    Ok(())
+  }
 
   #[sqlx::test(migrations = false)]
   async fn the_order_of_admission_is_the_order_of_entry(pool: PgPool) -> Result<(), Error> {
@@ -263,7 +454,7 @@ mod tests {
     let ready =
       [game.copy(3).ready(&mut clients[2].0).await?, game.copy(3).ready(&mut clients[3].0).await?];
     assert_eq!(ready, [Some(FromLogin::Characters(Vec::new())), None]);
-    let last = game.copy(3).answer(&mut clients[3].0, ToLogin::Wait).await?;
+    let last = game.copy(3).answer(&mut clients[3].0, HOME, ToLogin::Wait).await?;
     assert_eq!(place(&last), Some((0, 1, 200)));
     Ok(())
   }
@@ -284,7 +475,8 @@ mod tests {
     let mut places = Vec::new();
     for token in tokens.iter().rev() {
       let mut client = Client::default();
-      let answer = game.copy(0).answer(&mut client, ToLogin::Resume { token: *token }).await?;
+      let answer =
+        game.copy(0).answer(&mut client, HOME, ToLogin::Resume { token: *token }).await?;
       if let FromLogin::Queued { position, length, resume, .. } = answer {
         places.push((position, length, resume));
       }
@@ -293,7 +485,7 @@ mod tests {
     assert_eq!(places, expected);
     let mut stranger = Client::default();
     let unknown = ToLogin::Resume { token: Token([0; 32]) };
-    let unknown = game.copy(0).answer(&mut stranger, unknown).await?;
+    let unknown = game.copy(0).answer(&mut stranger, HOME, unknown).await?;
     assert_eq!(unknown, FromLogin::Refused(Refusal::Expired));
     Ok(())
   }
@@ -337,9 +529,9 @@ mod tests {
     let wrong = ToLogin::Login { name: "ADA".to_owned(), password: Password("guess".to_owned()) };
     let mut answers = Vec::new();
     for _ in 0..5 {
-      answers.push(copy.answer(&mut client, wrong.clone()).await?);
+      answers.push(copy.answer(&mut client, HOME, wrong.clone()).await?);
     }
-    answers.push(copy.answer(&mut client, login("ada")).await?);
+    answers.push(copy.answer(&mut client, HOME, login("ada")).await?);
     let mut expected = vec![FromLogin::Refused(Refusal::Password); 5];
     expected.push(FromLogin::Refused(Refusal::Throttled));
     assert_eq!(answers, expected);
@@ -359,9 +551,9 @@ mod tests {
     let copy = game.copy(1);
     let mut client = Client::default();
     let answers = [
-      copy.answer(&mut client, login("ada")).await?,
-      copy.answer(&mut client, ToLogin::Wait).await?,
-      copy.answer(&mut client, ToLogin::Select { character: CharacterId(1) }).await?,
+      copy.answer(&mut client, HOME, login("ada")).await?,
+      copy.answer(&mut client, HOME, ToLogin::Wait).await?,
+      copy.answer(&mut client, HOME, ToLogin::Select { character: CharacterId(1) }).await?,
     ];
     assert_eq!(
       answers,
@@ -390,15 +582,15 @@ mod tests {
     let listed = [copy.ready(&mut clients[0].0).await?, copy.ready(&mut clients[1].0).await?];
     let characters = FromLogin::Characters(vec![Character { id: brom, name: "Brom".to_owned() }]);
     assert_eq!(listed, [Some(characters.clone()), Some(characters.clone())]);
-    assert_eq!(copy.answer(&mut clients[1].0, ToLogin::Wait).await?, characters);
+    assert_eq!(copy.answer(&mut clients[1].0, HOME, ToLogin::Wait).await?, characters);
     let mut redis = game.redis.clone();
     let () = redis.hset(keys::presence(ada), "zone", 7).await?;
     let first = &mut clients[0].0;
-    let online = copy.answer(first, ToLogin::Select { character: brom }).await?;
+    let online = copy.answer(first, HOME, ToLogin::Select { character: brom }).await?;
     let () = redis.del(keys::presence(ada)).await?;
-    let foreign = copy.answer(first, ToLogin::Select { character: dara }).await?;
-    let made = copy.answer(first, ToLogin::Select { character: brom }).await?;
-    let second = copy.answer(&mut clients[1].0, ToLogin::Select { character: brom }).await?;
+    let foreign = copy.answer(first, HOME, ToLogin::Select { character: dara }).await?;
+    let made = copy.answer(first, HOME, ToLogin::Select { character: brom }).await?;
+    let second = copy.answer(&mut clients[1].0, HOME, ToLogin::Select { character: brom }).await?;
     assert_eq!(
       [online, foreign, second],
       [
@@ -430,14 +622,14 @@ mod tests {
     let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
     let copy = game.copy(1);
     let mut queued = Client::default();
-    copy.answer(&mut queued, login("ada")).await?;
+    copy.answer(&mut queued, HOME, login("ada")).await?;
     copy.admit().await?;
     let mut admitted = queued.clone();
     copy.ready(&mut admitted).await?;
     let closed = PgPool::connect_with(pool.connect_options().as_ref().clone()).await;
     let closed = closed.map_err(mmo_store::Error::from)?;
-    let unreachable =
-      Login::new(Store::open(closed.clone()).await?, game.redis.clone(), World { id: 1, cap: 1 });
+    let store = Store::open(closed.clone()).await?;
+    let unreachable = Login::new(store, game.redis.clone(), World { id: 1, cap: 1 }, MEADOW);
     closed.close().await;
     let [no_get, no_set, no_script, no_exists, no_del, no_hmset] = [
       game.denied("-get").await,
@@ -451,18 +643,22 @@ mod tests {
     let select = ToLogin::Select { character: brom };
     let resume = ToLogin::Resume { token: Token([0; 32]) };
     let faults = [
-      no_get.answer(&mut Client::Out, login("ada")).await.err(),
-      unreachable.answer(&mut Client::Out, login("ada")).await.err(),
-      no_set.answer(&mut Client::Out, wrong).await.err(),
-      no_script.answer(&mut Client::Out, login("ada")).await.err(),
+      no_get.answer(&mut Client::Out, HOME, login("ada")).await.err(),
+      unreachable.answer(&mut Client::Out, HOME, login("ada")).await.err(),
+      no_set.answer(&mut Client::Out, HOME, wrong).await.err(),
+      no_script.answer(&mut Client::Out, HOME, login("ada")).await.err(),
       no_script.admit().await.err(),
-      no_get.answer(&mut Client::Out, resume).await.err(),
+      no_get.answer(&mut Client::Out, HOME, resume).await.err(),
       unreachable.ready(&mut queued.clone()).await.err(),
       no_exists.ready(&mut queued.clone()).await.err(),
-      no_exists.answer(&mut admitted.clone(), select.clone()).await.err(),
-      unreachable.answer(&mut admitted.clone(), select.clone()).await.err(),
-      no_del.answer(&mut admitted.clone(), select.clone()).await.err(),
-      no_hmset.answer(&mut admitted.clone(), select).await.err(),
+      no_exists.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
+      unreachable.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
+      no_exists.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
+      unreachable.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
+      no_del.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
+      no_hmset.answer(&mut admitted.clone(), HOME, select).await.err(),
+      no_set.answer(&mut Client::Out, HOME, new_account("eve")).await.err(),
+      unreachable.answer(&mut Client::Out, HOME, new_account("eve")).await.err(),
     ];
     let texts: Vec<_> =
       faults.iter().map(|fault| fault.as_ref().map(ToString::to_string)).collect();
@@ -485,9 +681,13 @@ mod tests {
         closed.clone(),
         denied("exists", "exists"),
         denied("exists", "exists"),
-        closed,
+        closed.clone(),
+        denied("exists", "exists"),
+        closed.clone(),
         denied("del", "del"),
         aborted("hmset", "hmset"),
+        aborted("set", "set"),
+        closed,
       ]
     );
     Ok(())
