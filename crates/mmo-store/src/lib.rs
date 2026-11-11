@@ -30,6 +30,10 @@ static MIGRATOR: Migrator = sqlx::migrate!();
 /// The code of PostgreSQL for a table that does not exist: a database where no keeper ran.
 const UNDEFINED_TABLE: &str = "42P01";
 
+/// The count of characters that one account holds at most. The table refuses a ninth character of
+/// an account, whatever the count of clients that make one together.
+pub const CHARACTERS: usize = 8;
+
 /// A refusal of the store.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,6 +48,12 @@ pub enum Error {
   Taken {
     /// The name, as the table holds it.
     name: String,
+  },
+  /// The account holds [`CHARACTERS`] characters already.
+  #[error("the account {} holds {CHARACTERS} characters already", account.0)]
+  Full {
+    /// The account that holds the most.
+    account: mmo_protocol::AccountId,
   },
   /// The table `zones` holds no zone of this id.
   #[error("no zone has the id {}", zone.0)]

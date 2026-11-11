@@ -61,9 +61,6 @@ const PASSWORD_MIN: usize = 8;
 /// one hash.
 const PASSWORD_MAX: usize = 128;
 
-/// The count of characters that one account holds at most.
-const CHARACTERS: usize = 8;
-
 /// The hit points of a new character.
 const HIT_POINTS: i32 = 100;
 
@@ -261,7 +258,8 @@ impl Login {
   /// Makes a character of the admitted account at the start of the world, and lists the characters
   /// of the account again. The name is written with its first letter in upper case and the rest
   /// in lower case, so two names never differ by their case alone. An account that holds 8
-  /// characters gets no more.
+  /// characters gets no more: the list of the client answers at once, and the store decides for
+  /// two clients of one account that make a character together.
   async fn new_character(&self, client: &mut Client, name: &str) -> Result<FromLogin, Error> {
     let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
@@ -273,13 +271,14 @@ impl Login {
     if !self.redis.clone().exists::<_, bool>(keys::admit(account)).await? {
       return Ok(Self::expired(client));
     }
-    if held >= CHARACTERS {
+    if held >= mmo_store::CHARACTERS {
       return Ok(FromLogin::Refused(Refusal::Limit));
     }
     let name = name[..1].to_ascii_uppercase() + &name[1..].to_ascii_lowercase();
     let state = State { position: self.start.position, yaw: Angle(0), hit_points: HIT_POINTS };
     match self.store.create_character(account, &name, self.start.zone, state).await {
       Ok(_) => self.admitted(client, account).await,
+      Err(mmo_store::Error::Full { .. }) => Ok(FromLogin::Refused(Refusal::Limit)),
       Err(mmo_store::Error::Taken { .. }) => Ok(FromLogin::Refused(Refusal::Taken)),
       Err(fault) => Err(fault.into()),
     }
@@ -479,6 +478,35 @@ mod tests {
     assert_eq!(answers, expected);
     assert_eq!(game.store.characters(ada).await?.len(), 8);
     assert!(matches!(&client, Client::Admitted { characters, .. } if characters.len() == 8));
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn two_admitted_clients_of_one_account_make_a_ninth_character_never(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let copy = game.copy(1);
+    let (mut first, mut second) = (Client::default(), Client::default());
+    copy.answer(&mut first, HOME, login("ada")).await?;
+    copy.answer(&mut second, HOME, login("ada")).await?;
+    copy.admit().await?;
+    let (one, two) = (copy.ready(&mut first).await?, copy.ready(&mut second).await?);
+    let empty = Some(FromLogin::Characters(Vec::new()));
+    assert_eq!([one, two], [empty.clone(), empty]);
+    for name in ["Alpha", "Bravo", "Cael", "Dara", "Elan", "Finn", "Gale"] {
+      copy.answer(&mut first, HOME, new_character(name)).await?;
+    }
+    assert!(matches!(&second, Client::Admitted { characters, .. } if characters.is_empty()));
+    let (hana, iris) = tokio::join!(
+      copy.answer(&mut first, HOME, new_character("Hana")),
+      copy.answer(&mut second, HOME, new_character("Iris")),
+    );
+    let answers = [hana?, iris?];
+    let refused = answers.iter().filter(|answer| **answer == FromLogin::Refused(Refusal::Limit));
+    assert_eq!(refused.count(), 1);
+    assert_eq!(game.store.characters(ada).await?.len(), 8);
     Ok(())
   }
 
