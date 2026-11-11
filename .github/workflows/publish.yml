@@ -69,8 +69,8 @@ jobs:
         run: |
           test "$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | join(" ")')" = "${GITHUB_REF_NAME#v}"
       - run: cargo build --release --locked --workspace --bins
-      # The archive holds each binary that a crate of the workspace names. A workspace with no binary, as the one of
-      # today, attaches nothing, and says so.
+      # The archive holds each binary that a crate of the workspace names. A workspace with no binary attaches nothing,
+      # and says so.
       - env:
           SYSTEM: ${{ matrix.system }}
         run: |
@@ -85,7 +85,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pack/$folder" "$RUNNER_TEMP/out"
           for name in $names; do cp "$built/$name$end" "$RUNNER_TEMP/pack/$folder/"; done
           cp CHANGELOG.md "$RUNNER_TEMP/pack/$folder/"
-          tar -C "$RUNNER_TEMP/pack" -czf "$RUNNER_TEMP/out/$folder.tar.gz" "$folder"
+          # The tar of Windows reads a path with a colon, as D:\a\_temp, as the name of a remote host, so tar takes
+          # paths from the folder of the runner.
+          (cd "$RUNNER_TEMP" && tar -C pack -czf "out/$folder.tar.gz" "$folder")
           (cd "$RUNNER_TEMP/out" && shasum -a 256 "$folder.tar.gz" > "$folder.tar.gz.sha256")
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
