@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bitcode::{DecodeOwned, Encode};
-use mmo_protocol::{Attach, Frames, Hello, PROTOCOL, Token, ZoneId, decode, encode, frame};
+use mmo_protocol::{
+  Attach, Frames, Hello, PROTOCOL, ToClient, Token, ZoneId, decode, encode, frame,
+};
 use mmo_store::keys;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, Connection, ConnectionError, Endpoint, RecvStream, SendStream};
@@ -204,11 +206,24 @@ impl World {
   }
 
   /// A client that greets the gateway at `address` and attaches with `token`.
-  pub(crate) async fn attached(&self, address: SocketAddr, token: Token) -> Peer {
+  pub(crate) async fn attach(&self, address: SocketAddr, token: Token) -> Peer {
     let mut client = self.client(address).await.expect("the gateway is trusted");
     client.greet().await;
     client.tell(&Attach { session: token }).await;
     client
+  }
+
+  /// A client that attached with `token`, and the first message that the gateway sends it.
+  pub(crate) async fn announced(&self, address: SocketAddr, token: Token) -> (Peer, ToClient) {
+    let mut client = self.attach(address, token).await;
+    let first = client.message::<ToClient>().await;
+    (client, first)
+  }
+
+  /// A client that greets the gateway at `address` and attaches with `token`, and that has read
+  /// the zone of its session.
+  pub(crate) async fn attached(&self, address: SocketAddr, token: Token) -> Peer {
+    self.announced(address, token).await.0
   }
 }
 

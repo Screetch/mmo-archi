@@ -136,7 +136,9 @@ pub enum FromClient {
 pub enum ToClient {
   /// The gateway finds no session for the token of [`Attach`], so the client logs in again.
   NoSession,
-  /// The player is in another zone now. The client names it in each next [`Intents`].
+  /// The player is in this zone, which the client names in each next [`Intents`]. The gateway
+  /// sends it first after an [`Attach`], with the zone of the session, and a zone writer sends
+  /// it when the player moves to another zone.
   Moved {
     /// The zone of the player.
     zone: ZoneId,
