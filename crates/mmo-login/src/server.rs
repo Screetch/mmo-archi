@@ -261,7 +261,7 @@ mod tests {
   use std::sync::Arc;
 
   use mmo_protocol::{
-    Character, FRAME, Frames, FromLogin, Hello, ToLogin, ZoneId, decode, encode, frame,
+    Character, FRAME, Frames, FromLogin, Hello, PROTOCOL, ToLogin, ZoneId, decode, encode, frame,
   };
   use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
   use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -380,7 +380,10 @@ mod tests {
     }
   }
 
-  const MINE: [u8; 6] = [2, 0, 7, 0, 0, 0];
+  const MINE: [u8; 6] = {
+    let [low, high] = PROTOCOL.to_le_bytes();
+    [low, high, 7, 0, 0, 0]
+  };
 
   #[sqlx::test(migrations = false)]
   async fn a_client_waits_for_its_slot_and_gets_a_session_over_quic(
@@ -420,7 +423,8 @@ mod tests {
     quiet.send.finish().expect("the stream ends");
     outcomes.push(format!("{:?}", quiet.read().await).into());
     let mut other = Peer::new(address, &tls).await;
-    other.send(&frame(&[3, 0, 7, 0, 0, 0]).expect("a frame")).await;
+    let [low, high] = (PROTOCOL + 1).to_le_bytes();
+    other.send(&frame(&[low, high, 7, 0, 0, 0]).expect("a frame")).await;
     let theirs = other.read().await.expect("a frame").expect("a hello");
     outcomes.push(format!("{:?}", Hello::decode(&theirs)).into());
     other.connection.close(0_u32.into(), b"another version");

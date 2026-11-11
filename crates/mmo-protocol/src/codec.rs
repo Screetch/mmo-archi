@@ -158,7 +158,11 @@ impl Frames {
 
 #[cfg(test)]
 mod tests {
-  use super::{DATAGRAM, Error, FRAME, Frames, Hello, datagram, frame};
+  use super::{DATAGRAM, Error, FRAME, Frames, Hello, PROTOCOL, datagram, frame};
+
+  fn version(number: u16, rest: &[u8]) -> Vec<u8> {
+    [number.to_le_bytes().as_slice(), rest].concat()
+  }
 
   fn refused<T>(result: Result<T, Error>) -> Result<T, String> {
     result.map_err(|error| error.to_string())
@@ -167,24 +171,29 @@ mod tests {
   #[test]
   fn a_hello_holds_the_version_then_the_build_in_little_endian() {
     let hello = Hello { build: 0x0102_0304 };
-    assert_eq!(hello.encode(), [2, 0, 4, 3, 2, 1]);
+    let [low, high] = PROTOCOL.to_le_bytes();
+    assert_eq!(hello.encode(), [low, high, 4, 3, 2, 1]);
     assert_eq!(refused(Hello::decode(&hello.encode())), Ok(hello));
   }
 
   #[test]
   fn a_hello_of_another_version_is_refused_with_both_versions() {
-    let theirs = "the peer speaks version 3 of the protocol, and this side speaks version 2";
-    assert_eq!(refused(Hello::decode(&[3, 0, 4, 3, 2, 1])), Err(theirs.to_owned()));
-    assert_eq!(refused(Hello::decode(&[3, 0, 9, 9, 9, 9, 9, 9, 9])), Err(theirs.to_owned()));
+    let theirs = format!(
+      "the peer speaks version {} of the protocol, and this side speaks version {PROTOCOL}",
+      PROTOCOL + 1
+    );
+    let other = |rest: &[u8]| refused(Hello::decode(&version(PROTOCOL + 1, rest)));
+    assert_eq!(other(&[4, 3, 2, 1]), Err(theirs.clone()));
+    assert_eq!(other(&[9; 7]), Err(theirs));
   }
 
   #[test]
   fn a_hello_of_this_version_with_another_size_is_refused() {
     let holds = |size: usize| Err(format!("a hello holds 6 bytes, and this one holds {size}"));
     assert_eq!(refused(Hello::decode(&[])), holds(0));
-    assert_eq!(refused(Hello::decode(&[2])), holds(1));
-    assert_eq!(refused(Hello::decode(&[2, 0, 4, 3, 2])), holds(5));
-    assert_eq!(refused(Hello::decode(&[2, 0, 4, 3, 2, 1, 0])), holds(7));
+    assert_eq!(refused(Hello::decode(&version(PROTOCOL, &[])[..1])), holds(1));
+    assert_eq!(refused(Hello::decode(&version(PROTOCOL, &[4, 3, 2]))), holds(5));
+    assert_eq!(refused(Hello::decode(&version(PROTOCOL, &[4, 3, 2, 1, 0]))), holds(7));
   }
 
   #[test]
