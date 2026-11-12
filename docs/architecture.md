@@ -81,6 +81,11 @@ channel `directory`, and each 5 s.
 Each datagram of a client names the zone that the client is in (section 4), so the gateway keeps no state for a player.
 A zone writer drops a message for a player that it does not hold, so a false zone in a message reaches no state.
 
+Between the gateway and a zone writer, a datagram holds the link of a client in 8 bytes, then the datagram of that
+client as it goes on the wire. So the gateway relays each intent and each snapshot with no encode, and it decodes only
+the zone of an intent. The task of the link to a writer sends each snapshot straight to the connection of its client,
+with no wake of the task of that client.
+
 When a gateway stops, its clients see the connection close within 3 s, the idle timeout of QUIC. Each client connects to
 another gateway with its session token. The zone writer keeps a player whose link closed in the world for 30 s, so the
 player comes back to the same state.

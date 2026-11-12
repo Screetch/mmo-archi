@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use mmo_protocol::{
   Frames, FromKeeper, Hello, Intents, Link, Relayed, Snapshot, ToKeeper, ToZone, decode, encode,
-  frame,
+  frame, relayed, unrelayed,
 };
 use mmo_store::Store;
 use mmo_store::testing::Redis;
@@ -296,7 +296,7 @@ impl Peer {
   }
 
   pub(crate) fn intents(&self, intents: &Relayed<Intents>) {
-    self.datagram(&encode(intents));
+    self.datagram(&relayed(intents.link, &encode(&intents.message)));
   }
 
   /// The next snapshot that the zone writer sends to `link`, after the snapshots of the other
@@ -304,9 +304,9 @@ impl Peer {
   pub(crate) async fn snapshot(&self, link: Link) -> Snapshot {
     loop {
       let bytes = self.connection.read_datagram().await.expect("a datagram");
-      let relayed: Relayed<Snapshot> = decode(&bytes).expect("a snapshot of this version");
-      if relayed.link == link {
-        return relayed.message;
+      let (to, snapshot) = unrelayed(&bytes).expect("a link");
+      if to == link {
+        return decode(snapshot).expect("a snapshot of this version");
       }
     }
   }
