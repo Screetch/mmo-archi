@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::future::IntoFuture;
-use std::net::{SocketAddr, TcpListener, UdpSocket};
+use std::net::{SocketAddr, TcpListener};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +25,11 @@ use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::time::{self, Timeout};
 
-use crate::run;
+use crate::{open, run};
+
+/// The address on which a gateway takes a port that the system gives it, so that no other socket
+/// holds that port.
+pub(crate) const ANY: &str = "127.0.0.1:0";
 
 /// The user of Redis of the gateway, whose commands and keys a test can take away.
 const USER: &str = "gateway";
@@ -123,12 +127,13 @@ impl World {
       .expect("Redis makes the user");
   }
 
-  /// Runs a gateway of this world until the test ends, and gives its address. A client that
-  /// connects before the gateway takes its address sends its first packet again.
-  pub(crate) fn gateway(&self) -> SocketAddr {
-    let address = free();
-    tokio::spawn(run(var(self.vars(&address))));
-    address.parse().expect("an address")
+  /// Opens a gateway of this world on a port that the system gives it, serves its clients until
+  /// the test ends, and gives its address. The gateway holds its port before a client connects.
+  pub(crate) async fn gateway(&self) -> SocketAddr {
+    let opened = open(var(self.vars(ANY))).await.expect("a gateway");
+    let address = opened.0.local_addr().expect("an address");
+    tokio::spawn(run(Ok(opened)));
+    address
   }
 
   /// Writes the session of a character in a zone, as the login service does, and gives its
@@ -362,10 +367,4 @@ impl Peer {
 /// The value of each variable that `vars` holds.
 pub(crate) fn var(vars: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
   move |name| vars.iter().find(|(key, _)| *key == name).map(|(_, value)| value.clone())
-}
-
-/// An address of UDP that no socket holds.
-pub(crate) fn free() -> String {
-  let free = UdpSocket::bind("127.0.0.1:0").and_then(|free| free.local_addr());
-  free.expect("a port").to_string()
 }
