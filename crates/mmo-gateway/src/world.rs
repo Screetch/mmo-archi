@@ -13,14 +13,13 @@ use mmo_protocol::{
   Attach, Frames, Hello, PROTOCOL, ToClient, Token, ZoneId, decode, encode, frame,
 };
 use mmo_store::keys;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, ConnectionError, Endpoint, RecvStream, SendStream};
 use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use rustls::RootCertStore;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::server::WebPkiClientVerifier;
+use rustls::pki_types::CertificateDer;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
@@ -43,13 +42,11 @@ pub(crate) fn within<F: IntoFuture>(step: F) -> Timeout<F::IntoFuture> {
 }
 
 /// The certificates of a world, and its folder of PEM files: `authority.pem`, `gateway.pem`,
-/// `gateway.key`, `link.pem` and `link.key`. `REDIS_SERVER` names the program of Redis, or else
-/// `redis-server` of the `PATH` runs.
+/// `gateway.key`, `link.pem`, `link.key`, `zone.pem` and `zone.key`. `REDIS_SERVER` names the
+/// program of Redis, or else `redis-server` of the `PATH` runs.
 pub(crate) struct World {
   folder: TempDir,
   authority: CertificateDer<'static>,
-  zone: CertificateDer<'static>,
-  zone_key: PrivatePkcs8KeyDer<'static>,
   _process: Child,
   _log: Lines<BufReader<ChildStdout>>,
   port: u16,
@@ -77,6 +74,8 @@ impl World {
       ("gateway.key", gateway_key.serialize_pem()),
       ("link.pem", link.pem()),
       ("link.key", link_key.serialize_pem()),
+      ("zone.pem", zone.pem()),
+      ("zone.key", zone_key.serialize_pem()),
     ];
     for (name, text) in files {
       fs::write(folder.path().join(name), text).expect("a file");
@@ -87,8 +86,6 @@ impl World {
     let world = Self {
       folder,
       authority: authority.der().clone(),
-      zone: zone.der().clone(),
-      zone_key: PrivatePkcs8KeyDer::from(zone_key.serialize_der()),
       _process: process,
       _log: log,
       port,
@@ -161,23 +158,10 @@ impl World {
   /// A zone writer whose certificate the authority signed, and which takes only a gateway whose
   /// certificate the authority signed. Its entry in the directory names it.
   pub(crate) async fn zone(&self, id: i32) -> Zone {
-    let mut roots = RootCertStore::empty();
-    roots.add(self.authority.clone()).expect("the authority");
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let gateways =
-      WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
-        .build()
-        .expect("a verifier");
-    let key = PrivateKeyDer::Pkcs8(self.zone_key.clone_key());
-    let tls = rustls::ServerConfig::builder_with_provider(provider)
-      .with_protocol_versions(&[&rustls::version::TLS13])
-      .expect("TLS 1.3")
-      .with_client_cert_verifier(gateways)
-      .with_single_cert(vec![self.zone.clone()], key)
-      .expect("a server");
-    let quic = QuicServerConfig::try_from(tls).expect("the QUIC of TLS 1.3");
-    let config = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    let endpoint = Endpoint::server(config, ([127, 0, 0, 1], 0).into()).expect("an endpoint");
+    let file = |name: &str| self.folder.path().join(name);
+    let config = mmo_link::server(&file("zone.pem"), &file("zone.key"), &file("authority.pem"));
+    let endpoint = Endpoint::server(config.expect("a server"), ([127, 0, 0, 1], 0).into());
+    let endpoint = endpoint.expect("an endpoint");
     let zone = Zone { endpoint };
     self.entry(id, &zone.address(), 1).await;
     zone

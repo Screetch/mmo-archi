@@ -1701,6 +1701,7 @@ version = "0.1.0"
 dependencies = [
  "bitcode",
  "getrandom 0.4.3",
+ "mmo-link",
  "mmo-protocol",
  "mmo-store",
  "quinn",
@@ -1716,6 +1717,7 @@ dependencies = [
 name = "mmo-keeper"
 version = "0.1.0"
 dependencies = [
+ "mmo-link",
  "mmo-protocol",
  "mmo-store",
  "quinn",

@@ -8,17 +8,18 @@ description = "The gateway of mmo-archi: it ends the connection of each client a
 
 [dependencies]
 getrandom = "0.4.3"
+mmo-link = { path = "../mmo-link" }
 mmo-protocol = { path = "../mmo-protocol" }
 mmo-store = { path = "../mmo-store" }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 redis = { version = "1.8.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 bitcode = "=0.6.9"
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", default-features = false, features = ["io-util", "process"] }
 
