@@ -245,9 +245,11 @@ most. When more than 64 entities are there, the player sees the 64 nearest, and 
 distances are equal. The cap of 64 keeps the worst snapshot at 879 bytes, below the limit of a datagram. With a cap of
 128, a snapshot in a crowd reached 1610 bytes (section 7).
 
-Each snapshot is a delta against the last snapshot that the client acknowledged. It holds the entities that changed,
-with their movement in centimetres since then. It also holds the entities that came into view, and the entities that
-left it. The writer keeps the quantized state of each entity for the last 16 ticks. It also keeps the visible ids that
+Each snapshot is a delta against the last snapshot that the client acknowledged. Each entity that the client holds
+moves on by its velocity, the same whole number of centimetres each tick, so an entity that walks straight costs no
+byte. The delta holds each entity that left that walk, with its movement in centimetres from where the walk takes it,
+and only the values among its velocity, view, animation and hit points that changed. It also holds the entities that
+came into view, and the entities that left it. The writer keeps the quantized state of each entity for the last 16 ticks. It also keeps the visible ids that
 it sent to each player in those ticks. For 2500 players that is 1.3 MB and 10 MB. When the acknowledged tick is older
 than 16 ticks (0.8 s), the writer sends a full snapshot, 1073 bytes for 64 entities. When a delta passes 1100 bytes, the
 writer leaves the farthest entities out of this tick. They stay changed against the old snapshot, so the next tick sends
@@ -562,9 +564,12 @@ machine was busy with other work in part of the runs, so a result is a range.
   movement takes 28 percent of the tick, and the make and encode of the snapshots 42 percent.
 - When the machine is over its load, the bots send their inputs late, the writer refuses them, and the players stand
   still. So the data down of 2000 bots falls below that of 1000 bots, and it is no measure of the design there.
-- A crowd of 250 bots in one square of 128 m gives a mean of 337 bytes for each snapshot of the 500 bots, and the table
-  of section 7 gives 151 bytes for the same part of players in a town. The mean data down passes the target of 5 KB/s
-  there. The cause is not found yet.
+- A crowd of 250 bots in one square of 128 m gave a mean of 337 bytes for each snapshot of the 500 bots, against the
+  151 bytes of section 7 for the same part of players in a town, and the mean data down passed the target of 5 KB/s.
+  Each delta then gave each moving entity again with its velocity, view, animation and hit points, though a bot keeps
+  its heading for 1 s. The test `a_crowd_that_walks_gets_snapshots_of_74_bytes_on_average` of `mmo-zone` seeds and
+  walks the same crowd. Over 400 ticks it gave 344 bytes when each change held each value, 191 bytes when a change
+  held only the values that changed, and the walk of section 5 brings it to 74 bytes.
 - With a cap of 300 and 600 bots, 300 bots enter within 2 s and 300 wait in the queue, as section 8 says.
 
 ## 13. The drawing

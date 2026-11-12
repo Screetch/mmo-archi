@@ -28,12 +28,12 @@ pub use messages::{
   ToNeighbour, ToZone,
 };
 pub use values::{
-  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, Tick, Token, Velocity,
-  ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, TICKS_PER_SECOND, Tick,
+  Token, Velocity, ZoneId,
 };
 
 /// The version of the protocol, which each [`Hello`] carries.
 ///
 /// A change of a message, of the codec, of the version of bitcode or of the step of `mmo-collide`
 /// raises it. A new version needs a restart of the world, since a side accepts only its own.
-pub const PROTOCOL: u16 = 3;
+pub const PROTOCOL: u16 = 4;

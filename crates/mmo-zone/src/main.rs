@@ -137,7 +137,11 @@ mod tests {
   /// no entity left its view.
   fn apply(views: &mut BTreeMap<u32, View>, snapshot: &Snapshot) -> View {
     assert_eq!(snapshot.left, [], "no entity leaves the view of a player of this test");
-    let mut view = snapshot.base.map(|base| views[&base.0].clone()).unwrap_or_default();
+    let ahead = |base: Tick| {
+      let held = views[&base.0].iter();
+      held.map(|(id, entity)| (*id, entity.ahead(snapshot.tick.0 - base.0))).collect()
+    };
+    let mut view: View = snapshot.base.map(ahead).unwrap_or_default();
     for entity in &snapshot.entered {
       view.insert(entity.id.0, *entity);
     }
@@ -146,9 +150,10 @@ mod tests {
       held.position.x += change.movement.x;
       held.position.y += change.movement.y;
       held.position.z += change.movement.z;
-      held.velocity = change.velocity;
-      held.view = change.view;
-      held.hit_points = change.hit_points;
+      held.velocity = change.velocity.unwrap_or(held.velocity);
+      held.view = change.view.unwrap_or(held.view);
+      held.animation = change.animation.unwrap_or(held.animation);
+      held.hit_points = change.hit_points.unwrap_or(held.hit_points);
     }
     views.insert(snapshot.tick.0, view.clone());
     view

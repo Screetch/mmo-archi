@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mmo_protocol::{
   AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, SAVES, Save,
-  ToZone, decode, encode, frame,
+  TICKS_PER_SECOND, ToZone, decode, encode, frame,
 };
 use mmo_store::{Saved, Store, keys};
 use quinn::{
@@ -20,7 +20,7 @@ use tokio::time;
 use crate::Error;
 use crate::claim::{self, Claim, Entry};
 use crate::keeper::{self, Keeper};
-use crate::zone::{Gateway, Leaver, Refusal, TICKS_PER_SECOND, Zone};
+use crate::zone::{Gateway, Leaver, Refusal, Zone};
 
 /// The time of one tick: the zone runs 20 ticks each second, as the step of `mmo-collide` does.
 const TICK: Duration = Duration::from_millis(50);
@@ -435,7 +435,7 @@ mod tests {
 
   use mmo_protocol::{
     AccountId, Angle, CharacterId, FromClient, Input, Intents, Link, PROTOCOL, Password, Position,
-    Relayed, SAVES, Save, State, Tick, ToZone, ZoneId, frame,
+    Relayed, SAVES, Save, State, TICKS_PER_SECOND, Tick, ToZone, ZoneId, frame,
   };
   use mmo_store::testing::Redis;
   use mmo_store::{Saved, Store, keys};
@@ -446,7 +446,7 @@ mod tests {
   use super::{Claim, Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
-  use crate::zone::{TICKS_PER_SECOND, Zone};
+  use crate::zone::Zone;
 
   const MEADOW: ZoneId = ZoneId(1);
   const GATE: Gateway = Gateway(1);

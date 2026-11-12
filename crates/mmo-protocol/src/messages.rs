@@ -1,8 +1,8 @@
 use bitcode::{Decode, Encode};
 
 use crate::{
-  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, Tick, Token, Velocity,
-  ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, TICKS_PER_SECOND, Tick,
+  Token, Velocity, ZoneId,
 };
 
 /// A message of a client to the login service, on a stream.
@@ -186,7 +186,9 @@ pub struct Input {
 ///
 /// With no base, the snapshot is full: `entered` holds each visible entity, and `changed` and
 /// `left` are empty. With a base, it is a delta against the snapshot of that tick, which the
-/// client acknowledged.
+/// client acknowledged. Each entity that the client held at the base, and that the delta does
+/// not name, stands where [`Entity::ahead`] takes it, so an entity that walks straight costs no
+/// byte. A [`Change`] gives the movement from that place.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Snapshot {
   /// The tick of the snapshot.
@@ -218,22 +220,43 @@ pub struct Entity {
   pub hit_points: i32,
 }
 
+impl Entity {
+  /// The entity `ticks` ticks later, as a delta takes each entity that it does not name: its
+  /// position moves by its velocity in whole centimetres each tick, and each other value stays.
+  #[must_use]
+  pub fn ahead(self, ticks: u32) -> Self {
+    let ticks = i32::try_from(ticks).unwrap_or(i32::MAX);
+    let each = TICKS_PER_SECOND.cast_signed();
+    let by = |speed: i16| (i32::from(speed) / each).saturating_mul(ticks);
+    let Position { x, y, z } = self.position;
+    let Velocity { x: vx, y: vy, z: vz } = self.velocity;
+    let position = Position {
+      x: x.saturating_add(by(vx)),
+      y: y.saturating_add(by(vy)),
+      z: z.saturating_add(by(vz)),
+    };
+    Self { position, ..self }
+  }
+}
+
 /// The new state of an entity in a delta, with its movement since the base in place of its
-/// position.
+/// position. Each other field is `None` when its value is the value at the base, so a crowd that
+/// walks sends its movements and little more.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Change {
   /// The id of the entity.
   pub id: CharacterId,
-  /// The movement of the entity since the base.
+  /// The movement of the entity from the place where [`Entity::ahead`] takes it at the base.
   pub movement: Offset,
-  /// The velocity of the entity.
-  pub velocity: Velocity,
-  /// The direction in which the entity looks.
-  pub view: Angle,
-  /// The animation that the entity plays, by its number in the content of the game.
-  pub animation: u8,
-  /// The hit points of the entity.
-  pub hit_points: i32,
+  /// The velocity of the entity, or `None` when it did not change since the base.
+  pub velocity: Option<Velocity>,
+  /// The direction in which the entity looks, or `None` when it did not change since the base.
+  pub view: Option<Angle>,
+  /// The animation that the entity plays, by its number in the content of the game, or `None`
+  /// when it did not change since the base.
+  pub animation: Option<u8>,
+  /// The hit points of the entity, or `None` when they did not change since the base.
+  pub hit_points: Option<i32>,
 }
 
 /// A message of a gateway to a zone writer, on a stream.
@@ -502,11 +525,12 @@ mod tests {
     let change = Change {
       id: CharacterId(9),
       movement: Offset { x: 30, y: -30, z: 0 },
-      velocity: Velocity { x: 600, y: -600, z: 0 },
-      view: Angle(100),
-      animation: 1,
-      hit_points: 0,
+      velocity: Some(Velocity { x: 600, y: -600, z: 0 }),
+      view: Some(Angle(100)),
+      animation: Some(1),
+      hit_points: Some(0),
     };
+    let moved = Change { velocity: None, view: None, animation: None, hit_points: None, ..change };
     round_trip(&[
       Snapshot {
         tick: Tick(1000),
@@ -519,10 +543,20 @@ mod tests {
         tick: Tick(1000),
         base: Some(Tick(997)),
         entered: vec![entity(3)],
-        changed: vec![change],
+        changed: vec![change, moved],
         left: vec![CharacterId(4), CharacterId(5)],
       },
     ]);
+  }
+
+  #[test]
+  fn an_entity_ahead_moves_by_its_velocity_in_whole_centimetres_each_tick() {
+    let walker = Entity { velocity: Velocity { x: 600, y: -30, z: -19 }, ..entity(1) };
+    let Position { x, y, z } = walker.position;
+    let ahead = Entity { position: Position { x: x + 90, y: y - 3, z }, ..walker };
+    assert_eq!(walker.ahead(3), ahead);
+    assert_eq!(walker.ahead(1).ahead(2), ahead);
+    assert_eq!(walker.ahead(0), walker);
   }
 
   #[test]

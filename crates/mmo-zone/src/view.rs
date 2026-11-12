@@ -76,12 +76,7 @@ impl Sent {
       .iter()
       .map(|entity| {
         let was = held(entity.id);
-        let part = match was.and_then(|(id, tick)| history.at(tick, id)) {
-          Some(old) if old == entity => Part::Same(entity.id),
-          Some(old) => Part::Changed(change(old, entity)),
-          None => Part::Entered(*entity),
-        };
-        (part, was)
+        (Part::of(history, was, entity), was)
       })
       .collect();
     let left: Vec<CharacterId> = base
@@ -130,6 +125,18 @@ impl Sent {
 }
 
 impl Part {
+  /// What a snapshot of the present tick says of `entity`, for a client that holds the state of
+  /// `was` at its tick, which walks on as [`Entity::ahead`] says, or holds none.
+  fn of(history: &History, was: Option<(CharacterId, Tick)>, entity: &Entity) -> Self {
+    let held =
+      was.and_then(|(id, tick)| history.at(tick, id).map(|old| old.ahead(history.tick.0 - tick.0)));
+    match held {
+      Some(old) if old == *entity => Part::Same(entity.id),
+      Some(old) => Part::Changed(change(&old, entity)),
+      None => Part::Entered(*entity),
+    }
+  }
+
   fn id(&self) -> CharacterId {
     match self {
       Part::Same(id) => *id,
@@ -140,6 +147,9 @@ impl Part {
 }
 
 fn change(old: &Entity, new: &Entity) -> Change {
+  fn new_or_none<T: PartialEq + Copy>(old: T, new: T) -> Option<T> {
+    (old != new).then_some(new)
+  }
   Change {
     id: new.id,
     movement: Offset {
@@ -147,10 +157,10 @@ fn change(old: &Entity, new: &Entity) -> Change {
       y: new.position.y - old.position.y,
       z: new.position.z - old.position.z,
     },
-    velocity: new.velocity,
-    view: new.view,
-    animation: new.animation,
-    hit_points: new.hit_points,
+    velocity: new_or_none(old.velocity, new.velocity),
+    view: new_or_none(old.view, new.view),
+    animation: new_or_none(old.animation, new.animation),
+    hit_points: new_or_none(old.hit_points, new.hit_points),
   }
 }
 
@@ -198,10 +208,10 @@ mod tests {
     let change = Change {
       id: CharacterId(1),
       movement: Offset { x: 60, y: 0, z: 0 },
-      velocity: Velocity { x: 600, y: 0, z: 0 },
-      view: Angle(0),
-      animation: 0,
-      hit_points: 100,
+      velocity: Some(Velocity { x: 600, y: 0, z: 0 }),
+      view: None,
+      animation: None,
+      hit_points: None,
     };
     assert_eq!(
       delta,
