@@ -540,6 +540,12 @@ document, `MMO_LOCAL_WORLD_CAP` for the cap of the world, and the variables `MMO
 lists, as `MMO_BOTS_TOWN` for the bots that start in one square of 128 m. A zone writer keeps the player of a closed
 link for 30 s, so wait 35 s between two runs.
 
+The workflow `load` (`.github/workflows/load.yml`) runs two stages on a runner of CI, for each pull request that
+changes a crate of the path of a player: 500 bots with 250 in town, then 2000 bots. It runs each stage on a new stack of
+the release build of the base of the pull request, then of the change, on the same runner, and fails when a bot of the
+change cannot play. Its summary gives the report of the bots, the cores
+of the gateway and of the zone writer over the last 20 s of the play, and the hottest functions of each, from `perf`.
+
 ### The first local results
 
 These runs used a release build, one zone, one gateway and one keeper, and the bots, on one machine of 10 cores. The
