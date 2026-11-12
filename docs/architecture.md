@@ -569,7 +569,7 @@ machine was busy with other work in part of the runs, so a result is a range.
 - The first 1000 bots meet the budget of 25 ms at the 99th percentile. At 1500 bots the tick passes it, and at 2000 it
   passes the limit of 50 ms.
 - The gateway uses the most CPU: 0.87 core for 1000 clients and 2.6 cores for 2000, against 0.24 and 0.57 core for the
-  zone writer. The bots use 1.7 cores for 2000. On one machine these processes fill the cores near 1500 bots, so the
+  zone writer. The results on a runner of CI below give the cause. The bots use 1.7 cores for 2000. On one machine these processes fill the cores near 1500 bots, so the
   tick grows from the wait for a core, not from the work of the writer.
 - A sample of the zone writer at 2000 bots puts 22 percent of the time in the tick, about 11 ms for each tick. The
   movement takes 28 percent of the tick, and the make and encode of the snapshots 42 percent.
@@ -582,6 +582,26 @@ machine was busy with other work in part of the runs, so a result is a range.
   walks the same crowd. Over 400 ticks it gave 344 bytes when each change held each value, 191 bytes when a change
   held only the values that changed, and the walk of section 5 brings it to 74 bytes.
 - With a cap of 300 and 600 bots, 300 bots enter within 2 s and 300 wait in the queue, as section 8 says.
+
+### The results on a runner of CI
+
+The workflow `load` gave these numbers in its run 43321539577, on a runner of Linux with 4 cores. The bots, the gateway,
+the zone writer and the stores share those 4 cores. The cores of a process are its mean over the last 20 s of the play.
+
+| Bots | In town | Tick p50 (ms) | Tick p99 (ms) | Data down, mean (B/s) | Data up (B/s) | Gateway (cores) | Zone writer (cores) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 500 | 250 | 6.5 | 10.8 | 920 | 516 | 0.47 | 0.25 |
+| 2000 | 0 | 44.8 | 77.5 | 1656 | 429 | 1.19 | 0.72 |
+
+- The crowd of 250 bots in town gets 46 bytes for each snapshot on average, against the 337 bytes of the first local
+  results. The mean data down of 920 B/s is far below the target of 5 KB/s.
+- In the same run, the gateway of the layer below took 0.56 core for 500 bots and 938 B/s down, so a snapshot that skips
+  the task of its client cuts the gateway by 16 percent.
+- In the profile of the gateway at 2000 bots, the kernel takes 44 percent of the samples, quinn 32 percent, tokio 8
+  percent and the crypto of QUIC 6 percent, and the code of the gateway 2 percent. The gateway pays QUIC and UDP for each
+  packet of 2000 connections, and the zone writer pays them for one connection. So the gateway takes more CPU than the
+  writer by design, and section 7 plans one gateway for each 2500 players.
+- At 2000 bots the 4 cores are full, so the tick passes 50 ms from the wait for a core, as on the machine of 10 cores.
 
 ## 13. The drawing
 
