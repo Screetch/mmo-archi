@@ -52,16 +52,8 @@ enum Error {
 #[expect(clippy::disallowed_methods, reason = "main starts the runtime of the gateway once")]
 #[tokio::main]
 async fn main() -> ExitCode {
-  eprintln!("the gateway stops: {}", run(|name| env::var(name).ok()).await);
+  eprintln!("the gateway stops: {}", run(open(|name| env::var(name).ok()).await).await);
   ExitCode::FAILURE
-}
-
-/// Runs the gateway until a fault stops it, and gives that fault.
-async fn run(var: impl Fn(&str) -> Option<String>) -> Error {
-  match open(var).await {
-    Ok((endpoint, gateway)) => serve(&endpoint, &gateway).await,
-    Err(error) => error,
-  }
 }
 
 async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Arc<Gateway>), Error> {
@@ -72,10 +64,15 @@ async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Arc<Gat
   Ok((endpoint, gateway))
 }
 
-/// Serves each client in a task of its own until the endpoint closes.
-async fn serve(endpoint: &Endpoint, gateway: &Arc<Gateway>) -> Error {
+/// Serves each client of the gateway that `opened` gives in a task of its own until a fault stops
+/// it, and gives that fault: why the gateway did not open, or the close of its endpoint.
+async fn run(opened: Result<(Endpoint, Arc<Gateway>), Error>) -> Error {
+  let (endpoint, gateway) = match opened {
+    Ok(opened) => opened,
+    Err(error) => return error,
+  };
   while let Some(incoming) = endpoint.accept().await {
-    tokio::spawn(client::serve(incoming, Arc::clone(gateway)));
+    tokio::spawn(client::serve(incoming, Arc::clone(&gateway)));
   }
   Error::Closed
 }
@@ -94,8 +91,8 @@ mod tests {
 
   use tokio::time;
 
-  use super::{Error, open, run, serve};
-  use crate::world::{Peer, World, Zone, free, var};
+  use super::{Error, open, run};
+  use crate::world::{ANY, Peer, World, Zone, var};
 
   const SAY: &str = "hello, all";
   const MALFORMED: &str = "the bytes are not a message of this version of the protocol";
@@ -215,7 +212,7 @@ mod tests {
     let meadow = world.zone(1).await;
     let forest = world.zone(2).await;
     let token = world.session(11, 42, 1).await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let (mut client, first) = world.announced(address, token).await;
     assert_eq!(first, ToClient::Moved { zone: ZoneId(1) });
     let mut one = meadow.accept().await;
@@ -257,7 +254,7 @@ mod tests {
   #[tokio::test]
   async fn a_client_that_breaks_the_protocol_before_its_attach_loses_its_connection() {
     let world = World::new().await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let client = async || world.client(address).await.expect("the gateway is trusted");
     let untrusted = World::new().await.client(address).await.err();
     let refused = "the cryptographic handshake failed: error 51: invalid peer certificate: \
@@ -326,7 +323,7 @@ mod tests {
     world.entry(4, "[::1]:4434", 1).await;
     world.entry(6, "localhost:0", 1).await;
     world.entry(7, &strange.address(), 1).await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let mut reasons = Vec::new();
     for zone in [9, 3, 4, 6] {
       let client = world.attached(address, world.session(11, 42, zone).await).await;
@@ -369,7 +366,7 @@ mod tests {
   async fn each_fault_of_a_playing_client_ends_its_connection_alone_with_its_reason() {
     let world = World::new().await;
     let meadow = world.zone(1).await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let (writer, mut played) = play(&world, address, &meadow, &[1, 2, 3, 4, 5, 6]).await;
     played[0].0.write(&frame(&longer(&FromClient::Logout)).expect("a frame")).await;
     played[1].0.datagram(&longer(&intents(1)));
@@ -406,7 +403,7 @@ mod tests {
   async fn a_message_of_the_writer_that_a_client_cannot_take_ends_that_client_alone() {
     let world = World::new().await;
     let meadow = world.zone(1).await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let (mut writer, mut played) = play(&world, address, &meadow, &[1, 2, 3, 4]).await;
     writer.tell(&Relayed { link: played[0].1, message: ToClient::Moved { zone: ZoneId(9) } }).await;
     writer.send_datagram(&Relayed { link: played[2].1, message: crowd() });
@@ -435,7 +432,7 @@ mod tests {
   async fn each_fault_of_a_zone_writer_ends_its_link_and_its_clients() {
     let world = World::new().await;
     let zones = [world.zone(1).await, world.zone(2).await, world.zone(3).await];
-    let address = world.gateway();
+    let address = world.gateway().await;
     let mut clients = Vec::new();
     let mut writers = Vec::new();
     for (zone, writer) in (1..).zip(&zones) {
@@ -467,7 +464,7 @@ mod tests {
     let world = World::new().await;
     let meadow = world.zone(1).await;
     let forest = world.zone(2).await;
-    let address = world.gateway();
+    let address = world.gateway().await;
     let mut ada = world.attached(address, world.session(11, 42, 1).await).await;
     let mut one = meadow.accept().await;
     let link = link_at(&ada, &one).await;
@@ -503,26 +500,28 @@ mod tests {
   #[tokio::test]
   async fn the_gateway_stops_on_a_variable_on_a_redis_and_on_an_address_that_it_cannot_use() {
     let world = World::new().await;
-    let unset = run(var(Vec::new())).await.to_string();
+    let unset = run(open(var(Vec::new())).await).await.to_string();
     assert_eq!(unset, "the variable GATEWAY_ADDRESS is not set");
-    let mut vars = world.vars(&free());
+    let mut vars = world.vars(ANY);
     vars.retain(|(name, _)| *name != "REDIS_URL");
     vars.push(("REDIS_URL", "redis://127.0.0.1:1".to_owned()));
-    let unreachable = run(var(vars)).await.to_string();
+    let unreachable = run(open(var(vars)).await).await.to_string();
     assert!(unreachable.starts_with("Redis refuses the gateway: "), "{unreachable}");
     world.grant("~*", "-subscribe").await;
-    let deaf = run(var(world.vars(&free()))).await.to_string();
+    let deaf = run(open(var(world.vars(ANY))).await).await.to_string();
     let denied = "NoPerm: User gateway has no permissions to run the 'subscribe' command";
     assert_eq!(deaf, format!("Redis refuses the gateway: {denied}"));
     world.grant("~*", "+@all").await;
     let taken = UdpSocket::bind("127.0.0.1:0").expect("a socket");
-    let in_use = run(var(world.vars(&taken.local_addr().expect("an address").to_string()))).await;
+    let taken = taken.local_addr().expect("an address").to_string();
+    let in_use = run(open(var(world.vars(&taken))).await).await;
     assert!(
       matches!(in_use, Error::Address(ref error) if error.kind() == io::ErrorKind::AddrInUse),
       "{in_use}"
     );
-    let (endpoint, gateway) = open(var(world.vars(&free()))).await.expect("a gateway");
+    let (endpoint, gateway) = open(var(world.vars(ANY))).await.expect("a gateway");
     endpoint.close(0u32.into(), b"");
-    assert_eq!(serve(&endpoint, &gateway).await.to_string(), "the endpoint of the clients closed");
+    let closed = run(Ok((endpoint, gateway))).await.to_string();
+    assert_eq!(closed, "the endpoint of the clients closed");
   }
 }
