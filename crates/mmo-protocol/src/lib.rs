@@ -8,8 +8,8 @@
 //! - A client and the login service: [`ToLogin`] and [`FromLogin`], on a stream.
 //! - A client and a gateway: [`Attach`], [`FromClient`] and [`ToClient`] on stream 0, and
 //!   [`Intents`] and [`Snapshot`] in datagrams.
-//! - A gateway and a zone writer: [`ToZone`], and a [`Relayed`] for each message that the gateway
-//!   relays between one link and the writer.
+//! - A gateway and a zone writer: [`ToZone`] and a [`Relayed`] [`ToClient`] on a stream, and the
+//!   datagrams of each link, as [`relayed`] makes them.
 //! - Two zone writers: [`ToNeighbour`], on a stream.
 //! - A zone writer and the keeper: [`ToKeeper`] and [`FromKeeper`], on one stream that the writer
 //!   opens.
@@ -21,7 +21,9 @@ mod codec;
 mod messages;
 mod values;
 
-pub use codec::{DATAGRAM, Error, FRAME, Frames, Hello, datagram, decode, encode, frame};
+pub use codec::{
+  DATAGRAM, Error, FRAME, Frames, Hello, datagram, decode, encode, frame, relayed, unrelayed,
+};
 pub use messages::{
   Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, Input, Intents,
   KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient, ToKeeper, ToLogin,
@@ -36,4 +38,4 @@ pub use values::{
 ///
 /// A change of a message, of the codec, of the version of bitcode or of the step of `mmo-collide`
 /// raises it. A new version needs a restart of the world, since a side accepts only its own.
-pub const PROTOCOL: u16 = 4;
+pub const PROTOCOL: u16 = 5;

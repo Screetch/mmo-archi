@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use bitcode::{DecodeOwned, Encode};
 use mmo_protocol::{
-  Attach, Frames, Hello, PROTOCOL, ToClient, Token, ZoneId, decode, encode, frame,
+  Attach, Frames, Hello, PROTOCOL, Relayed, ToClient, Token, ZoneId, decode, encode, frame,
+  relayed, unrelayed,
 };
 use mmo_store::keys;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -344,9 +345,25 @@ impl Peer {
     self.datagram(&encode(message));
   }
 
-  pub(crate) async fn datagram_of<M: DecodeOwned>(&self) -> M {
+  pub(crate) async fn bytes_of_datagram(&self) -> Vec<u8> {
     let read = within(self.connection.read_datagram()).await.expect("a datagram comes in time");
-    decode(&read.expect("a datagram")).expect("a datagram of this version")
+    read.expect("a datagram").to_vec()
+  }
+
+  pub(crate) async fn datagram_of<M: DecodeOwned>(&self) -> M {
+    decode(&self.bytes_of_datagram().await).expect("a datagram of this version")
+  }
+
+  /// Sends a datagram for the client of a link, as a zone writer does.
+  pub(crate) fn relay<M: Encode>(&self, message: &Relayed<M>) {
+    self.datagram(&relayed(message.link, &encode(&message.message)));
+  }
+
+  /// The next datagram that the gateway relays to this zone writer, with the link of its client.
+  pub(crate) async fn relayed_of<M: DecodeOwned>(&self) -> Relayed<M> {
+    let bytes = self.bytes_of_datagram().await;
+    let (link, datagram) = unrelayed(&bytes).expect("a link");
+    Relayed { link, message: decode(datagram).expect("a datagram of this version") }
   }
 
   pub(crate) fn close(&self) {

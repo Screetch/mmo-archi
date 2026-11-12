@@ -280,10 +280,9 @@ pub enum ToZone {
   },
 }
 
-/// A message that a gateway relays between one link and a zone writer.
-///
-/// The gateway relays [`Intents`] to the writer in a datagram, and [`ToClient`] on a stream and
-/// [`Snapshot`] in a datagram from it. The writer drops a message of a link that is not the link
+/// A message that a gateway relays between one link and a zone writer on a stream: a
+/// [`FromClient`] in [`ToZone::Client`], and a [`ToClient`] from the writer. A datagram of a link
+/// goes as [`crate::relayed`] makes it. The writer drops a message of a link that is not the link
 /// of one of its players.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Relayed<M> {
@@ -566,7 +565,6 @@ mod tests {
       ToZone::Client(Relayed { link: LINK, message: FromClient::Logout }),
       ToZone::Leave { link: LINK },
     ]);
-    round_trip(&[Relayed { link: LINK, message: intents() }]);
     round_trip(&[Relayed { link: LINK, message: ToClient::Moved { zone: ZoneId(3) } }]);
     round_trip(&[ToNeighbour::Transfer {
       account: AccountId(11),

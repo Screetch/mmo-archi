@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  AccountId, CharacterId, FromClient, Link, Relayed, Snapshot, ToClient, ToZone, ZoneId, decode,
-  encode, frame,
+  AccountId, CharacterId, DATAGRAM, FromClient, Link, Relayed, ToClient, ToZone, ZoneId, decode,
+  encode, frame, unrelayed,
 };
 use quinn::{Connection, SendStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -21,12 +21,6 @@ pub(crate) struct Entry {
   pub(crate) epoch: i64,
 }
 
-/// A message of the zone writer for one client.
-pub(crate) enum Down {
-  Message(ToClient),
-  Snapshot(Snapshot),
-}
-
 /// The link to the writer of one zone. Each clone sends on the same link.
 #[derive(Clone)]
 pub(crate) struct Writer {
@@ -36,10 +30,20 @@ pub(crate) struct Writer {
   orders: UnboundedSender<Order>,
 }
 
+/// Where the task of the link relays what the writer sends to one client: each message to the
+/// task of the client, and each snapshot straight to its connection, as the bytes that the writer
+/// made, so a snapshot costs the gateway no decode, no encode and no wake of the task of the
+/// client.
+#[derive(Clone)]
+pub(crate) struct Route {
+  pub(crate) messages: UnboundedSender<ToClient>,
+  pub(crate) connection: Connection,
+}
+
 /// What a client asks of the task of the link.
 enum Order {
-  /// Relays each message of the writer for `link` to `to`.
-  Route { link: Link, to: UnboundedSender<Down> },
+  /// Relays each message and each snapshot of the writer for `link` to `to`.
+  Route { link: Link, to: Route },
   /// Relays no more message for the link.
   Unroute(Link),
   /// Writes a frame on the stream of the writer.
@@ -62,19 +66,14 @@ impl Writer {
 
   /// Joins the character of a session to the zone on `link`, and relays the messages of the
   /// writer for that link to `to`.
-  pub(crate) fn join(
-    &self,
-    link: Link,
-    (account, character): (AccountId, CharacterId),
-    to: UnboundedSender<Down>,
-  ) {
+  pub(crate) fn join(&self, link: Link, (account, character): (AccountId, CharacterId), to: Route) {
     self.order(Order::Route { link, to });
     self.order(Order::Tell(framed(&encode(&ToZone::Join { link, account, character }))));
   }
 
   /// Relays the messages of the writer for `link` to `to`, after a move of its player into this
   /// zone.
-  pub(crate) fn follow(&self, link: Link, to: UnboundedSender<Down>) {
+  pub(crate) fn follow(&self, link: Link, to: Route) {
     self.order(Order::Route { link, to });
   }
 
@@ -137,7 +136,7 @@ struct Relay {
   send: SendStream,
   stream: Stream,
   orders: UnboundedReceiver<Order>,
-  routes: BTreeMap<u64, UnboundedSender<Down>>,
+  routes: BTreeMap<u64, Route>,
 }
 
 impl Relay {
@@ -158,12 +157,23 @@ impl Relay {
         Some(order) = self.orders.recv() => self.order(order).await,
         payload = self.stream.next() => payload.and_then(|payload| {
           let Relayed { link, message } = decode(&payload)?;
-          self.deliver(link, Down::Message(message));
+          self.deliver(link, message);
           Ok(())
         }),
         datagram = self.connection.read_datagram() => datagram.map_err(Fault::from).and_then(|bytes| {
-          let Relayed { link, message } = decode(&bytes)?;
-          self.deliver(link, Down::Snapshot(message));
+          let (link, snapshot) = unrelayed(&bytes)?;
+          if let Some(route) = self.routes.get(&link.0) {
+            let size = snapshot.len();
+            let sent = if size > DATAGRAM {
+              Err(Fault::Codec(mmo_protocol::Error::Datagram { size }))
+            } else {
+              route.connection.send_datagram(bytes.slice(bytes.len() - size..)).map_err(Fault::from)
+            };
+            // The fault of one client ends that client alone, and its leave comes next.
+            if let Err(fault) = sent {
+              route.connection.close(FAULT, fault.to_string().as_bytes());
+            }
+          }
           Ok(())
         }),
       };
@@ -186,12 +196,12 @@ impl Relay {
     Ok(())
   }
 
-  /// Gives `down` to the client of `link`. The writer can send for a link that left, until it
+  /// Gives `message` to the client of `link`. The writer can send for a link that left, until it
   /// reads the leave.
-  fn deliver(&self, link: Link, down: Down) {
+  fn deliver(&self, link: Link, message: ToClient) {
     if let Some(to) = self.routes.get(&link.0) {
       // The send fails only when the client ended, and its leave comes next.
-      drop(to.send(down));
+      drop(to.messages.send(message));
     }
   }
 }
