@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use mmo_protocol::{
   AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, SAVES, Save,
-  TICKS_PER_SECOND, ToZone, decode, encode, frame,
+  TICKS_PER_SECOND, ToZone, decode, encode, frame, relayed, unrelayed,
 };
 use mmo_store::{Saved, Store, keys};
 use quinn::{
@@ -325,7 +325,8 @@ impl Writer {
     let mut lost = Vec::new();
     for (gateway, connection) in &self.gateways {
       for (_, snapshot) in snapshots.iter().filter(|(via, _)| via == gateway) {
-        if let Err(error) = connection.send_datagram(encode(snapshot).into()) {
+        let bytes = relayed(snapshot.link, &encode(&snapshot.message));
+        if let Err(error) = connection.send_datagram(bytes.into()) {
           eprintln!("a snapshot does not reach the gateway {}: {error}", gateway.0);
           lost.push(*gateway);
           break;
@@ -397,7 +398,10 @@ async fn relay(
       }
       datagram = connection.read_datagram() => datagram
         .map_err(Fault::from)
-        .and_then(|datagram| Ok(Event::Intents(gateway, decode(&datagram)?))),
+        .and_then(|datagram| {
+          let (link, intents) = unrelayed(&datagram)?;
+          Ok(Event::Intents(gateway, Relayed { link, message: decode(intents)? }))
+        }),
     }?;
     drop(events.send(event));
   }
@@ -562,9 +566,12 @@ mod tests {
     let mut wrong = Peer::link(&gateways, address).await;
     wrong.greet().await;
     wrong.write(&frame(&[]).expect("a frame")).await;
+    let mut short = Peer::link(&gateways, address).await;
+    short.greet().await;
+    short.datagram(&[0xff]);
     let mut noisy = Peer::link(&gateways, address).await;
     noisy.greet().await;
-    noisy.datagram(&[0xff]);
+    noisy.datagram(&[0xff; 9]);
     let mut deaf = Peer::link(&gateways, address).await;
     deaf.recv.stop(7u32.into()).expect("an open stream");
     deaf.write(&hello(PROTOCOL)).await;
@@ -575,7 +582,7 @@ mod tests {
     ended.greet().await;
     ended.send.finish().expect("an open stream");
     let mut reasons = Vec::new();
-    for peer in [other, large, wrong, noisy, deaf, gone, ended] {
+    for peer in [other, large, wrong, short, noisy, deaf, gone, ended] {
       reasons.push(peer.closed().await);
     }
     let reason = |text: &str| Ok((1, text.to_owned()));
@@ -589,6 +596,7 @@ mod tests {
         reason(&version),
         reason("a frame holds 65536 bytes at most"),
         reason(malformed),
+        reason("a relayed datagram starts with a link of 8 bytes, and this one holds 1 bytes"),
         reason(malformed),
         reason("the zone writer cannot write to the gateway: sending stopped by peer: error 7"),
         reason("the stream of the gateway fails: stream reset by peer: error 7"),

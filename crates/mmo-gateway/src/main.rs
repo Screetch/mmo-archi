@@ -86,7 +86,7 @@ mod tests {
   use mmo_protocol::{
     AccountId, Angle, CharacterId, DATAGRAM, Entity, FRAME, FromClient, Input, Intents, Link,
     PROTOCOL, Position, Relayed, Snapshot, Tick, ToClient, ToZone, Token, Velocity, ZoneId, encode,
-    frame,
+    frame, relayed,
   };
 
   use tokio::time;
@@ -99,6 +99,8 @@ mod tests {
   const STOPPED: &str = "the gateway cannot write to the stream: sending stopped by peer: error 7";
   const ENDED: &str = "the peer ended its stream";
   const LARGE: &str = "a frame holds 65536 bytes at most";
+  const SHORT: &str =
+    "a relayed datagram starts with a link of 8 bytes, and this one holds 3 bytes";
 
   #[expect(clippy::unnecessary_wraps, reason = "it stands beside the result of Peer::closed")]
   fn reason(text: &str) -> Result<(u64, String), String> {
@@ -135,7 +137,7 @@ mod tests {
   /// it.
   async fn link_at(client: &Peer, zone: &Peer) -> Link {
     client.send_datagram(&intents(1));
-    zone.datagram_of::<Relayed<Intents>>().await.link
+    zone.relayed_of::<Intents>().await.link
   }
 
   /// Attaches a client of the gateway at `address` for each character of `characters` in zone 1,
@@ -222,11 +224,13 @@ mod tests {
 
     let snapshot =
       Snapshot { tick: Tick(7), base: None, entered: vec![], changed: vec![], left: vec![] };
-    one.send_datagram(&Relayed { link: Link(link.0 ^ 1), message: snapshot.clone() });
-    one.send_datagram(&Relayed { link, message: snapshot.clone() });
+    one.relay(&Relayed { link: Link(link.0 ^ 1), message: snapshot.clone() });
+    one.relay(&Relayed { link, message: snapshot.clone() });
     assert_eq!(client.datagram_of::<Snapshot>().await, snapshot);
+    one.datagram(&relayed(link, &[1, 2, 3]));
+    assert_eq!(client.bytes_of_datagram().await, [1, 2, 3], "the gateway decodes no snapshot");
     client.send_datagram(&intents(1));
-    assert_eq!(one.datagram_of::<Relayed<Intents>>().await, Relayed { link, message: intents(1) });
+    assert_eq!(one.relayed_of::<Intents>().await, Relayed { link, message: intents(1) });
     let say = FromClient::Say { channel: "world".to_owned(), text: SAY.to_owned() };
     client.tell(&say).await;
     assert_eq!(one.message::<ToZone>().await, ToZone::Client(Relayed { link, message: say }));
@@ -236,7 +240,7 @@ mod tests {
 
     client.send_datagram(&intents(2));
     let mut two = forest.accept().await;
-    assert_eq!(two.datagram_of::<Relayed<Intents>>().await, Relayed { link, message: intents(2) });
+    assert_eq!(two.relayed_of::<Intents>().await, Relayed { link, message: intents(2) });
     let moved = ToClient::Moved { zone: ZoneId(2) };
     one.tell(&Relayed { link, message: moved.clone() }).await;
     assert_eq!(client.message::<ToClient>().await, moved);
@@ -384,7 +388,7 @@ mod tests {
     }
     let (client, link) = &mut played[5];
     client.send_datagram(&intents(1));
-    let relayed = writer.datagram_of::<Relayed<Intents>>().await;
+    let relayed = writer.relayed_of::<Intents>().await;
     assert_eq!(relayed, Relayed { link: *link, message: intents(1) });
     assert_eq!(
       reasons,
@@ -406,7 +410,7 @@ mod tests {
     let address = world.gateway().await;
     let (mut writer, mut played) = play(&world, address, &meadow, &[1, 2, 3, 4]).await;
     writer.tell(&Relayed { link: played[0].1, message: ToClient::Moved { zone: ZoneId(9) } }).await;
-    writer.send_datagram(&Relayed { link: played[2].1, message: crowd() });
+    writer.relay(&Relayed { link: played[2].1, message: crowd() });
     played[1].0.recv.stop(7u32.into()).expect("an open stream");
     let line = Relayed { link: played[1].1, message: line(SAY) };
     let reasons = [
@@ -440,7 +444,7 @@ mod tests {
       writers.push(writer.accept().await);
     }
     writers[0].write(&frame(&[]).expect("a frame")).await;
-    writers[1].datagram(&longer(&intents(1)));
+    writers[1].datagram(&[1, 2, 3]);
     writers[2].recv.stop(7u32.into()).expect("an open stream");
     let say = FromClient::Say { channel: "world".to_owned(), text: SAY.to_owned() };
     let mut reasons = vec![
@@ -454,7 +458,7 @@ mod tests {
     let lost = |zone: i32| reason(&format!("the link to the writer of zone {zone} ends: closed"));
     assert_eq!(
       reasons,
-      [reason(MALFORMED), reason(MALFORMED), reason(STOPPED), lost(1), lost(2), lost(3)]
+      [reason(MALFORMED), reason(SHORT), reason(STOPPED), lost(1), lost(2), lost(3)]
     );
   }
 

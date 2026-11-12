@@ -81,6 +81,11 @@ channel `directory`, and each 5 s.
 Each datagram of a client names the zone that the client is in (section 4), so the gateway keeps no state for a player.
 A zone writer drops a message for a player that it does not hold, so a false zone in a message reaches no state.
 
+Between the gateway and a zone writer, a datagram holds the link of a client in 8 bytes, then the datagram of that
+client as it goes on the wire. So the gateway relays each intent and each snapshot with no encode, and it decodes only
+the zone of an intent. The task of the link to a writer sends each snapshot straight to the connection of its client,
+with no wake of the task of that client.
+
 When a gateway stops, its clients see the connection close within 3 s, the idle timeout of QUIC. Each client connects to
 another gateway with its session token. The zone writer keeps a player whose link closed in the world for 30 s, so the
 player comes back to the same state.
@@ -539,6 +544,12 @@ bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=
 document, `MMO_LOCAL_WORLD_CAP` for the cap of the world, and the variables `MMO_BOTS_*` that the doc of `mmo-bots`
 lists, as `MMO_BOTS_TOWN` for the bots that start in one square of 128 m. A zone writer keeps the player of a closed
 link for 30 s, so wait 35 s between two runs.
+
+The workflow `load` (`.github/workflows/load.yml`) runs two stages on a runner of CI, for each pull request that
+changes a crate of the path of a player: 500 bots with 250 in town, then 2000 bots. It runs each stage on a new stack of
+the release build of the base of the pull request, then of the change, on the same runner, and fails when a bot of the
+change cannot play. Its summary gives the report of the bots, the cores
+of the gateway and of the zone writer over the last 20 s of the play, and the hottest functions of each, from `perf`.
 
 ### The first local results
 

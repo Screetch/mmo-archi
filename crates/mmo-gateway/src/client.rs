@@ -3,15 +3,13 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use mmo_protocol::{
-  Attach, FromClient, Intents, Link, Relayed, ToClient, datagram, decode, encode,
-};
+use mmo_protocol::{Attach, FromClient, Intents, Link, ToClient, decode, encode, relayed};
 use quinn::{Connection, ConnectionError, Incoming, SendStream};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::gateway::Gateway;
 use crate::link::{FAULT, Fault, Stream, framed, greet};
-use crate::writer::{Down, Writer};
+use crate::writer::{Route, Writer};
 
 /// Serves the client of `incoming` until a fault ends its connection, and closes it with that
 /// fault as its reason.
@@ -40,7 +38,8 @@ async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infal
   let first = ToClient::Moved { zone: session.zone };
   send.write_all(&framed(&encode(&first))).await?;
   let writer = gateway.writer(session.zone).await?;
-  let (to, down) = unbounded_channel();
+  let (messages, down) = unbounded_channel();
+  let to = Route { messages, connection: connection.clone() };
   writer.join(link, (session.account, session.character), to.clone());
   let mut client = Client { connection, gateway, link, writer, to, send, stream, down };
   let fault = client.play().await;
@@ -66,10 +65,10 @@ struct Client<'a> {
   gateway: &'a Arc<Gateway>,
   link: Link,
   writer: Writer,
-  to: UnboundedSender<Down>,
+  to: Route,
   send: SendStream,
   stream: Stream,
-  down: UnboundedReceiver<Down>,
+  down: UnboundedReceiver<ToClient>,
 }
 
 impl Client<'_> {
@@ -81,7 +80,7 @@ impl Client<'_> {
         biased;
         datagram = self.connection.read_datagram() => self.intents(datagram).await,
         payload = self.stream.next() => self.relay(payload),
-        Some(down) = self.down.recv() => self.deliver(down).await,
+        Some(message) = self.down.recv() => self.deliver(message).await,
         fault = self.writer.lost() => Err(fault),
       };
       if let Err(fault) = done {
@@ -100,29 +99,23 @@ impl Client<'_> {
     &self,
     datagram: Result<impl AsRef<[u8]>, ConnectionError>,
   ) -> Result<(), Fault> {
-    let message: Intents = decode(datagram?.as_ref())?;
-    let bytes = encode(&Relayed { link: self.link, message });
+    let datagram = datagram?;
+    let message: Intents = decode(datagram.as_ref())?;
+    let bytes = relayed(self.link, datagram.as_ref());
     if message.zone == self.writer.zone {
       return self.writer.intents(bytes);
     }
     self.gateway.writer(message.zone).await?.intents(bytes)
   }
 
-  async fn deliver(&mut self, down: Down) -> Result<(), Fault> {
-    match down {
-      Down::Snapshot(snapshot) => datagram(&snapshot)
-        .map_err(Fault::from)
-        .and_then(|bytes| self.connection.send_datagram(bytes.into()).map_err(Fault::from)),
-      Down::Message(message) => {
-        if let ToClient::Moved { zone } = message {
-          let next = self.gateway.writer(zone).await?;
-          next.follow(self.link, self.to.clone());
-          self.writer.forsake(self.link);
-          self.writer = next;
-        }
-        Ok(self.send.write_all(&framed(&encode(&message))).await?)
-      }
+  async fn deliver(&mut self, message: ToClient) -> Result<(), Fault> {
+    if let ToClient::Moved { zone } = message {
+      let next = self.gateway.writer(zone).await?;
+      next.follow(self.link, self.to.clone());
+      self.writer.forsake(self.link);
+      self.writer = next;
     }
+    Ok(self.send.write_all(&framed(&encode(&message))).await?)
   }
 }
 

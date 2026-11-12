@@ -1,6 +1,6 @@
 use bitcode::{DecodeOwned, Encode};
 
-use crate::PROTOCOL;
+use crate::{Link, PROTOCOL};
 
 /// The most bytes that a frame holds, apart from its length.
 pub const FRAME: usize = 64 * 1024;
@@ -36,6 +36,12 @@ pub enum Error {
   #[error("a datagram holds {max} bytes at most, and this one holds {size}", max = DATAGRAM)]
   Datagram {
     /// The bytes of the message.
+    size: usize,
+  },
+  /// A datagram between a gateway and a zone writer holds no link, which takes 8 bytes.
+  #[error("a relayed datagram starts with a link of 8 bytes, and this one holds {size} bytes")]
+  Relayed {
+    /// The bytes of the datagram.
     size: usize,
   },
   /// The bytes do not hold exactly one message of the type that the reader expects.
@@ -102,6 +108,20 @@ pub fn datagram<M: Encode>(message: &M) -> Result<Vec<u8>, Error> {
   Ok(bytes)
 }
 
+/// The bytes of a datagram between a gateway and a zone writer: the link of the client, as a
+/// `u64` in little-endian, then `datagram`, the bytes of a datagram of that client as they go on
+/// its link. So a gateway relays the intents of a client, and each snapshot for it, with no
+/// decode and no encode.
+pub fn relayed(link: Link, datagram: &[u8]) -> Vec<u8> {
+  [link.0.to_le_bytes().as_slice(), datagram].concat()
+}
+
+/// The link and the datagram of the client in the bytes that [`relayed`] made.
+pub fn unrelayed(bytes: &[u8]) -> Result<(Link, &[u8]), Error> {
+  let (link, datagram) = bytes.split_first_chunk().ok_or(Error::Relayed { size: bytes.len() })?;
+  Ok((Link(u64::from_le_bytes(*link)), datagram))
+}
+
 /// Puts a payload in a frame for a stream: its length as an unsigned LEB128 number, then its
 /// bytes. It refuses a payload of more than [`FRAME`] bytes.
 pub fn frame(payload: &[u8]) -> Result<Vec<u8>, Error> {
@@ -158,7 +178,10 @@ impl Frames {
 
 #[cfg(test)]
 mod tests {
-  use super::{DATAGRAM, Error, FRAME, Frames, Hello, PROTOCOL, datagram, frame};
+  use super::{
+    DATAGRAM, Error, FRAME, Frames, Hello, PROTOCOL, datagram, frame, relayed, unrelayed,
+  };
+  use crate::Link;
 
   fn version(number: u16, rest: &[u8]) -> Vec<u8> {
     [number.to_le_bytes().as_slice(), rest].concat()
@@ -241,6 +264,16 @@ mod tests {
       frames.push(&length);
       assert_eq!(refused(frames.pop()), too_large);
     }
+  }
+
+  #[test]
+  fn a_relayed_datagram_holds_the_link_in_little_endian_then_the_datagram_of_the_client() {
+    let bytes = relayed(Link(0x0102_0304_0506_0708), &[9, 9]);
+    assert_eq!(bytes, [8, 7, 6, 5, 4, 3, 2, 1, 9, 9]);
+    assert_eq!(refused(unrelayed(&bytes)), Ok((Link(0x0102_0304_0506_0708), &[9, 9][..])));
+    assert_eq!(refused(unrelayed(&bytes[..8])), Ok((Link(0x0102_0304_0506_0708), &[][..])));
+    let short = "a relayed datagram starts with a link of 8 bytes, and this one holds 7 bytes";
+    assert_eq!(refused(unrelayed(&bytes[..7])), Err(short.to_owned()));
   }
 
   #[test]
