@@ -1,0 +1,131 @@
+name: load
+
+# The load test of section 12 of docs/architecture.md, on a runner of CI: no bot runs on a machine of a worker. It
+# builds the base of the pull request and its head, each in release, and runs the same stages of bots against each
+# stack in turn on the same runner, so the two columns of its summary compare. A pull request of a stack has the layer
+# below it as its base, so each layer shows what it changes. A runner of Linux has 4 cores, which
+# the bots, the gateway and the zone writer share, so a number of this job compares with the other column of the
+# same run, and not with a run on another machine.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crates/mmo-bots/**
+      - crates/mmo-client/**
+      - crates/mmo-collide/**
+      - crates/mmo-gateway/**
+      - crates/mmo-protocol/**
+      - crates/mmo-zone/**
+      - script/local.sh
+      - .github/workflows/load.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  load:
+    name: the load
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/redis
+      # perf samples the gateway and the zone writer during the play of each stage.
+      # A kernel of the image that has no tools of its own leaves the job with no profile, and the stages run all the
+      # same.
+      - run: |
+          sudo apt-get update
+          if sudo apt-get install -y --no-install-recommends "linux-tools-$(uname -r)" linux-tools-common; then
+            sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          else
+            echo "::warning::no perf for the kernel $(uname -r), so the stages run with no profile"
+          fi
+      - name: the stages
+        env:
+          MMO_LOCAL_PROFILE: release
+          MMO_LOCAL_WORLD_CAP: "5000"
+          MMO_BOTS_PLAY_SECONDS: "30"
+        run: |
+          set -eu
+          export MMO_LOCAL_PG_BIN
+          MMO_LOCAL_PG_BIN=$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -name bin -type d | sort -V | tail -n 1)
+          out=$RUNNER_TEMP/load
+          mkdir -p "$out"
+          # The commit of a pull request is the merge of its head into its base, its first parent.
+          git worktree add -q "$RUNNER_TEMP/base" HEAD^1
+          # The CPU of a process in cores, over the last 20 s of the play, from its ticks of /proc each second.
+          sample() {
+            while kill -0 "$1" 2>/dev/null; do
+              echo "$(date +%s) $(awk '{ print $14 + $15 }' "/proc/$1/stat")"
+              sleep 1
+            done
+          }
+          cores() {
+            tail -n 23 "$1" | head -n 21 | awk -v hz="$(getconf CLK_TCK)" \
+              'NR == 1 { t = $1; c = $2 } END { printf "%.2f", ($2 - c) / hz / ($1 - t) }'
+          }
+          # stage <tree> <name> <bots> <town>
+          stage() {
+            dir=$out/$2-$3-$4
+            mkdir -p "$dir"
+            export MMO_LOCAL_DIR=$dir/stack
+            (cd "$1" && sh script/local.sh start) >"$dir/start.log"
+            for name in gateway zone; do
+              sample "$(cat "$MMO_LOCAL_DIR/$name.pid")" >"$dir/$name.cpu" &
+            done
+            # The profile covers 20 s of the play: the ramp takes 1 s for each 50 bots.
+            delay=$(($3 / 50 + 5))
+            command -v perf >/dev/null || delay=
+            for name in ${delay:+gateway zone}; do
+              (sleep "$delay" && perf record -q -F 199 -g -p "$(cat "$MMO_LOCAL_DIR/$name.pid")" \
+                -o "$dir/$name.perf" -- sleep 20 >/dev/null 2>&1) &
+            done
+            # The bots of the base can fail, as a measure of a defect that the head fixes. Those of the head end the job.
+            if ! (cd "$1" && MMO_BOTS_TOWN=$4 timeout 600 sh script/local.sh bots "$3") >"$dir/bots.log" 2>&1; then
+              echo "::warning::the bots of $2 failed in the stage of $3 bots"
+              [ "$2" = base ] || failed="$failed $3"
+            fi
+            echo "gateway $(cores "$dir/gateway.cpu") cores, zone writer $(cores "$dir/zone.cpu") cores" >>"$dir/bots.log"
+            (cd "$1" && sh script/local.sh stop) >/dev/null
+            wait
+            for name in ${delay:+gateway zone}; do
+              perf report -q -i "$dir/$name.perf" --no-children --sort symbol --stdio -g none 2>/dev/null |
+                head -n 40 >"$dir/$name.top" || true
+            done
+            {
+              echo "### $2: $3 bots, $4 in town"
+              echo '```'
+              tail -n 30 "$dir/bots.log"
+              echo '```'
+              for name in ${delay:+gateway zone}; do
+                echo "<details><summary>$name, the 40 hottest functions</summary>"
+                echo; echo '```'; cat "$dir/$name.top"; echo '```'; echo "</details>"
+              done
+            } >>"$GITHUB_STEP_SUMMARY"
+          }
+          # The first start of each tree builds it in release, which takes minutes.
+          failed=
+          for tree in "$RUNNER_TEMP/base:base" "$GITHUB_WORKSPACE:head"; do
+            for bots in "500 250" "2000 0"; do
+              echo "$(date +%T) ${tree##*:}: $bots"
+              # shellcheck disable=SC2086 # the count of bots and the count in town
+              stage "${tree%%:*}" "${tree##*:}" $bots
+            done
+          done
+          [ -z "$failed" ] || { echo "::error::the bots of the head failed in the stages of$failed bots"; exit 1; }
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: load
+          path: |
+            ${{ runner.temp }}/load/**/*.log
+            ${{ runner.temp }}/load/**/*.cpu
+            ${{ runner.temp }}/load/**/*.top
