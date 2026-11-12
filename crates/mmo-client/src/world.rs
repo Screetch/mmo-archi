@@ -58,8 +58,9 @@ impl World {
   }
 
   /// Adds the snapshot to the state. A full snapshot gives the state alone. A delta starts from
-  /// the state that the client held after the snapshot of its base: it removes the entities that
-  /// left, moves the entities that changed, and adds the entities that entered.
+  /// the state that the client held after the snapshot of its base, with each entity ahead by the
+  /// ticks since the base: it removes the entities that left, moves the entities that changed,
+  /// and adds the entities that entered.
   pub fn apply(&mut self, snapshot: &Snapshot) -> Result<(), Gap> {
     let tick = snapshot.tick;
     if let Some(held) = self.ack().filter(|held| held.0 >= tick.0) {
@@ -71,7 +72,10 @@ impl World {
         .held
         .iter()
         .find(|(held, _)| *held == base)
-        .map(|(_, state)| state.clone())
+        .map(|(_, state)| {
+          let ticks = tick.0.saturating_sub(base.0);
+          state.iter().map(|(id, entity)| (*id, entity.ahead(ticks))).collect()
+        })
         .ok_or(Gap::Base { tick, base })?,
     };
     for id in &snapshot.left {
@@ -82,10 +86,10 @@ impl World {
         let Position { x, y, z } = entity.position;
         let by = change.movement;
         entity.position = Position { x: x + by.x, y: y + by.y, z: z + by.z };
-        entity.velocity = change.velocity;
-        entity.view = change.view;
-        entity.animation = change.animation;
-        entity.hit_points = change.hit_points;
+        entity.velocity = change.velocity.unwrap_or(entity.velocity);
+        entity.view = change.view.unwrap_or(entity.view);
+        entity.animation = change.animation.unwrap_or(entity.animation);
+        entity.hit_points = change.hit_points.unwrap_or(entity.hit_points);
       }
     }
     for entity in &snapshot.entered {
@@ -168,10 +172,10 @@ mod tests {
     Change {
       id: CharacterId(id),
       movement: Offset { x: by, y: 50, z: -25 },
-      velocity: Velocity { x: 0, y: 0, z: 0 },
-      view: Angle(0),
-      animation: 0,
-      hit_points: 90,
+      velocity: Some(Velocity { x: 0, y: 0, z: 0 }),
+      view: Some(Angle(0)),
+      animation: Some(0),
+      hit_points: Some(90),
     }
   }
 
@@ -187,7 +191,7 @@ mod tests {
     };
     assert_eq!(world.apply(&next), Ok(()));
     let moved = Entity {
-      position: Position { x: 130, y: 50, z: 975 },
+      position: Position { x: 145, y: 50, z: 995 },
       velocity: Velocity { x: 0, y: 0, z: 0 },
       view: Angle(0),
       animation: 0,
@@ -201,12 +205,25 @@ mod tests {
   }
 
   #[test]
+  fn an_entity_that_a_delta_does_not_name_walks_on_and_a_change_keeps_what_it_does_not_give() {
+    let mut world = World::default();
+    world.apply(&full(10, vec![entity(1, 100), entity(2, 200)])).expect("a full snapshot");
+    let moved =
+      Change { velocity: None, view: None, animation: None, hit_points: None, ..change(1, 30) };
+    world.apply(&Snapshot { changed: vec![moved], ..delta(12, 10) }).expect("a delta");
+    let kept = Entity { position: Position { x: 160, y: 50, z: 1015 }, ..entity(1, 0) };
+    assert_eq!(world.entity(CharacterId(1)), Some(&kept));
+    let walked = Entity { position: Position { x: 230, y: 0, z: 1040 }, ..entity(2, 0) };
+    assert_eq!(world.entity(CharacterId(2)), Some(&walked));
+  }
+
+  #[test]
   fn a_delta_starts_from_its_base_and_not_from_the_last_snapshot() {
     let mut world = World::default();
     world.apply(&full(10, vec![entity(1, 100)])).expect("a full snapshot");
     world.apply(&Snapshot { changed: vec![change(1, 30)], ..delta(11, 10) }).expect("a delta");
     world.apply(&Snapshot { changed: vec![change(1, 60)], ..delta(12, 10) }).expect("a delta");
-    assert_eq!(world.entity(CharacterId(1)).map(|one| one.position.x), Some(160));
+    assert_eq!(world.entity(CharacterId(1)).map(|one| one.position.x), Some(190));
   }
 
   #[test]
@@ -241,7 +258,8 @@ mod tests {
   fn an_entity_stands_between_its_place_at_the_snapshot_before_and_its_place_now() {
     let mut world = World::default();
     assert_eq!(world.seen(0.5), vec![]);
-    world.apply(&full(10, vec![entity(1, 100)])).expect("a full snapshot");
+    let still = Entity { velocity: Velocity { x: 0, y: 0, z: 0 }, ..entity(1, 100) };
+    world.apply(&full(10, vec![still])).expect("a full snapshot");
     let seen = |world: &World, alpha| world.seen(alpha)[0];
     assert_eq!(seen(&world, 0.5).position.map(f32::to_bits), [1.0, 0.0, 10.0].map(f32::to_bits));
     world

@@ -6,7 +6,10 @@ use bitcode::{Decode, Encode};
 const CENTIMETRES: f64 = 100.0;
 const STEPS: f64 = 65536.0;
 
-/// The number of a tick of a zone writer, which runs 20 ticks each second.
+/// The ticks that a zone writer runs each second.
+pub const TICKS_PER_SECOND: u32 = 20;
+
+/// The number of a tick of a zone writer, which runs [`TICKS_PER_SECOND`] ticks each second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Tick(pub u32);
 

@@ -6,7 +6,7 @@ use std::mem;
 use mmo_collide::{Body, Terrain, step};
 use mmo_protocol::{
   AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Save, Snapshot,
-  State, Tick, Velocity, ZoneId,
+  State, TICKS_PER_SECOND, Tick, Velocity, ZoneId,
 };
 use mmo_store::Saved;
 
@@ -15,9 +15,6 @@ use crate::view::{History, Sent};
 
 /// The most players that a zone holds.
 const CAP: usize = 2500;
-
-/// The ticks of one second.
-pub(crate) const TICKS_PER_SECOND: u32 = 20;
 
 /// The ticks that the zone keeps the player of a link that closed: 30 s.
 const KEPT: u32 = 30 * TICKS_PER_SECOND;
@@ -336,7 +333,7 @@ fn ground() -> Terrain {
 mod tests {
   use mmo_protocol::{
     AccountId, Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed,
-    Save, Snapshot, State, Tick, Velocity, ZoneId,
+    Save, Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId, encode,
   };
   use mmo_store::Saved;
 
@@ -386,6 +383,49 @@ mod tests {
     zone.tick()
   }
 
+  /// 500 players as the load test seeds them: 250 in one square of 128 m and 250 anywhere in the
+  /// zone. Each picks one of 8 headings, or a stop, each second, and acknowledges the snapshot of
+  /// 3 ticks before.
+  #[test]
+  fn a_crowd_that_walks_gets_snapshots_of_74_bytes_on_average() {
+    let mut zone = Zone::new(MEADOW);
+    let mut seed = 9_u64;
+    let mut below = |n: u64| {
+      seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+      (seed >> 33) % n
+    };
+    for id in 1..=500 {
+      let (origin, span) = if id <= 250 { (10_000, 12_800) } else { (1_000, 100_400) };
+      let mut at = || origin + i32::try_from(below(span)).unwrap();
+      let mut one = saved(id, at());
+      one.state.position.z = at();
+      assert_eq!(zone.join(GATE, Link(id.unsigned_abs()), ACCOUNT, &one), Ok(()));
+    }
+    let mut headings = [None; 500];
+    let (mut bytes, mut snapshots) = (0, 0);
+    for tick in 1..=120 {
+      for (link, heading) in (1..).zip(&mut headings) {
+        if tick % TICKS_PER_SECOND == 1 {
+          *heading = u16::try_from(below(9) * 8192).ok().map(Angle);
+        }
+        let ack = tick.checked_sub(3).filter(|ack| *ack > 0);
+        let input =
+          Input { tick: Tick(tick), heading: *heading, view: heading.unwrap_or(Angle(0)) };
+        zone.intents(
+          GATE,
+          Link(link),
+          &Intents { zone: MEADOW, ack: ack.map(Tick), inputs: [input; 3] },
+        );
+      }
+      let sent = zone.tick();
+      if tick > 20 {
+        bytes += sent.iter().map(|(_, relayed)| encode(&relayed.message).len()).sum::<usize>();
+        snapshots += sent.len();
+      }
+    }
+    assert_eq!(bytes / snapshots, 74);
+  }
+
   #[test]
   fn a_player_walks_with_the_inputs_of_its_link_and_its_client_gets_each_delta() {
     let mut zone = Zone::new(MEADOW);
@@ -393,23 +433,23 @@ mod tests {
     zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
     assert_eq!(zone.tick(), [full(1, 1, vec![entity(7, 10_030, 600, NORTH)])]);
     zone.intents(GATE, Link(1), &intents(Some(1), [2, 3, 4], EAST));
-    let change = Change {
-      id: CharacterId(7),
-      movement: Offset { x: 90, y: 0, z: 0 },
-      velocity: Velocity { x: 600, y: 0, z: 0 },
-      view: NORTH,
-      animation: 0,
-      hit_points: 100,
-    };
-    let delta = Snapshot {
+    let straight = Snapshot {
       tick: Tick(4),
       base: Some(Tick(1)),
       entered: vec![],
-      changed: vec![change],
+      changed: vec![],
       left: vec![],
     };
-    assert_eq!(run(&mut zone, 3), [(GATE, Relayed { link: Link(1), message: delta })]);
-    assert_eq!(run(&mut zone, 1)[0].1.message.changed[0].velocity, Velocity { x: 0, y: 0, z: 0 });
+    assert_eq!(run(&mut zone, 3), [(GATE, Relayed { link: Link(1), message: straight })]);
+    let stop = Change {
+      id: CharacterId(7),
+      movement: Offset { x: -30, y: 0, z: 0 },
+      velocity: Some(Velocity { x: 0, y: 0, z: 0 }),
+      view: None,
+      animation: None,
+      hit_points: None,
+    };
+    assert_eq!(run(&mut zone, 1)[0].1.message.changed, [stop]);
   }
 
   #[test]
