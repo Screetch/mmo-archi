@@ -264,6 +264,8 @@ mod tests {
       }
       let line = FromClient::Say { channel: "world".to_owned(), text: "hello".to_owned() };
       assert_eq!(peer.read::<FromClient>().await, line);
+      // A bot that read the datagrams first still has the line on its stream: give it the time.
+      sleep(Duration::from_millis(300)).await;
       done.send(()).expect("the test waits for the line");
       peer
     });
