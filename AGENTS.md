@@ -249,6 +249,9 @@ Every pull request and every push to `main` runs the gates in `.github/workflows
   with the width read against the base of a pull request.
 - `the suite` runs `cargo coverage` on Linux, and `the crate on` runs clippy and `cargo coverage` on Windows and on
   macOS, each when the scope says that the change needs it.
+- `the bots` runs the short stage 1 of the load test on Linux: `sh script/local.sh start`, then
+  `sh script/local.sh bots 200`, and it fails when a bot does not play or ends with a fault. It keeps the report as an
+  artifact.
 - `the gates` stands for all the jobs, and a job that the scope skips passes there, so a ruleset of `main` requires
   this check alone, with `the title` and `the contract`.
 

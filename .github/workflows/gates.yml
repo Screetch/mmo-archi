@@ -168,13 +168,76 @@ jobs:
           DATABASE_URL: ${{ steps.postgres.outputs.connection-uri }}
       - uses: ./.github/actions/clear
 
+  bots:
+    # The short stage 1 of the load test of docs/architecture.md: 200 bots against the whole stack, on Linux. The start
+    # builds the servers in the dev profile and starts PostgreSQL, Redis, the keeper, the login service, one zone writer
+    # and one gateway, with the cap of the world at 200 so that no bot waits in the queue. The program of the bots exits
+    # with 0 when a bot fails, so the step reads its report: it fails when a bot did not play, and when a bot ended with
+    # a fault, which a message that fails to decode is. The longest run holds 30 s to join, 20 s of play and the seed
+    # of the accounts, so the limit of 120 s is about twice that. The report and the logs of the stack are kept.
+    name: the bots
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MMO_LOCAL_WORLD_CAP: "200"
+      MMO_BOTS_JOIN_SECONDS: "30"
+      MMO_BOTS_PLAY_SECONDS: "20"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # The stores of the stack are the programs of the runner: PostgreSQL, and the Redis that the action installs.
+      - uses: ./.github/actions/redis
+      - run: |
+          mkdir -p "$RUNNER_TEMP/bots"
+          echo "MMO_LOCAL_DIR=$RUNNER_TEMP/bots/stack" >> "$GITHUB_ENV"
+          pg=$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -name bin -type d | sort -V | tail -n 1)
+          echo "MMO_LOCAL_PG_BIN=$pg" >> "$GITHUB_ENV"
+      # A cold build takes minutes, and the script prints each step of the start.
+      - name: the start of the stack
+        timeout-minutes: 20
+        run: sh script/local.sh start
+      - name: the bots
+        timeout-minutes: 4
+        run: |
+          set -eu -o pipefail
+          report=$RUNNER_TEMP/bots/report.txt
+          # The bots print their progress on stderr and their report on stdout.
+          if ! timeout 120 sh script/local.sh bots 200 2>&1 | tee "$report"; then
+            echo "::error::the bots failed to run, or did not end in 120 s"
+            exit 1
+          fi
+          awk '
+            /^load test: / { found = 1; want = $3; played = $5 }
+            /^  [0-9]+ bots: / { count += $1; print "fault: " $0 }
+            END {
+              if (!found) { print "::error::the bots printed no report"; exit 1 }
+              if (want != 200 || played != want || count) {
+                printf "::error::%s of %s bots played, and %d ended with a fault\n", played, want, count
+                exit 1
+              }
+            }' "$report"
+      - if: always()
+        run: sh script/local.sh stop
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bots
+          path: |
+            ${{ runner.temp }}/bots/report.txt
+            ${{ runner.temp }}/bots/stack/*.log
+      - uses: ./.github/actions/clear
+
   gates:
     # The one check that stands for all the gates, so that a ruleset of main requires this check alone, and the
     # conductor merges a PR only when it passes. A job that the scope skips passes here. It runs always, and fails when
     # a job that it needs failed or was cancelled.
     name: the gates
     if: always()
-    needs: [scope, hooks, suite, crate]
+    needs: [scope, hooks, suite, bots, crate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -534,7 +534,15 @@ the hosts of the servers.
 | 5 | 5000, with faults | the recovery | after a stop of a zone writer, the bots play again within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
 
 Each zone writer reports the time of each tick in `ticks:{zone}` (section 3), and each bot reports its bytes up and down.
-The test keeps each report with the commit that it ran. A short stage 1 with 200 bots runs in the gates on Linux.
+The test keeps each report with the commit that it ran.
+
+The job `the bots` of the gates, in `.github/workflows/gates.yml`, runs a short stage 1 with 200 bots on Linux, in the
+dev profile. It runs `sh script/local.sh start` with `MMO_LOCAL_WORLD_CAP=200`, so that no bot waits in the queue.
+Then it runs `sh script/local.sh bots 200` with `MMO_BOTS_JOIN_SECONDS=30` and `MMO_BOTS_PLAY_SECONDS=20`, under a
+timeout of 120 s, and last `sh script/local.sh stop`. The program of the bots exits with 0 when a bot fails, so the job
+reads its report: it fails when a bot did not play, and when a bot ended with a fault, as a message that fails to
+decode. It checks no tick time and no byte budget, which the later stages prove. The report and the logs of the stack
+stay as the artifact `bots`.
 
 ### How to run it
 
