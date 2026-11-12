@@ -199,7 +199,9 @@ QUIC needs a path of 1200 bytes at least, so a datagram of 1100 bytes and its he
 A link between two servers uses TLS with a certificate on each side: a server takes a link only from a peer whose
 certificate an authority of the operator signed, so a process that the operator did not start takes no part in the game.
 The crate `mmo-link` builds the QUIC config of such a server from the PEM files of its certificate, its key and the
-authority, so no process copies that setup.
+authority, so no process copies that setup: the keeper, the zone writer and the gateway all make their links with it.
+The gateway also takes players, who hold no certificate, so it makes that side with `public`, which asks no certificate
+of the client.
 
 The codec is bitcode 0.6.9. On a delta of 64 entities it gave 477 bytes, and postcard 1.1.3 gave 805 bytes (section 7).
 The format of bitcode can change between its versions. So the crate `mmo-protocol` pins its version with `=`, and a new
@@ -498,7 +500,7 @@ crate 9, and the client follows. Each new crate adds its name to `release-please
 | 1 | `mmo-protocol` | `PROTOCOL`, the messages of each stream and each datagram, `encode`, `decode`, the reader of frames |
 | 2 | `mmo-collide` | `DT`, `Body`, `Input`, `Terrain`, `step(&Terrain, Body, Input) -> Body`, `state_hash` |
 | 3 | `mmo-store` | the migrations, the queries of each table, and the name and the format of each key of Redis |
-| 4 | `mmo-link` | `server`, the QUIC config of a server that takes only the peers that the authority of the operator signed |
+| 4 | `mmo-link` | `server` and `client`, the QUIC configs of the links between the servers, which take only the peers that the authority of the operator signed, and `public`, the QUIC config of a server that takes players |
 | 5 | `mmo-keeper` | the binary of the keeper, and its messages in `mmo-protocol` |
 | 6 | `mmo-zone` | the binary of the zone writer: the tick, the interest, the deltas, the claim, the saves, the lease and the hand-off |
 | 7 | `mmo-gateway` | the binary of the gateway |

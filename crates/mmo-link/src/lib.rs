@@ -5,7 +5,8 @@
 //! operator signed, so a process that the operator did not start takes no part in the game. A
 //! server reads its certificate chain, its private key and the certificates of the authority from
 //! PEM files, and makes its [`ServerConfig`] with [`server`], and the [`ClientConfig`] of the links
-//! that it opens to another server with [`client`].
+//! that it opens to another server with [`client`]. A server that takes players, who hold no
+//! certificate, makes its config with [`public`] instead of [`server`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,12 +20,13 @@ use rustls::pki_types::pem::{self, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{VerifierBuilderError, WebPkiClientVerifier};
 
-/// A link that a [`client`] opens closes when its peer sends nothing for 3 s, so a server sees the
-/// stop of the server that it dials within 3 s.
+/// A link that a [`client`] opens, or that a [`public`] server takes, closes when its peer sends
+/// nothing for 3 s, so a server sees the stop of the server that it dials within 3 s, and a client
+/// sees the stop of its server.
 const IDLE: VarInt = VarInt::from_u32(3000);
 
-/// A link that a [`client`] opens pings its peer each second when it has nothing to send, so it
-/// stays open while both run.
+/// A link that a [`client`] opens, or that a [`public`] server takes, pings its peer each second
+/// when it has nothing to send, so it stays open while both run.
 const PING: Duration = Duration::from_secs(1);
 
 /// Why the files of a server make no [`ServerConfig`] or no [`ClientConfig`].
@@ -50,12 +52,8 @@ pub enum Error {
 /// and takes only a peer whose certificate a certificate of `authority` signs.
 #[expect(clippy::expect_used, reason = "ring holds TLS 1.3 and the cipher suite of QUIC")]
 pub fn server(certificate: &Path, key: &Path, authority: &Path) -> Result<ServerConfig, Error> {
-  let chain = pem(certificate, certificates)?;
-  let key = pem(key, PrivateKeyDer::from_pem_file)?;
-  let mut roots = RootCertStore::empty();
-  for certificate in pem(authority, certificates)? {
-    roots.add(certificate)?;
-  }
+  let (chain, key) = identity(certificate, key)?;
+  let roots = authorities(authority)?;
   let provider = Arc::new(ring::default_provider());
   let peers =
     WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider)).build()?;
@@ -68,17 +66,31 @@ pub fn server(certificate: &Path, key: &Path, authority: &Path) -> Result<Server
   Ok(ServerConfig::with_crypto(Arc::new(quic)))
 }
 
+/// The QUIC of a server that takes a client with no certificate, as the gateway takes a player: it
+/// speaks TLS 1.3 with the chain in `certificate` and the key in `key`, and asks no certificate of
+/// the client. Only the clients of the operator hold the address of such a server, but it takes any
+/// client that trusts its certificate, so give it only the endpoint that players dial.
+#[expect(clippy::expect_used, reason = "ring holds TLS 1.3 and the cipher suite of QUIC")]
+pub fn public(certificate: &Path, key: &Path) -> Result<ServerConfig, Error> {
+  let (chain, key) = identity(certificate, key)?;
+  let tls = rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .expect("ring holds TLS 1.3")
+    .with_no_client_auth()
+    .with_single_cert(chain, key)?;
+  let quic = QuicServerConfig::try_from(tls).expect("ring holds the first cipher suite of QUIC");
+  let mut config = ServerConfig::with_crypto(Arc::new(quic));
+  config.transport_config(transport());
+  Ok(config)
+}
+
 /// The QUIC of the links that a server opens to another server: it shows the chain in
 /// `certificate` with the key in `key`, and takes only a peer whose certificate a certificate of
 /// `authority` signs for the name that the server dials.
 #[expect(clippy::expect_used, reason = "ring holds TLS 1.3 and the cipher suite of QUIC")]
 pub fn client(certificate: &Path, key: &Path, authority: &Path) -> Result<ClientConfig, Error> {
-  let chain = pem(certificate, certificates)?;
-  let key = pem(key, PrivateKeyDer::from_pem_file)?;
-  let mut roots = RootCertStore::empty();
-  for certificate in pem(authority, certificates)? {
-    roots.add(certificate)?;
-  }
+  let (chain, key) = identity(certificate, key)?;
+  let roots = authorities(authority)?;
   if roots.is_empty() {
     return Err(Error::Authority(VerifierBuilderError::NoRootAnchors));
   }
@@ -88,11 +100,30 @@ pub fn client(certificate: &Path, key: &Path, authority: &Path) -> Result<Client
     .with_root_certificates(roots)
     .with_client_auth_cert(chain, key)?;
   let quic = QuicClientConfig::try_from(tls).expect("ring holds the first cipher suite of QUIC");
+  let mut config = ClientConfig::new(Arc::new(quic));
+  config.transport_config(transport());
+  Ok(config)
+}
+
+fn transport() -> Arc<TransportConfig> {
   let mut transport = TransportConfig::default();
   transport.max_idle_timeout(Some(IdleTimeout::from(IDLE))).keep_alive_interval(Some(PING));
-  let mut config = ClientConfig::new(Arc::new(quic));
-  config.transport_config(Arc::new(transport));
-  Ok(config)
+  Arc::new(transport)
+}
+
+fn identity(
+  certificate: &Path,
+  key: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), Error> {
+  Ok((pem(certificate, certificates)?, pem(key, PrivateKeyDer::from_pem_file)?))
+}
+
+fn authorities(authority: &Path) -> Result<RootCertStore, Error> {
+  let mut roots = RootCertStore::empty();
+  for certificate in pem(authority, certificates)? {
+    roots.add(certificate)?;
+  }
+  Ok(roots)
 }
 
 fn pem<T>(path: &Path, read: impl FnOnce(PathBuf) -> Result<T, pem::Error>) -> Result<T, Error> {
@@ -110,9 +141,14 @@ mod tests {
   use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
   use tempfile::TempDir;
 
-  use quinn::{ConnectionError, Endpoint};
+  use std::sync::Arc;
 
-  use super::{client, server};
+  use quinn::crypto::rustls::QuicClientConfig;
+  use quinn::{ClientConfig, ConnectionError, Endpoint};
+  use rustls::RootCertStore;
+  use rustls::crypto::ring;
+
+  use super::{certificates, client, public, server};
 
   /// The files of an operator: an authority, and a server that it signed, with its key and the
   /// key of another one.
@@ -231,6 +267,73 @@ mod tests {
         ),
         Err(format!("{tls}keys may not be consistent: KeyMismatch")),
       ]
+    );
+  }
+
+  #[test]
+  fn a_public_server_takes_the_files_of_the_operator_and_names_the_file_that_it_cannot_use() {
+    let folder = files();
+    let at = |name: &str| folder.path().join(name);
+    let made = |certificate: &str, key: &str| -> Result<(), String> {
+      public(&at(certificate), &at(key)).map(drop).map_err(|error| error.to_string())
+    };
+    let (certificate, key) = ("server.pem", "server.key");
+    let found = [
+      made(certificate, key),
+      made("absent.pem", key),
+      made(certificate, certificate),
+      made(certificate, "other.key"),
+    ];
+    let absent = fs::File::open(at("absent.pem")).expect_err("no file absent.pem");
+    let pem = |name: &str, why: &str| {
+      Err(format!("{} holds no PEM that can be read: {why}", at(name).display()))
+    };
+    let tls = "the certificates and the key make no server of TLS: ";
+    assert_eq!(
+      found,
+      [
+        Ok(()),
+        pem("absent.pem", &format!("I/O error: {absent}")),
+        pem(certificate, "no items found"),
+        Err(format!("{tls}keys may not be consistent: KeyMismatch")),
+      ]
+    );
+  }
+
+  /// A public server takes a client that shows no certificate, and a client that trusts another
+  /// authority refuses the server.
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_public_server_takes_a_client_with_no_certificate_and_a_stranger_refuses_it() {
+    let folder = files();
+    let at = |name: &str| folder.path().join(name);
+    let config = public(&at("server.pem"), &at("server.key")).expect("a server");
+    let server = Endpoint::server(config, ([127, 0, 0, 1], 0).into()).expect("an endpoint");
+    let address = server.local_addr().expect("an address");
+    let dial = async |authority: &str| -> Result<(), ConnectionError> {
+      let mut roots = RootCertStore::empty();
+      for certificate in certificates(at(authority)).expect("an authority") {
+        roots.add(certificate).expect("a root");
+      }
+      let tls = rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("TLS 1.3")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+      let quic = QuicClientConfig::try_from(tls).expect("the QUIC of TLS 1.3");
+      let endpoint = Endpoint::client(([127, 0, 0, 1], 0).into()).expect("an endpoint");
+      let config = ClientConfig::new(Arc::new(quic));
+      endpoint.connect_with(config, address, "localhost").expect("a connection").await.map(drop)
+    };
+    let taken = async || server.accept().await.expect("a client").await.map(drop);
+    assert_eq!(tokio::join!(dial("authority.pem"), taken()), (Ok(()), Ok(())));
+    let (stranger, refused) = tokio::join!(dial("stranger.pem"), taken());
+    let text = |found: Result<(), ConnectionError>| found.map_err(|fault| fault.to_string());
+    let why =
+      "the cryptographic handshake failed: error 51: invalid peer certificate: BadSignature";
+    assert_eq!(
+      (text(stranger), text(refused)),
+      (Err(why.to_owned()), Err(format!("aborted by peer: {why}")))
     );
   }
 
