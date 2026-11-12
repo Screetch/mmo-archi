@@ -96,9 +96,19 @@ jobs:
             echo "gateway $(cores "$dir/gateway.cpu") cores, zone writer $(cores "$dir/zone.cpu") cores" >>"$dir/bots.log"
             (cd "$1" && sh script/local.sh stop) >/dev/null
             wait
+            # The share of each part of the code in the profile: the kernel, QUIC, its crypto, tokio, the allocator and
+            # the code of the game.
             for name in ${delay:+gateway zone}; do
-              perf report -q -i "$dir/$name.perf" --no-children --sort symbol --stdio -g none 2>/dev/null |
-                head -n 40 >"$dir/$name.top" || true
+              perf report -q -i "$dir/$name.perf" --no-children --sort symbol --stdio -g none 2>/dev/null >"$dir/$name.syms" ||
+                true
+              head -n 40 "$dir/$name.syms" >"$dir/$name.top"
+              awk '{ share = $1; sub("%", "", share); part = "other"
+                if ($0 ~ /\[k\]/) part = "kernel"; else if ($0 ~ /quinn/) part = "quinn"
+                else if ($0 ~ /ring|rustls/) part = "crypto"; else if ($0 ~ /tokio/) part = "tokio"
+                else if ($0 ~ /malloc|free|realloc/) part = "allocator"; else if ($0 ~ /mmo_/) part = "game"
+                total[part] += share }
+                END { printf "%s:", name; for (part in total) printf " %s %.1f%%", part, total[part]; print "" }' \
+                name="$name" "$dir/$name.syms" >>"$dir/bots.log"
             done
             {
               echo "### $2: $3 bots, $4 in town"
@@ -129,3 +139,4 @@ jobs:
             ${{ runner.temp }}/load/**/*.log
             ${{ runner.temp }}/load/**/*.cpu
             ${{ runner.temp }}/load/**/*.top
+            ${{ runner.temp }}/load/**/*.syms
