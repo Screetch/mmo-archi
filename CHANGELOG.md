@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0](https://github.com/Screetch/mmo-archi/compare/v0.1.0...v0.2.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gateway:** Relay each snapshot as bytes straight to its client
+* **zone:** Send only the entities that leave their straight walk ([#40](https://github.com/Screetch/mmo-archi/issues/40))
+
+### Fixes
+
+* **bots:** Take the zone that the gateway names before the play ([6d180ad](https://github.com/Screetch/mmo-archi/commit/6d180ad38dcf1155e9e1c4cef540947ca1ccaa28))
+* **bots:** Test that a walk keeps its heading until its next turn ([#38](https://github.com/Screetch/mmo-archi/issues/38)) ([9fa30f2](https://github.com/Screetch/mmo-archi/commit/9fa30f272adca421f76d86b37660ddf54f3d3917))
+* **ci:** Skip the crates with no library in the contract check ([#36](https://github.com/Screetch/mmo-archi/issues/36)) ([9298dcf](https://github.com/Screetch/mmo-archi/commit/9298dcf86373ac291120a200e1f69166350eb9aa))
+* **gateway:** Build the TLS of the gateway and keeper with mmo-link ([#35](https://github.com/Screetch/mmo-archi/issues/35)) ([ba515ce](https://github.com/Screetch/mmo-archi/commit/ba515ce8d5bb0067fc11d43a75fde72f46f54bfd))
+* **gateway:** Open the gateway of a test on a port that it holds ([#39](https://github.com/Screetch/mmo-archi/issues/39)) ([22c3d3d](https://github.com/Screetch/mmo-archi/commit/22c3d3d4f355b58a5cdeee43c38cdb893c95839b))
+
+
+### Performance
+
+* **gateway:** Relay each snapshot as bytes straight to its client ([6d180ad](https://github.com/Screetch/mmo-archi/commit/6d180ad38dcf1155e9e1c4cef540947ca1ccaa28))
+* **zone:** Send only the entities that leave their straight walk ([#40](https://github.com/Screetch/mmo-archi/issues/40)) ([3f5edf5](https://github.com/Screetch/mmo-archi/commit/3f5edf59ef3097596ac3b553851598b7ce342826))
+
 ## 0.1.0 (2026-11-11)
 
 
