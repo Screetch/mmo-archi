@@ -205,7 +205,7 @@ mod tests {
   use tokio::sync::{oneshot, watch};
   use tokio::time::sleep;
 
-  use super::{Shared, Walk, run};
+  use super::{Shared, TURN, Walk, run};
   use crate::fixture::{authority, entity, login_service, send, snapshot};
   use crate::rng::Rng;
   use crate::seed::Bot;
@@ -328,12 +328,32 @@ mod tests {
     }
   }
 
+  fn walk() -> Walk {
+    let (character, zone, rng) = (CharacterId(42), ZoneId(1), Rng::new(1));
+    Walk { character, zone, rng, world: World::default(), body: None, heading: None, ticks: 0 }
+  }
+
   #[test]
   fn a_walk_sends_nothing_before_it_sees_its_player() {
-    let (character, zone, rng) = (CharacterId(42), ZoneId(1), Rng::new(1));
-    let mut walk =
-      Walk { character, zone, rng, world: World::default(), body: None, heading: None, ticks: 0 };
+    let mut walk = walk();
     assert_eq!((walk.tick(), walk.ticks), (None, 0));
+  }
+
+  #[test]
+  fn a_walk_keeps_its_heading_for_a_turn_and_picks_another_for_the_next() {
+    let mut walk = walk();
+    assert_eq!(walk.hear(&snapshot(10, None, vec![entity(42)])).ok(), Some(true));
+    let headings: Vec<_> = (0..=TURN)
+      .map(|_| {
+        let intents = walk.tick().expect("the inputs of a tick");
+        assert_eq!(intents.zone, ZoneId(1));
+        walk.heading
+      })
+      .collect();
+    let (next, kept) = headings.split_last().expect("one heading for each tick");
+    assert_eq!(walk.ticks, TURN + 1);
+    assert!(kept.iter().all(|heading| Some(heading) == kept.first()));
+    assert_ne!(Some(next), kept.first());
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
