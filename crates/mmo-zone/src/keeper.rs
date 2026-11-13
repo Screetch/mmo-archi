@@ -1,39 +1,18 @@
 //! The link of the layer writer to the keeper, the one writer of the game data: the writer claims
 //! the epoch of its layer on it, and sends its save batches on it.
 
-use std::io;
-
 use mmo_protocol::{
-  Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, ShardId, ToKeeper, decode, encode,
-  frame,
+  Batch, Epoch, FromKeeper, KeeperRefusal, Layer, ShardId, ToKeeper, decode, encode,
 };
-use quinn::{
-  ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, ReadError, RecvStream,
-  SendStream, WriteError,
-};
-use tokio::net::lookup_host;
+use quinn::{ClientConfig, Endpoint};
 
-use crate::link::BUILD;
+use crate::remote::{self, Remote};
 
 /// Why the keeper takes no message of the layer writer.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-  #[error("the layer writer cannot find the keeper at {address}: {source}")]
-  Resolve { address: String, source: io::Error },
-  #[error("the layer writer finds no address of the keeper at {0} that its endpoint can dial")]
-  Unresolved(String),
-  #[error("the layer writer cannot dial the keeper: {0}")]
-  Dial(#[from] ConnectError),
-  #[error("the link to the keeper fails: {0}")]
-  Link(#[from] ConnectionError),
-  #[error("the stream of the keeper fails: {0}")]
-  Read(#[from] ReadError),
-  #[error("the layer writer cannot write to the keeper: {0}")]
-  Write(#[from] WriteError),
-  #[error("the keeper ended its stream")]
-  Ended,
   #[error(transparent)]
-  Codec(#[from] mmo_protocol::Error),
+  Remote(#[from] remote::Error),
   #[error("the keeper gives {0:?}, which does not answer the message of the layer writer")]
   Answer(FromKeeper),
   #[error("the keeper holds no zone of the layer that the layer writer claims")]
@@ -58,19 +37,14 @@ impl From<KeeperRefusal> for Error {
 /// the first message, and again at the next message after a fault ends the link, so a keeper that
 /// stops and comes back takes the next batch.
 pub(crate) struct Keeper {
-  endpoint: Endpoint,
-  client: ClientConfig,
-  address: String,
-  /// True when the endpoint binds an address of IPv4, which dials only an address of IPv4.
-  ipv4: bool,
-  stream: Option<Stream>,
+  remote: Remote,
 }
 
 impl Keeper {
   /// The link to the keeper at `address`, which `endpoint` dials with `client`. The name of the
   /// host of `address` is the name that the certificate of the keeper must hold.
   pub(crate) fn new(endpoint: Endpoint, client: ClientConfig, address: String, ipv4: bool) -> Self {
-    Self { endpoint, client, address, ipv4, stream: None }
+    Self { remote: Remote::new(endpoint, client, address, ipv4, "keeper") }
   }
 
   /// Asks the keeper for the next epoch of `layer` of `shard`, which it writes in PostgreSQL.
@@ -91,79 +65,33 @@ impl Keeper {
 
   /// Sends `message` and gives the answer of the keeper. A fault of the link drops it.
   async fn ask(&mut self, message: &ToKeeper) -> Result<FromKeeper, Error> {
-    let mut stream = match self.stream.take() {
-      Some(stream) => stream,
-      None => self.dial().await?,
-    };
-    let answer = decode(&stream.exchange(&encode(message)).await?)?;
-    self.stream = Some(stream);
+    let answer = self.remote.ask(&encode(message), decode::<FromKeeper>).await?;
     match answer {
       FromKeeper::Refused(refusal) => Err(refusal.into()),
       answer => Ok(answer),
-    }
-  }
-
-  /// Opens a link and its stream to the keeper. Each side writes its hello first.
-  async fn dial(&self) -> Result<Stream, Error> {
-    let address = &self.address;
-    let host = address.rsplit_once(':').map_or(address.as_str(), |(host, _)| host);
-    let found = lookup_host(address)
-      .await
-      .map_err(|source| Error::Resolve { address: address.clone(), source })?
-      .find(|found| found.is_ipv4() == self.ipv4)
-      .ok_or_else(|| Error::Unresolved(address.clone()))?;
-    let link =
-      self.endpoint.connect_with(self.client.clone(), found, host.trim_matches(['[', ']']));
-    // A failed handshake and a failed stream end the dial alike.
-    let opened = match link?.await {
-      Ok(connection) => connection.open_bi().await.map(|(send, recv)| (connection, send, recv)),
-      Err(fault) => Err(fault),
-    };
-    let (connection, send, recv) = opened?;
-    let mut stream = Stream { _connection: connection, send, recv, frames: Frames::default() };
-    Hello::decode(&stream.exchange(&Hello { build: BUILD }.encode()).await?)?;
-    Ok(stream)
-  }
-}
-
-struct Stream {
-  /// The link of the stream, which closes when the stream drops.
-  _connection: Connection,
-  send: SendStream,
-  recv: RecvStream,
-  frames: Frames,
-}
-
-impl Stream {
-  /// Writes `payload` in a frame, and gives the payload of the next frame of the keeper.
-  #[expect(clippy::expect_used, reason = "a batch holds SAVES saves at most")]
-  async fn exchange(&mut self, payload: &[u8]) -> Result<Vec<u8>, Error> {
-    let framed = frame(payload).expect("a message of the writer holds less than a frame");
-    self.send.write_all(&framed).await?;
-    let mut chunk = [0; 4096];
-    loop {
-      if let Some(payload) = self.frames.pop()? {
-        return Ok(payload);
-      }
-      let size = self.recv.read(&mut chunk).await?.ok_or(Error::Ended)?;
-      self.frames.push(&chunk[..size]);
     }
   }
 }
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use mmo_protocol::{
     Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId, ZoneId,
     encode, frame,
   };
   use quinn::{Connection, Endpoint, RecvStream, SendStream};
+  use tokio::time;
 
   use super::{Error, Keeper};
   use crate::config::Config;
   use crate::peer::{World, var};
 
   const SHARD: ShardId = ShardId(1);
+  /// The time that a test of this module waits for a link of the writer: a fault of the writer
+  /// fails the test, and never hangs it.
+  const WAIT: Duration = Duration::from_secs(30);
   const MEADOW: Layer = Layer { zone: ZoneId(1), number: 1 };
 
   /// The side of the keeper on a link, which the test drives.
@@ -177,7 +105,8 @@ mod tests {
   impl Side {
     /// Takes the next link of a writer, and its stream, which opens with the hello of the writer.
     async fn accept(keeper: &Endpoint) -> Self {
-      let connection = keeper.accept().await.expect("a writer").await.expect("a link");
+      let incoming = time::timeout(WAIT, keeper.accept()).await.expect("a writer dials in time");
+      let connection = incoming.expect("a writer").await.expect("a link");
       let (send, recv) = connection.accept_bi().await.expect("a stream");
       Self { _connection: connection, send, recv, frames: Frames::default() }
     }

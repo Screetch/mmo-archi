@@ -29,7 +29,7 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 pub use characters::{NewCharacter, Saved};
-pub use directory::{Directory, LEASE, Lease, Leased, Placed};
+pub use directory::{Directory, LEASE, Lease, Leased, Placed, Serving};
 pub use zones::{Neighbours, Square, Written};
 
 static MIGRATOR: Migrator = sqlx::migrate!();

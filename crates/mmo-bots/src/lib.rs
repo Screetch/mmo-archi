@@ -31,6 +31,9 @@
 //!   waits, when a bot with a session entered the queue after one that waits, when a waiting bot
 //!   holds no place of its order of entry, or when it gets no place for more than 7 s. The default
 //!   is 0.
+//! - `MMO_BOTS_CROSSERS`: how many of the last bots start within 30 m of the east border of the
+//!   zone and walk east, which makes each of them cross it, as `50`. The report fails when a
+//!   crosser did not enter the next zone. The default is 0.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.

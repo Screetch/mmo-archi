@@ -4,7 +4,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  Attach, FromClient, Intents, Layer, Link, ShardId, ToClient, decode, encode, relayed,
+  AccountId, Attach, CharacterId, FromClient, Intents, Layer, Link, ShardId, ToClient, decode,
+  encode, relayed,
 };
 use quinn::{Connection, ConnectionError, Incoming, SendStream};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -43,8 +44,9 @@ async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infal
   let writer = gateway.writer(shard, session.layer).await?;
   let (messages, down) = unbounded_channel();
   let to = Route { messages, connection: connection.clone() };
-  writer.join(link, (session.account, session.character), to.clone());
-  let mut client = Client { connection, gateway, shard, link, writer, to, send, stream, down };
+  let who = (session.account, session.character);
+  writer.join(link, who, to.clone());
+  let mut client = Client { connection, gateway, shard, link, who, writer, to, send, stream, down };
   let fault = client.play().await;
   client.writer.leave(link);
   Err(fault)
@@ -68,6 +70,9 @@ struct Client<'a> {
   gateway: &'a Arc<Gateway>,
   shard: ShardId,
   link: Link,
+  /// The account and the character of the session, which the gateway joins to each layer that the
+  /// player moves to.
+  who: (AccountId, CharacterId),
   writer: Writer,
   to: Route,
   send: SendStream,
@@ -117,7 +122,7 @@ impl Client<'_> {
   async fn deliver(&mut self, message: ToClient) -> Result<(), Fault> {
     if let ToClient::Moved { zone, layer } = message {
       let next = self.gateway.writer(self.shard, Layer { zone, number: layer }).await?;
-      next.follow(self.link, self.to.clone());
+      next.join(self.link, self.who, self.to.clone());
       self.writer.forsake(self.link);
       self.writer = next;
     }

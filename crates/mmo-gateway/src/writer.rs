@@ -7,26 +7,19 @@ use mmo_protocol::{
   AccountId, CharacterId, DATAGRAM, FromClient, Layer, Link, Relayed, ShardId, ToClient, ToZone,
   decode, encode, frame, unrelayed,
 };
+use mmo_store::Serving;
 use quinn::{Connection, SendStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::gateway::Gateway;
 use crate::link::{FAULT, Fault, Stream, framed, greet};
 
-/// The lease of a layer in the directory: the address of its writer, as `host:port`, and the epoch
-/// of its claim.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Entry {
-  pub(crate) address: String,
-  pub(crate) epoch: i64,
-}
-
 /// The link to the writer of one layer. Each clone sends on the same link.
 #[derive(Clone)]
 pub(crate) struct Writer {
   pub(crate) shard: ShardId,
   pub(crate) layer: Layer,
-  entry: Entry,
+  entry: Serving,
   connection: Connection,
   orders: UnboundedSender<Order>,
 }
@@ -52,7 +45,7 @@ enum Order {
 }
 
 impl Writer {
-  pub(crate) fn entry(&self) -> &Entry {
+  pub(crate) fn entry(&self) -> &Serving {
     &self.entry
   }
 
@@ -70,12 +63,6 @@ impl Writer {
   pub(crate) fn join(&self, link: Link, (account, character): (AccountId, CharacterId), to: Route) {
     self.order(Order::Route { link, to });
     self.order(Order::Tell(framed(&encode(&ToZone::Join { link, account, character }))));
-  }
-
-  /// Relays the messages of the writer for `link` to `to`, after a move of its player into this
-  /// layer.
-  pub(crate) fn follow(&self, link: Link, to: Route) {
-    self.order(Order::Route { link, to });
   }
 
   /// Relays no more message of the writer for `link`, after a move of its player out of the
@@ -120,7 +107,7 @@ impl Writer {
 pub(crate) async fn open(
   gateway: Arc<Gateway>,
   (shard, layer): (ShardId, Layer),
-  entry: Entry,
+  entry: Serving,
   connection: Connection,
 ) -> Result<Writer, Fault> {
   let (send, stream) = greet(connection.open_bi().await).await?;

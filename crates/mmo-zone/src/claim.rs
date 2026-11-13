@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, Save, ShardId};
-use mmo_store::{Directory, Lease, Leased, keys};
+use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, Save, ShardId, ZoneId};
+use mmo_store::{Directory, Lease, Leased, Placed, Serving, keys};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use tokio::time;
@@ -34,6 +34,8 @@ pub(crate) enum Error {
   NoCap(ShardId),
   #[error("layer {}:{} closed", .0.zone.0, .0.number)]
   Closed(Layer),
+  #[error("layer {}:{} has no writer that serves it", .0.zone.0, .0.number)]
+  Unserved(Layer),
   #[error("Redis refuses the layer writer: {0}")]
   Redis(#[from] redis::RedisError),
 }
@@ -111,6 +113,33 @@ impl Claim {
     Ok((Directory { shard }).close(&mut self.redis.clone(), layer, epoch).await?)
   }
 
+  /// The layer of `zone` that the player of `account` enters when it crosses a border out of this
+  /// layer, as the placement of section 6 gives it, and who serves that layer. It gives `None`
+  /// when the player waits.
+  pub(crate) async fn crossing(
+    &self,
+    account: AccountId,
+    zone: ZoneId,
+  ) -> Result<Option<(Layer, Serving)>, Error> {
+    match self.place(account, zone).await {
+      Ok(Placed::On(layer)) => self.serving(layer).await.map(|serving| Some((layer, serving))),
+      Ok(Placed::Wait) => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn place(&self, account: AccountId, zone: ZoneId) -> Result<Placed, Error> {
+    let Held { shard, layer, .. } = self.held;
+    Ok((Directory { shard }).place(&mut self.redis.clone(), account, zone, Some(layer)).await?)
+  }
+
+  /// The lease of `layer` in the directory of the shard of this writer, which a placement gave.
+  async fn serving(&self, layer: Layer) -> Result<Serving, Error> {
+    let shard = self.held.shard;
+    let lease = (Directory { shard }).serving(&mut self.redis.clone(), layer).await?;
+    lease.ok_or(Error::Unserved(layer))
+  }
+
   /// The batch of `saves` for the keeper, with the layer and the epoch of this writer.
   pub(crate) fn batch(&self, saves: Vec<Save>) -> Batch {
     Batch { shard: self.held.shard, layer: self.held.layer, epoch: self.held.epoch, saves }
@@ -171,7 +200,7 @@ mod tests {
   use futures_util::StreamExt;
   use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, ShardId, ZoneId};
   use mmo_store::testing::Redis;
-  use mmo_store::{Directory, keys};
+  use mmo_store::{Directory, Placed, Serving, keys};
   use redis::AsyncCommands;
   use sqlx::PgPool;
 
@@ -222,7 +251,7 @@ mod tests {
     let idle = tokio::spawn(async move { taken(&url).await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let placed = Directory { shard: SHARD }.place(&mut admin, AccountId(5), ZoneId(1), None).await;
-    assert_eq!(placed.expect("a placement"), mmo_store::Placed::Wait);
+    assert_eq!(placed.expect("a placement"), Placed::Wait);
     let taken = idle.await.expect("a writer").expect("a layer");
     assert_eq!((taken.shard, taken.layer, taken.cap), (SHARD, MEADOW, 20));
     let claim = taken.hold(Epoch(1));
@@ -309,6 +338,24 @@ mod tests {
     assert_eq!(hash(&redis, "presence:6").await, present("8"));
   }
 
+  #[sqlx::test(migrations = false)]
+  async fn a_writer_places_a_player_that_crosses_out_of_its_layer_and_reads_the_lease_it_gets(
+    _: PgPool,
+  ) {
+    let redis = Redis::start().await;
+    let claim = claim(&redis, 2).await;
+    let served = Serving { address: "zone-1:4433".to_owned(), epoch: Epoch(2) };
+    assert_eq!(claim.serving(MEADOW).await.expect("a lease"), served);
+    let forest = Layer { zone: ZoneId(2), number: 1 };
+    let unserved = claim.serving(forest).await.err().map(|error| error.to_string());
+    assert_eq!(unserved.as_deref(), Some("layer 2:1 has no writer that serves it"));
+    let placed = claim.place(AccountId(5), ZoneId(1)).await.expect("a placement");
+    assert_eq!(placed, Placed::On(MEADOW));
+    let placed = claim.place(AccountId(5), ZoneId(2)).await.expect("a placement");
+    assert_eq!(placed, Placed::Wait);
+    assert_eq!(hash(&redis, "layers:1").await, fields([("1:1", "0"), ("2:1", "0")]));
+  }
+
   /// A Redis user that may run each command but those that `rules` take away.
   async fn user(redis: &Redis, name: &str, rules: &[&str]) -> String {
     let client = redis::Client::open(redis.url()).expect("a URL");
@@ -368,6 +415,11 @@ mod tests {
     let refused = claim.write(Entry::Layer { players: 0, taken: Vec::new() }).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
     let refused = claim.close().await.err();
+    assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
+    let refused = claim.place(AccountId(5), ZoneId(2)).await.err();
+    assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
+    user(&redis, "nodel", &["-hmget"]).await;
+    let refused = claim.serving(MEADOW).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
   }
 }

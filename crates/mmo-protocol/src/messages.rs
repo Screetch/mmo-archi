@@ -264,7 +264,8 @@ pub struct Change {
   pub hit_points: Option<i32>,
 }
 
-/// A message of a gateway to a layer writer, on a stream.
+/// A message to a layer writer, on a stream: from a gateway, or from the writer of a layer of the
+/// next zone.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToZone {
   /// A client attached on a link with the session of a character whose zone is this zone.
@@ -283,6 +284,8 @@ pub enum ToZone {
     /// The link that closed.
     link: Link,
   },
+  /// A message of the writer of a layer of another zone.
+  Neighbour(ToNeighbour),
 }
 
 /// A message that a gateway relays between one link and a layer writer on a stream: a
@@ -297,21 +300,25 @@ pub struct Relayed<M> {
   pub message: M,
 }
 
-/// A message of a layer writer to the writer of a layer of a next zone, on a stream.
+/// A message of a layer writer to the writer of a layer of a next zone, in [`ToZone::Neighbour`].
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToNeighbour {
   /// Gives a player that crosses the border. The writer that sends it takes no more inputs of the
-  /// player.
+  /// player. The gateway of the client joins the client to the target after the source sends
+  /// [`ToClient::Moved`].
   Transfer {
     /// The account of the player, whose presence the target writes.
     account: AccountId,
-    /// The link of the client, the only link whose inputs the target takes for the player.
-    link: Link,
-    /// The state of the character of the player.
+    /// The state of the character of the player, in the coordinates of the target.
     state: Entity,
     /// The version of the character, which the target adds 1 to when it saves the character.
     version: i64,
   },
+}
+
+/// The answer of the writer of a target layer to a [`ToNeighbour`], on the same stream.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum FromNeighbour {
   /// The target holds the character and saved it, so the source drops it and sends
   /// [`ToClient::Moved`].
   Accepted {
@@ -322,13 +329,6 @@ pub enum ToNeighbour {
   Full {
     /// The character that the target refused.
     character: CharacterId,
-  },
-  /// The entities within 48 m of the border, each tick. The target shows them, and owns none.
-  Border {
-    /// The tick of the source.
-    tick: Tick,
-    /// The entities near the border.
-    entities: Vec<Entity>,
   },
 }
 
@@ -431,9 +431,9 @@ mod tests {
   use bitcode::{DecodeOwned, Encode};
 
   use super::{
-    Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, Input, Intents,
-    KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient, ToKeeper, ToLogin,
-    ToNeighbour, ToZone,
+    Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, FromNeighbour,
+    Input, Intents, KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient,
+    ToKeeper, ToLogin, ToNeighbour, ToZone,
   };
   use crate::{
     AccountId, Angle, CharacterId, Epoch, FRAME, Layer, Link, Offset, Password, Position, ShardId,
@@ -575,18 +575,16 @@ mod tests {
       ToZone::Join { link: LINK, account: AccountId(11), character: CharacterId(42) },
       ToZone::Client(Relayed { link: LINK, message: FromClient::Logout }),
       ToZone::Leave { link: LINK },
+      ToZone::Neighbour(ToNeighbour::Transfer {
+        account: AccountId(11),
+        state: entity(42),
+        version: 17,
+      }),
     ]);
     round_trip(&[Relayed { link: LINK, message: ToClient::Moved { zone: ZoneId(3), layer: 2 } }]);
-    round_trip(&[ToNeighbour::Transfer {
-      account: AccountId(11),
-      link: LINK,
-      state: entity(42),
-      version: 17,
-    }]);
     round_trip(&[
-      ToNeighbour::Accepted { character: CharacterId(42) },
-      ToNeighbour::Full { character: CharacterId(42) },
-      ToNeighbour::Border { tick: Tick(1000), entities: vec![entity(1), entity(2)] },
+      FromNeighbour::Accepted { character: CharacterId(42) },
+      FromNeighbour::Full { character: CharacterId(42) },
     ]);
   }
 
