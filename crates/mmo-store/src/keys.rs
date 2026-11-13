@@ -31,16 +31,15 @@ pub const ADDRESS: &str = "address";
 pub const EPOCH: &str = "epoch";
 
 /// The field of [`session`] that holds the account, besides the fields of [`presence`] but
-/// [`EPOCH`] and [`PARTY`].
+/// [`EPOCH`].
 pub const ACCOUNT: &str = "account";
 
 /// The fields of [`presence`], besides [`EPOCH`]: the character of the account, its shard, its
-/// zone and its layer, and its party. The scripts of the directory read them by these names.
+/// zone and its layer. The scripts of the directory read them by these names.
 pub const CHARACTER: &str = "character";
 pub const SHARD: &str = "shard";
 pub const ZONE: &str = "zone";
 pub const LAYER: &str = "layer";
-pub const PARTY: &str = "party";
 
 /// The prefix of [`presence`].
 pub const PRESENCE: &str = "presence:";
@@ -108,11 +107,6 @@ pub fn places(shard: ShardId) -> String {
 /// takes its player.
 pub fn placed(shard: ShardId, layer: Layer) -> String {
   format!("{}{}", places(shard), field(layer))
-}
-
-/// The prefix of each party of `shard`, before the id of the party.
-pub fn parties(shard: ShardId) -> String {
-  format!("party:{}:", shard.0)
 }
 
 /// The ticks of the writer of `layer` of `shard`, a hash from the number of a bucket to the
@@ -216,8 +210,8 @@ mod tests {
 
   use super::{
     DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, draining, failed, field,
-    guessed, layer, layers, parties, placed, places, presence, queue, queued, resume, session,
-    shard, tick_bucket, ticks, writer, writers,
+    guessed, layer, layers, placed, places, presence, queue, queued, resume, session, shard,
+    tick_bucket, ticks, writer, writers,
   };
 
   #[test]
@@ -280,7 +274,6 @@ mod tests {
         layer(ShardId(2), far),
         writers(ShardId(2)),
         writer(ShardId(u32::MAX), far),
-        parties(ShardId(2)),
         ticks(ShardId(2), far),
         places(ShardId(2)),
         placed(ShardId(2), far),
@@ -293,7 +286,6 @@ mod tests {
         "2:-3:4294967295",
         "writer:2:",
         "writer:4294967295:-3:4294967295",
-        "party:2:",
         "ticks:2:-3:4294967295",
         "placed:2:",
         "placed:2:-3:4294967295",

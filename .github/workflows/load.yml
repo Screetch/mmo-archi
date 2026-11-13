@@ -7,8 +7,7 @@ name: load
 # the bots, the gateway and the layer writers share, so a number of this job compares with the other column of the
 # same run, and not with a run on another machine. It runs stage 2, 500 bots with half in a town on one layer of cap
 # 500, and the shards and the layers of stage 3, 500 bots in 2 shards of cap 250 with layers of cap 20, since no test
-# runs more than 500 bots. The bots make no crossing and no party, so this run of stage 3 proves the shards and the
-# layers alone.
+# runs more than 500 bots. The bots make no crossing, so this run of stage 3 proves the shards and the layers alone.
 on:
   workflow_dispatch:
   pull_request:

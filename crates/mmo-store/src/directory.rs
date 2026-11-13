@@ -2,8 +2,8 @@
 //!
 //! Section 6 of `docs/architecture.md` gives its rules. Redis runs each script as one atomic step,
 //! so two callers never take one decision twice: two writers never claim one layer, and two
-//! placements never put a party on two layers of one zone. A writer is the one authority of the
-//! count of its layer, and it refuses a player when a placement raced a change of that count.
+//! placements never give one free place twice. A writer is the one authority of the count of its
+//! layer, and it refuses a player when a placement raced a change of that count.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -21,9 +21,6 @@ const LEASE_MS: u64 = 3000;
 /// [`Directory::lease`]. A layer whose lease ended has no writer, and an idle writer claims it.
 pub const LEASE: Duration = Duration::from_millis(LEASE_MS);
 
-/// The most members of a party.
-pub const PARTY: u32 = 5;
-
 /// The life of a place that [`Directory::place`] gives in milliseconds, the time that a client
 /// has to reach a gateway with its session.
 const PLACE_MS: u64 = 60_000;
@@ -33,11 +30,6 @@ static CLAIM: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("dire
 static RENEW: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/lease.lua")));
 static DRAIN: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/drain.lua")));
 static CLOSE: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/close.lua")));
-static GROUP: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/party.lua")));
-
-/// The id of a party in its shard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PartyId(pub u64);
 
 /// What the writer of a layer writes with [`Directory::lease`] each second and at each change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,9 +81,9 @@ pub struct Directory {
 
 impl Directory {
   /// The layer of `zone` that `account` enters, as the placement of section 6 gives it: the
-  /// layer of a member of its party in the zone, else the layer with the number of `leaving` when
-  /// the player crosses from another zone, else the open layer with the most players that has
-  /// room for the members of its party, and of these the lowest number.
+  /// layer with the number of `leaving` when the player crosses from another zone and that layer
+  /// has room, else the open layer with the most players that has room, and of these the lowest
+  /// number.
   ///
   /// The layer holds the place of the player for 60 s, or until its writer takes the player and
   /// names it in [`Lease::taken`], so placements that come faster than the writer writes its count
@@ -111,13 +103,10 @@ impl Directory {
       .key(keys::layers(self.shard))
       .key(keys::draining(self.shard))
       .key(keys::shard(self.shard))
-      .key(keys::presence(account))
       .arg(zone.0)
       .arg(account.0)
       .arg(self.shard.0)
       .arg(keys::writers(self.shard))
-      .arg(keys::PRESENCE)
-      .arg(keys::parties(self.shard))
       .arg(keys::DIRECTORY)
       .arg(keys::places(self.shard))
       .arg(PLACE_MS)
@@ -217,47 +206,6 @@ impl Directory {
       .invoke_async(redis)
       .await
   }
-
-  /// Adds the player of `account` to `party`, and gives whether it did. It refuses a player that
-  /// does not play in the shard or has a party, a party of [`PARTY`] members, and a player on
-  /// another layer of a zone where a member of the party plays, so a party never stands on two
-  /// layers of one zone.
-  pub async fn join(
-    self,
-    redis: &mut impl ConnectionLike,
-    party: PartyId,
-    account: AccountId,
-  ) -> Result<bool, RedisError> {
-    self.group(redis, account, Some(party)).await
-  }
-
-  /// Takes the player of `account` out of its party, and gives whether it had one. A party with
-  /// one member left ends.
-  pub async fn leave(
-    self,
-    redis: &mut impl ConnectionLike,
-    account: AccountId,
-  ) -> Result<bool, RedisError> {
-    self.group(redis, account, None).await
-  }
-
-  async fn group(
-    self,
-    redis: &mut impl ConnectionLike,
-    account: AccountId,
-    party: Option<PartyId>,
-  ) -> Result<bool, RedisError> {
-    GROUP
-      .key(keys::presence(account))
-      .arg(keys::parties(self.shard))
-      .arg(keys::PRESENCE)
-      .arg(account.0)
-      .arg(self.shard.0)
-      .arg(PARTY)
-      .arg(party.map(|party| party.0))
-      .invoke_async(redis)
-      .await
-  }
 }
 #[cfg(test)]
 mod tests {
@@ -268,7 +216,7 @@ mod tests {
   use redis::AsyncCommands;
   use redis::aio::MultiplexedConnection;
 
-  use super::{Directory, Lease, Leased, PartyId, Placed};
+  use super::{Directory, Lease, Leased, Placed};
   use crate::keys;
   use crate::testing::Redis;
 
@@ -317,16 +265,6 @@ mod tests {
 
   fn fields<const N: usize>(fields: [(&str, &str); N]) -> BTreeMap<String, String> {
     fields.into_iter().map(|(key, value)| (key.to_owned(), value.to_owned())).collect()
-  }
-
-  /// The presence of `account` on `layer`, with its `party`, as its writer writes it.
-  async fn present(db: &mut MultiplexedConnection, account: i64, layer: Layer) {
-    let fields = [
-      (keys::SHARD, SHARD.shard.0.to_string()),
-      (keys::ZONE, layer.zone.0.to_string()),
-      (keys::LAYER, layer.number.to_string()),
-    ];
-    let () = db.hset_multiple(keys::presence(AccountId(account)), &fields).await.expect("a write");
   }
 
   #[tokio::test]
@@ -484,62 +422,18 @@ mod tests {
 
   #[tokio::test]
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
-  async fn a_party_stays_on_one_layer_of_a_zone_and_needs_room_for_each_member() {
-    let (_redis, mut db) = shard(5).await;
-    for layer in [on(1, 1), on(1, 2), on(2, 1), on(2, 2), on(3, 1), on(3, 3)] {
+  async fn a_player_that_crosses_keeps_the_number_of_its_layer_while_that_layer_has_room() {
+    let (_redis, mut db) = shard(2).await;
+    for layer in [on(2, 1), on(2, 2)] {
       db.hset::<_, _, _, ()>("layers:1", keys::field(layer), 0).await.expect("a layer");
       assert_eq!(SHARD.claim(&mut db, "w").await.expect("a claim"), Some(layer));
       count(&mut db, layer, 1, 0).await;
     }
-    for (layer, players) in [(on(1, 1), 1), (on(1, 2), 1), (on(3, 1), 1), (on(3, 3), 3)] {
-      count(&mut db, layer, 1, players).await;
-    }
-    let (a, b, c, d) = (1, 2, 3, 4);
-    present(&mut db, a, on(1, 1)).await;
-    present(&mut db, b, on(2, 2)).await;
-    present(&mut db, c, on(1, 2)).await;
-    present(&mut db, d, on(2, 2)).await;
-    let join = async |db: &mut MultiplexedConnection, account| {
-      SHARD.join(db, PartyId(7), AccountId(account)).await.expect("a join")
-    };
-    assert_eq!([join(&mut db, a).await, join(&mut db, b).await], [true, true]);
-    assert!(!join(&mut db, c).await, "c is on another layer of the zone of a");
-    assert!(!join(&mut db, b).await, "b has a party");
-    assert!(!join(&mut db, 99).await, "99 does not play");
-    assert!(join(&mut db, d).await);
-    assert_eq!(cross(&mut db, b, 1, on(2, 2)).await, Placed::On(on(1, 1)));
-    count(&mut db, on(1, 1), 1, 5).await;
-    assert_eq!(cross(&mut db, b, 1, on(2, 2)).await, Placed::Wait);
-    assert_eq!(cross(&mut db, b, 3, on(2, 2)).await, Placed::On(on(3, 1)));
-    assert_eq!(cross(&mut db, c, 3, on(1, 2)).await, Placed::On(on(3, 3)));
-    assert_eq!(cross(&mut db, c, 2, on(1, 2)).await, Placed::On(on(2, 2)));
-    let leave = async |db: &mut MultiplexedConnection, account| {
-      SHARD.leave(db, AccountId(account)).await.expect("a leave")
-    };
-    assert_eq!([leave(&mut db, b).await, leave(&mut db, c).await], [true, false]);
-    let members: Vec<i64> = db.smembers("party:1:7").await.expect("a set");
-    assert_eq!(members.len(), 2);
-    assert!(leave(&mut db, d).await);
-    assert_eq!(
-      hash(&mut db, "presence:1").await,
-      fields([("layer", "1"), ("shard", "1"), ("zone", "1")])
-    );
-    let gone: bool = db.exists("party:1:7").await.expect("a key");
-    assert!(!gone);
-  }
-
-  #[tokio::test]
-  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
-  async fn a_party_holds_5_players_at_most() {
-    let (_redis, mut db) = shard(5).await;
-    for account in 1..=6 {
-      present(&mut db, account, on(1, 1)).await;
-    }
-    let mut joined = Vec::new();
-    for account in 1..=6 {
-      joined.push(SHARD.join(&mut db, PartyId(1), AccountId(account)).await.expect("a join"));
-    }
-    assert_eq!(joined, [true, true, true, true, true, false]);
+    count(&mut db, on(2, 1), 1, 1).await;
+    assert_eq!(cross(&mut db, 1, 2, on(1, 2)).await, Placed::On(on(2, 2)));
+    count(&mut db, on(2, 2), 1, 2).await;
+    assert_eq!(cross(&mut db, 2, 2, on(1, 2)).await, Placed::On(on(2, 1)), "layer 2 is full");
+    assert_eq!(cross(&mut db, 3, 2, on(1, 1)).await, Placed::Wait);
   }
 
   #[tokio::test]
@@ -571,8 +465,7 @@ mod tests {
         .await
         .is_err(),
       SHARD.close(&mut db, on(1, 1), Epoch(1)).await.is_err(),
-      SHARD.leave(&mut db, AccountId(1)).await.is_err(),
     ];
-    assert_eq!(refusals, [true; 4]);
+    assert_eq!(refusals, [true; 3]);
   }
 }
