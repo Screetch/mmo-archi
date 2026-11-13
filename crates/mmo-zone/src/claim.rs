@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, Save, ShardId};
-use mmo_store::{Directory, Lease, keys};
+use mmo_store::{Directory, Lease, Leased, keys};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use tokio::time;
@@ -32,6 +32,8 @@ pub(crate) enum Error {
   Superseded { layer: Layer, held: i64, own: Epoch },
   #[error("shard {} holds no cap of a layer, which the login service writes", .0.0)]
   NoCap(ShardId),
+  #[error("layer {}:{} closed", .0.zone.0, .0.number)]
+  Closed(Layer),
   #[error("Redis refuses the layer writer: {0}")]
   Redis(#[from] redis::RedisError),
 }
@@ -102,6 +104,13 @@ pub(crate) struct Claim {
 }
 
 impl Claim {
+  /// Closes the layer when it holds no player and no place, and gives whether it did. The writer
+  /// is then idle again.
+  pub(crate) async fn close(&self) -> Result<bool, Error> {
+    let Held { shard, layer, epoch } = self.held;
+    Ok((Directory { shard }).close(&mut self.redis.clone(), layer, epoch).await?)
+  }
+
   /// The batch of `saves` for the keeper, with the layer and the epoch of this writer.
   pub(crate) fn batch(&self, saves: Vec<Save>) -> Batch {
     Batch { shard: self.held.shard, layer: self.held.layer, epoch: self.held.epoch, saves }
@@ -115,8 +124,9 @@ impl Claim {
         let players = u32::try_from(players).unwrap_or(u32::MAX);
         let lease = Lease { layer, epoch, address: &self.address, players, taken: &taken };
         match (Directory { shard }).lease(&mut redis, &lease).await? {
-          None => Ok(()),
-          Some(held) => Err(Error::Superseded { layer, held: held.0, own: epoch }),
+          Leased::Held => Ok(()),
+          Leased::Newer(held) => Err(Error::Superseded { layer, held: held.0, own: epoch }),
+          Leased::Closed => Err(Error::Closed(layer)),
         }
       }
       Entry::Ticks(counts) if counts.is_empty() => Ok(()),
@@ -260,6 +270,9 @@ mod tests {
       .write(Entry::Layer { players: 1, taken: Vec::new() })
       .await
       .expect("the newest epoch writes");
+    let () = admin.hdel(keys::layers(SHARD), keys::field(MEADOW)).await.expect("a close");
+    let closed = newer.write(Entry::Layer { players: 0, taken: Vec::new() }).await;
+    assert_eq!(closed.err().map(|error| error.to_string()).as_deref(), Some("layer 1:1 closed"));
     let other = Redis::start().await;
     opened(&other, None).await;
     let no_cap = taken(&other.url()).await.err().map(|error| error.to_string());
@@ -353,6 +366,8 @@ mod tests {
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
     user(&redis, "nodel", &["-@scripting"]).await;
     let refused = claim.write(Entry::Layer { players: 0, taken: Vec::new() }).await.err();
+    assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
+    let refused = claim.close().await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
   }
 }

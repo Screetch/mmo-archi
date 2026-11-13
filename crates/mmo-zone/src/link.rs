@@ -33,6 +33,10 @@ const ANNOUNCE_EVERY: u32 = TICKS_PER_SECOND;
 /// the most play that a player loses when a writer stops, as the table of targets says.
 const SAVE_EVERY: u32 = 10 * TICKS_PER_SECOND;
 
+/// The ticks after which a layer that holds no player closes: 30 s, the time that it keeps the
+/// player of a closed link.
+const EMPTY_FOR: u32 = 30 * TICKS_PER_SECOND;
+
 /// The build in the hello of the zone writer: the version of the workspace, as 1002003 for 1.2.3.
 pub(crate) const BUILD: u32 = {
   let parts = [
@@ -101,6 +105,8 @@ enum Event {
   },
   Entries(Result<(), claim::Error>),
   Closed(Gateway),
+  /// The answer of the close of the layer: whether it closed.
+  Released(Result<bool, claim::Error>),
 }
 
 /// What a zone writer holds once it claimed its zone: the zone, the store that it reads the last
@@ -153,6 +159,8 @@ struct Writer {
   timing: BTreeMap<u32, u64>,
   /// The players that left, and whose last state the store did not acknowledge yet, by character.
   owed: BTreeMap<i64, Leaver>,
+  /// The ticks since the layer last held a player or a save that the store did not acknowledge.
+  empty: u32,
 }
 
 impl Writer {
@@ -162,7 +170,8 @@ impl Writer {
     tokio::spawn(deliver(keeper, sent, events.clone()));
     let (gateways, owed) = (BTreeMap::new(), BTreeMap::new());
     let timing = BTreeMap::new();
-    let writer = Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed };
+    let writer =
+      Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed, empty: 0 };
     // The first lease of the epoch of the writer opens the layer.
     writer.write(Entry::Layer { players: 0, taken: Vec::new() });
     writer
@@ -188,8 +197,26 @@ impl Writer {
       Event::Entries(Err(error)) => eprintln!("the zone writer cannot write in Redis: {error}"),
       Event::Entries(Ok(())) => {}
       Event::Closed(gateway) => self.close(gateway),
+      Event::Released(Ok(true)) => return Some(Error::Released),
+      Event::Released(answer) => {
+        // A place or a player came, or Redis failed: the layer runs on, and tries again later.
+        if let Err(error) = answer {
+          eprintln!("the zone writer cannot close its layer: {error}");
+        }
+        self.empty = 0;
+      }
     }
     None
+  }
+
+  /// Closes the layer in a task, so the tick goes on.
+  fn release(&self) {
+    let claim = self.claim.clone();
+    let events = self.events.clone();
+    tokio::spawn(async move {
+      // The send fails only when the zone writer stopped, and then no one needs the result.
+      drop(events.send(Event::Released(claim.close().await)));
+    });
   }
 
   fn message(&mut self, gateway: Gateway, message: &ToZone) {
@@ -353,6 +380,11 @@ impl Writer {
       self.keep();
     }
     self.leave();
+    let idle = self.zone.count() == 0 && self.owed.is_empty();
+    self.empty = if idle { self.empty + 1 } else { 0 };
+    if self.empty == EMPTY_FOR {
+      self.release();
+    }
   }
 }
 
@@ -449,13 +481,15 @@ mod tests {
   };
   use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
-  use mmo_store::{Directory, Lease, Saved, Store, keys};
+  use mmo_store::{Directory, Lease, Leased, Saved, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use redis::AsyncCommands;
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-  use super::{Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
+  use super::{
+    Claimed, EMPTY_FOR, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve,
+  };
   use crate::claim::Taken;
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
@@ -520,7 +554,7 @@ mod tests {
       let lease =
         Lease { layer: LAYER, epoch: Epoch(epoch), address: "z:1", players: 0, taken: &[] };
       let newer = directory.lease(&mut self.admin().await, &lease).await;
-      assert_eq!(newer.expect("a lease"), None);
+      assert_eq!(newer.expect("a lease"), Leased::Held);
     }
 
     /// A writer that claims the zone, and the events that its tasks send.
@@ -887,6 +921,36 @@ mod tests {
       fault.to_string(),
       "layer 1:1 is held by a writer of epoch 9, which is newer than the epoch 1"
     );
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_layer_that_holds_no_player_for_30_s_closes_and_its_writer_is_idle_again(pool: PgPool) {
+    let meadow = Meadow::new(pool).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    meadow.join(&mut writer).await;
+    let logout = ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout });
+    assert!(writer.hear(Event::Message(GATE, logout)).is_none());
+    assert!(writer.owed.is_empty(), "the store holds the state of the player already");
+    let mut admin = meadow.admin().await;
+    let () = admin.zadd("placed:1:1:1", 9, u64::MAX).await.expect("a place");
+    for _ in 0..EMPTY_FOR {
+      writer.tick();
+    }
+    let released = |_: &Writer, event: &Event| matches!(event, Event::Released(_));
+    assert_eq!(hear(&mut writer, &mut heard, released).await, None, "a place holds the layer");
+    assert_eq!(writer.empty, 0);
+    let () = admin.del("placed:1:1:1").await.expect("the place taken");
+    for _ in 0..EMPTY_FOR {
+      writer.tick();
+    }
+    let fault = hear(&mut writer, &mut heard, released).await;
+    assert_eq!(fault.as_deref(), Some("the layer closed, and its writer is idle again"));
+    assert_eq!(hash(&meadow.redis, "layers:1").await, BTreeMap::new());
+    assert_eq!(hash(&meadow.redis, "writer:1:1:1").await, BTreeMap::new());
+    let refused = Event::Released(Err(claim::Error::Closed(LAYER)));
+    writer.empty = 9;
+    assert!(writer.hear(refused).is_none());
+    assert_eq!(writer.empty, 0);
   }
 
   #[sqlx::test(migrations = false)]
