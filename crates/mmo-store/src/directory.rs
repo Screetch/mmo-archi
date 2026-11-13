@@ -54,6 +54,17 @@ pub struct Lease<'a> {
   pub taken: &'a [AccountId],
 }
 
+/// The answer of [`Directory::lease`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leased {
+  /// The writer holds the lease of its layer.
+  Held,
+  /// A writer of this newer epoch holds the lease, and the lease is unchanged.
+  Newer(Epoch),
+  /// The layer closed, and gets no lease.
+  Closed,
+}
+
 /// The answer of [`Directory::place`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
@@ -140,12 +151,12 @@ impl Directory {
   }
 
   /// Renews the lease of the writer of a layer and writes its count of players, as `lease` says.
-  /// It gives the epoch of the lease and writes nothing when a writer of a newer epoch holds it.
+  /// It writes nothing when a writer of a newer epoch holds the lease, or when the layer closed.
   pub async fn lease(
     self,
     redis: &mut impl ConnectionLike,
     lease: &Lease<'_>,
-  ) -> Result<Option<Epoch>, RedisError> {
+  ) -> Result<Leased, RedisError> {
     let held: i64 = RENEW
       .key(keys::writer(self.shard, lease.layer))
       .key(keys::layers(self.shard))
@@ -158,7 +169,11 @@ impl Directory {
       .arg(lease.taken.iter().map(|account| account.0).collect::<Vec<i64>>())
       .invoke_async(redis)
       .await?;
-    Ok((held != 0).then_some(Epoch(held)))
+    Ok(match held {
+      0 => Leased::Held,
+      -1 => Leased::Closed,
+      held => Leased::Newer(Epoch(held)),
+    })
   }
 
   /// Puts `layer` in drain when the other open layers of its zone have room for all its players
@@ -253,7 +268,7 @@ mod tests {
   use redis::AsyncCommands;
   use redis::aio::MultiplexedConnection;
 
-  use super::{Directory, Lease, PartyId, Placed};
+  use super::{Directory, Lease, Leased, PartyId, Placed};
   use crate::keys;
   use crate::testing::Redis;
 
@@ -292,7 +307,7 @@ mod tests {
   /// player of a place.
   async fn count(db: &mut MultiplexedConnection, layer: Layer, epoch: i64, players: u32) {
     let lease = Lease { layer, epoch: Epoch(epoch), address: "w", players, taken: &[] };
-    assert_eq!(SHARD.lease(db, &lease).await.expect("a lease"), None);
+    assert_eq!(SHARD.lease(db, &lease).await.expect("a lease"), Leased::Held);
     let () = db.del(keys::placed(SHARD.shard, layer)).await.expect("the places taken");
   }
 
@@ -367,7 +382,7 @@ mod tests {
     let () = db.zadd("placed:1:1:1", "1", 1).await.expect("an old place");
     let taken = [AccountId(2)];
     let lease = Lease { layer: on(1, 1), epoch: Epoch(1), address: "w", players: 1, taken: &taken };
-    assert_eq!(SHARD.lease(&mut db, &lease).await.expect("a lease"), None);
+    assert_eq!(SHARD.lease(&mut db, &lease).await.expect("a lease"), Leased::Held);
     let places: Vec<String> = db.zrange("placed:1:1:1", 0, -1).await.expect("the places");
     assert_eq!(places, ["1"], "the lease ends the place of the player that the writer took");
     assert_eq!(hash(&mut db, "layers:1").await["1:1"], "1");
@@ -392,16 +407,17 @@ mod tests {
       let lease = Lease { layer: on(1, 1), epoch: Epoch(epoch), address, players: 3, taken: &[] };
       SHARD.lease(db, &lease).await.expect("a lease")
     };
-    assert_eq!(lease(&mut db, 2, "a").await, None);
-    assert_eq!(lease(&mut db, 1, "b").await, Some(Epoch(2)));
+    assert_eq!(lease(&mut db, 2, "a").await, Leased::Held);
+    assert_eq!(lease(&mut db, 1, "b").await, Leased::Newer(Epoch(2)));
     assert_eq!(hash(&mut db, "writer:1:1:1").await, fields([("address", "a"), ("epoch", "2")]));
     assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "3")]));
-    assert_eq!(lease(&mut db, 3, "b").await, None);
+    assert_eq!(lease(&mut db, 3, "b").await, Leased::Held);
     assert_eq!(hash(&mut db, "writer:1:1:1").await, fields([("address", "b"), ("epoch", "3")]));
     let lease = Lease { layer: on(1, 9), epoch: Epoch(1), address: "c", players: 4, taken: &[] };
     let closed = SHARD.lease(&mut db, &lease).await.expect("a lease");
-    assert_eq!(closed, None);
+    assert_eq!(closed, Leased::Closed);
     assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "3")]));
+    assert_eq!(hash(&mut db, "writer:1:1:9").await, fields([]));
   }
 
   #[tokio::test]

@@ -52,8 +52,9 @@ mod zone;
 use std::process::ExitCode;
 use std::{env, io};
 
+use mmo_protocol::ShardId;
 use mmo_store::Store;
-use quinn::Endpoint;
+use quinn::{ClientConfig, Endpoint};
 use sqlx::postgres::PgPoolOptions;
 
 use crate::claim::Taken;
@@ -80,6 +81,8 @@ enum Error {
   Address(#[from] io::Error),
   #[error("the endpoint of the links closed")]
   Closed,
+  #[error("the layer closed, and its writer is idle again")]
+  Released,
 }
 
 #[expect(clippy::disallowed_methods, reason = "main starts the runtime of the zone writer once")]
@@ -89,28 +92,61 @@ async fn main() -> ExitCode {
   ExitCode::FAILURE
 }
 
-/// Runs the zone writer until a fault stops it, and gives that fault.
+/// Runs the zone writer until a fault stops it, and gives that fault. Each layer that it closes
+/// leaves it idle, and it takes the next layer that a placement opens.
 async fn write(var: impl Fn(&str) -> Option<String>) -> Error {
-  match open(var).await {
-    Ok((endpoint, claimed)) => link::serve(endpoint, claimed).await,
-    Err(error) => error,
+  let pool = match open(var).await {
+    Ok(pool) => pool,
+    Err(error) => return error,
+  };
+  // The writer starts idle, as after the close of a layer.
+  let mut fault = Error::Released;
+  while matches!(fault, Error::Released) {
+    fault = match pool.take().await {
+      Ok(claimed) => link::serve(pool.endpoint.clone(), claimed).await,
+      Err(error) => error,
+    };
+  }
+  fault
+}
+
+/// What an idle writer needs to take a layer: its endpoint, the link to the keeper, its stores, its
+/// shard and the address that the gateways dial.
+struct Pool {
+  endpoint: Endpoint,
+  /// True when the endpoint binds an address of IPv4, which dials only an address of IPv4.
+  ipv4: bool,
+  client: ClientConfig,
+  keeper: String,
+  redis: String,
+  shard: ShardId,
+  public: String,
+  store: Store,
+}
+
+impl Pool {
+  /// Waits for a layer of the shard, and claims its epoch from the keeper on a new link.
+  async fn take(&self) -> Result<Claimed, Error> {
+    let ipv4 = self.ipv4;
+    let mut keeper =
+      Keeper::new(self.endpoint.clone(), self.client.clone(), self.keeper.clone(), ipv4);
+    let taken = Taken::wait(&self.redis, self.shard, self.public.clone()).await?;
+    let epoch = keeper.claim(taken.shard, taken.layer).await?;
+    let zone = Zone::new(taken.layer, taken.cap);
+    Ok(Claimed { zone, store: self.store.clone(), claim: taken.hold(epoch), keeper })
   }
 }
 
-/// Opens each part of the zone writer. It binds its address before it claims its zone, so a writer
+/// Opens each part of the zone writer. It binds its address before it claims a layer, so a writer
 /// that cannot take links takes no epoch.
-async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Claimed), Error> {
+async fn open(var: impl Fn(&str) -> Option<String>) -> Result<Pool, Error> {
   let config = Config::read(var)?;
   let pool = PgPoolOptions::new().max_connections(CONNECTIONS).connect_lazy_with(config.database);
   let store = Store::open(pool).await?;
   let endpoint = Endpoint::server(config.server, config.address)?;
   let ipv4 = config.address.is_ipv4();
-  let mut keeper = Keeper::new(endpoint.clone(), config.client, config.keeper, ipv4);
-  let taken = Taken::wait(&config.redis, config.shard, config.public).await?;
-  let epoch = keeper.claim(taken.shard, taken.layer).await?;
-  let zone = Zone::new(taken.layer, taken.cap);
-  let claim = taken.hold(epoch);
-  Ok((endpoint, Claimed { zone, store, claim, keeper }))
+  let Config { client, keeper, redis, shard, public, .. } = config;
+  Ok(Pool { endpoint, ipv4, client, keeper, redis, shard, public, store })
 }
 
 #[cfg(test)]
