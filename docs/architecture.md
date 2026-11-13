@@ -87,7 +87,10 @@ so a player never holds two copies of one character.
 ### The gateway
 
 The gateway ends the QUIC connection of a client, and checks the session in Redis when the connection opens. It keeps
-the account and the shard of the session with the connection, since a player never changes its shard in a session. It
+the account and the shard of the session with the connection, since a player never changes its shard in a session.
+It joins the client to the layer that the presence of the player names, when a layer writer holds the character of the
+session in the shard of the session, and else to the layer of the session. A move or a hand-off takes a player out of
+the layer of its login, so a client that attaches again after it comes back to the layer that holds its player. It
 sends each message to the writer of the layer that the message names, in the shard of the connection. It keeps only
 its open connections and a copy of the directory of each shard. It can drop the copy at any time and read it again
 from Redis. It reads it again at each message on the channel `directory`, and each 5 s.
