@@ -96,9 +96,13 @@ mod tests {
   // Redis does that cannot bind its port.
   #[tokio::test]
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
-  #[should_panic(expected = "Redis did not start in 2 attempts")]
   async fn a_program_that_never_takes_connections_ends_the_start_after_its_attempts() {
     let program = std::env::current_exe().expect("the test binary has a path");
-    Redis::start_with(program.to_str().expect("the path is text"), 2).await;
+    let program = program.to_str().expect("the path is text").to_owned();
+    let fault = tokio::spawn(async move { Redis::start_with(&program, 2).await })
+      .await
+      .expect_err("the start panics");
+    let message = fault.into_panic().downcast::<String>().expect("a formatted message");
+    assert!(message.starts_with("Redis did not start in 2 attempts."), "{message}");
   }
 }
