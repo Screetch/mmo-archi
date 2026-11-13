@@ -10,9 +10,10 @@
 //! nearest entities in the 9 cells of 32 m around
 //! it, as a delta against the last snapshot that its client acknowledged.
 //!
-//! A player that walks past the border of its zone goes to a layer of the next zone, with the
-//! hand-off of section 6: the writer asks the placement of the directory for that layer, dials its
-//! writer, and drops the player when that writer answers that it saved the player.
+//! A player that walks past a border of its zone goes to a layer of the zone across that border, as
+//! the map of the world gives it, with the hand-off of section 6: the writer asks the placement of
+//! the directory for that layer, dials its writer, and drops the player when that writer answers
+//! that it saved the player.
 //!
 //! The writer keeps its state as sections 2, 5, 6 and 9 of `docs/architecture.md` say. When it
 //! takes a layer, it claims the layer from the keeper, which gives it the next epoch of that
@@ -138,7 +139,8 @@ impl Pool {
       Keeper::new(self.endpoint.clone(), self.client.clone(), self.keeper.clone(), ipv4);
     let taken = Taken::wait(&self.redis, self.shard, self.public.clone()).await?;
     let epoch = keeper.claim(taken.shard, taken.layer).await?;
-    let zone = Zone::new(taken.layer, taken.cap).beside(&self.store.zones().await?);
+    let zone =
+      Zone::new(taken.layer, taken.cap).beside(self.store.neighbours(taken.layer.zone).await?);
     let dial = Dial { endpoint: self.endpoint.clone(), client: self.client.clone(), ipv4 };
     Ok(Claimed { zone, store: self.store.clone(), claim: taken.hold(epoch), keeper, dial })
   }

@@ -408,10 +408,12 @@ of the hand-off below. The client gets `Moved { zone, layer }` with its own zone
 
 ### The hand-off between two zones
 
-The zones lie in a row along the axis x: the zone with the next id lies east of a zone. The border between two
-zones is the east edge of the west zone, at x = 1024 m, and the west edge of the east zone, at x = 0. A border with no
-zone beyond it, which the table `zones` does not hold, is the edge of the world, and its floor ends there. A writer
-reads the ids of the zones from that table when it takes a layer.
+The zone across a border is the zone on the next square of the map on that side. A zone has four borders: x = 0 is its
+west border, x = 1024 m its east border, z = 0 its south border and z = 1024 m its north border. A border with no zone
+beyond it, as no square of the map holds one, is the edge of the world, and its floor ends there. A writer reads the
+four zones across its borders from the store, with `Store::neighbours`, when it takes a layer. No rule of the order of
+the ids gives a neighbour. A player past two borders at once crosses the border on x first, and the writer of the
+target then hands it on across the border on z.
 
 Each writer sends the quantized state of its entities within 48 m of a border, each tick, to the writer of the layer
 with the same number in the next zone, when that layer stands. The next writer shows them as entities that it does not
@@ -423,8 +425,9 @@ When a player walks past a border, the writer of the layer that the player leave
    `place` for the next zone, the target. When `place` answers wait, the source tells the client with
    `Full { zone }`, keeps the player at the border, and runs `place` again after 1 s.
 2. It dials the writer of the layer that `place` gave, and sends `Transfer { account, state, version }` on a stream of
-   that link. The state is in the coordinates of the target: the position at x = 0 of an east crossing, or at x = 1024 m
-   of a west crossing.
+   that link. The state is in the coordinates of the target: the player enters at the opposite edge of it, at x = 0
+   after an east crossing, at x = 1024 m after a west crossing, at z = 0 after a north crossing and at z = 1024 m
+   after a south crossing.
 3. The target adds the player, with no link, and writes the presence of the account with its own zone, layer and
    epoch. It asks the keeper to save the character with the new zone. Then it answers `Accepted`. When its layer holds
    its cap, it answers `Full`, and the source goes back to step 1 after 1 s.

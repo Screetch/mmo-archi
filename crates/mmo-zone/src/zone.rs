@@ -8,7 +8,7 @@ use mmo_protocol::{
   AccountId, Angle, CharacterId, Entity, Input, Intents, Layer, Link, Position, Relayed, Save,
   Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId,
 };
-use mmo_store::Saved;
+use mmo_store::{Neighbours, Saved};
 
 use crate::interest::Grid;
 use crate::view::{History, Sent};
@@ -58,10 +58,8 @@ pub(crate) struct Crossing {
 /// The state of one layer of a zone: its players on the ground, at its present tick.
 pub(crate) struct Zone {
   layer: Layer,
-  /// The zone beyond the border at x = 0, when the world holds it.
-  west: Option<ZoneId>,
-  /// The zone beyond the border at x = [`SIDE_CM`], when the world holds it.
-  east: Option<ZoneId>,
+  /// The zone across each border of the zone, as the map of the world holds them.
+  neighbours: Neighbours,
   /// The most players of the layer, which the writer read from its shard when it claimed it.
   cap: usize,
   terrain: Terrain,
@@ -100,8 +98,7 @@ impl Zone {
   pub(crate) fn new(layer: Layer, cap: usize) -> Self {
     Self {
       layer,
-      west: None,
-      east: None,
+      neighbours: Neighbours::default(),
       cap,
       terrain: ground(),
       tick: Tick(0),
@@ -112,12 +109,10 @@ impl Zone {
     }
   }
 
-  /// Sets the zones that lie beyond its borders: the zone before this one in `zones` is its west,
-  /// and the zone after it its east, as section 6 of `docs/architecture.md` says.
-  pub(crate) fn beside(mut self, zones: &[ZoneId]) -> Self {
-    let near = |zone: i32| zones.contains(&ZoneId(zone)).then_some(ZoneId(zone));
-    self.west = near(self.layer.zone.0 - 1);
-    self.east = near(self.layer.zone.0 + 1);
+  /// Sets the zone across each border, as the map of the world gives them, as section 6 of
+  /// `docs/architecture.md` says.
+  pub(crate) fn beside(mut self, neighbours: Neighbours) -> Self {
+    self.neighbours = neighbours;
     self
   }
 
@@ -291,11 +286,16 @@ impl Zone {
   pub(crate) fn crossings(&mut self) -> Vec<Crossing> {
     let mut found = Vec::new();
     for (id, player) in &mut self.players {
-      let x = player.body.position[0];
+      let [x, _, z] = player.body.position;
+      let Neighbours { west, east, south, north } = self.neighbours;
       let (to, shift) = if x < 0 {
-        (self.west, SIDE_CM)
+        (west, [SIDE_CM, 0])
       } else if x >= SIDE_CM {
-        (self.east, -SIDE_CM)
+        (east, [-SIDE_CM, 0])
+      } else if z < 0 {
+        (south, [0, SIDE_CM])
+      } else if z >= SIDE_CM {
+        (north, [0, -SIDE_CM])
       } else {
         continue;
       };
@@ -304,7 +304,8 @@ impl Zone {
       player.crossing = true;
       player.velocity = Velocity { x: 0, y: 0, z: 0 };
       let mut state = player.entity(CharacterId(*id));
-      state.position.x += shift;
+      state.position.x += shift[0];
+      state.position.z += shift[1];
       found.push(Crossing { zone, account: player.account, state, version: player.version });
     }
     found
@@ -463,11 +464,18 @@ mod tests {
     AccountId, Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed,
     Save, Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId, encode,
   };
-  use mmo_store::Saved;
+  use mmo_store::{Neighbours, Saved};
 
   use super::{Crossing, Gateway, KEPT, Leaver, Refusal, Zone};
 
   const MEADOW: ZoneId = ZoneId(1);
+  /// The zones across the four borders of the meadow, with ids that no rule of order gives.
+  const AROUND: Neighbours = Neighbours {
+    west: Some(ZoneId(11)),
+    east: Some(ZoneId(12)),
+    south: Some(ZoneId(13)),
+    north: Some(ZoneId(14)),
+  };
   const FOREST: ZoneId = ZoneId(2);
   const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
   /// The cap of a layer at the start of a shard.
@@ -478,10 +486,14 @@ mod tests {
   const NORTH: Angle = Angle(16384);
 
   fn saved(id: i64, x: i32) -> Saved {
+    placed(id, x, 10_000)
+  }
+
+  fn placed(id: i64, x: i32, z: i32) -> Saved {
     Saved {
       character: CharacterId(id),
       zone: MEADOW,
-      state: State { position: Position { x, y: 0, z: 10_000 }, yaw: Angle(0), hit_points: 100 },
+      state: State { position: Position { x, y: 0, z }, yaw: Angle(0), hit_points: 100 },
       version: 0,
     }
   }
@@ -717,11 +729,10 @@ mod tests {
     assert_eq!(zone.leavers(), []);
   }
 
-  /// A zone of the row of the meadow and the forest, with `player` of `zone` at `x`.
-  fn bordered(zone: ZoneId, x: i32) -> Zone {
-    let mut writer = Zone::new(Layer { zone, number: 1 }, CAP).beside(&[MEADOW, FOREST]);
-    let here = Saved { zone, ..saved(7, x) };
-    assert_eq!(writer.join(GATE, Link(1), ACCOUNT, &here), Ok(()));
+  /// A layer of the meadow with the zones `across` its borders, and the player 7 at `x` and `z`.
+  fn bordered(across: Neighbours, x: i32, z: i32) -> Zone {
+    let mut writer = Zone::new(LAYER, CAP).beside(across);
+    assert_eq!(writer.join(GATE, Link(1), ACCOUNT, &placed(7, x, z)), Ok(()));
     writer
   }
 
@@ -737,12 +748,12 @@ mod tests {
 
   #[test]
   fn a_player_that_walks_past_the_east_border_stops_and_waits_for_the_next_zone() {
-    let mut zone = bordered(MEADOW, SIDE_CM - 60);
+    let mut zone = bordered(AROUND, SIDE_CM - 60, 10_000);
     walk(&mut zone, MEADOW, EAST, 1);
     assert_eq!(zone.crossings(), []);
     walk(&mut zone, MEADOW, EAST, 1);
     let state = entity(7, 0, 0, NORTH);
-    let crossing = Crossing { zone: FOREST, account: ACCOUNT, state, version: 0 };
+    let crossing = Crossing { zone: ZoneId(12), account: ACCOUNT, state, version: 0 };
     assert_eq!(zone.crossings(), [crossing]);
     assert_eq!(zone.crossings(), []);
     zone.intents(GATE, Link(1), &intents(None, [3, 4, 5], EAST));
@@ -754,21 +765,69 @@ mod tests {
     assert_eq!((zone.count(), zone.leavers(), zone.depart(CharacterId(7))), (0, vec![], None));
   }
 
+  /// A walk over one border: where the player starts and its heading, then the zone across the
+  /// border and the place of the player in that zone, after 2 ticks of 30 cm.
+  struct Walk {
+    from: (i32, i32),
+    heading: Angle,
+    across: ZoneId,
+    enters: (i32, i32),
+  }
+
+  const BORDERS: [Walk; 4] = [
+    Walk {
+      from: (30, 10_000),
+      heading: Angle(32768),
+      across: ZoneId(11),
+      enters: (SIDE_CM - 30, 10_000),
+    },
+    Walk {
+      from: (SIDE_CM - 60, 10_000),
+      heading: Angle(0),
+      across: ZoneId(12),
+      enters: (0, 10_000),
+    },
+    Walk {
+      from: (10_000, 30),
+      heading: Angle(49152),
+      across: ZoneId(13),
+      enters: (10_000, SIDE_CM - 30),
+    },
+    Walk {
+      from: (10_000, SIDE_CM - 60),
+      heading: Angle(16384),
+      across: ZoneId(14),
+      enters: (10_000, 0),
+    },
+  ];
+
   #[test]
-  fn a_player_that_walks_past_the_west_border_enters_the_east_end_of_the_next_zone() {
-    let mut zone = bordered(FOREST, 30);
-    walk(&mut zone, FOREST, Some(Angle(32768)), 2);
-    let [crossing] = zone.crossings().try_into().expect("one crossing");
-    assert_eq!((crossing.zone, crossing.state.position.x), (MEADOW, SIDE_CM - 30));
+  fn a_player_that_walks_past_each_border_enters_the_opposite_edge_of_the_zone_across_it() {
+    for Walk { from, heading, across, enters } in BORDERS {
+      let mut zone = bordered(AROUND, from.0, from.1);
+      walk(&mut zone, MEADOW, Some(heading), 2);
+      let [crossing] = zone.crossings().try_into().expect("one crossing");
+      let at = crossing.state.position;
+      assert_eq!((crossing.zone, (at.x, at.z)), (across, enters));
+    }
   }
 
   #[test]
-  fn a_zone_with_no_zone_beyond_its_border_hands_no_player_over_and_a_player_with_no_link_stays() {
-    let mut zone = Zone::new(LAYER, CAP).beside(&[MEADOW]);
-    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, SIDE_CM - 30)), Ok(()));
+  fn a_zone_with_no_zone_beyond_a_border_hands_no_player_over_on_it() {
+    for Walk { from, heading, .. } in BORDERS {
+      let mut zone = bordered(Neighbours::default(), from.0, from.1);
+      walk(&mut zone, MEADOW, Some(heading), 2);
+      assert_eq!(zone.crossings(), []);
+    }
+    let only_west = Neighbours { west: Some(ZoneId(11)), ..Neighbours::default() };
+    let mut zone = bordered(only_west, SIDE_CM - 60, 10_000);
     walk(&mut zone, MEADOW, EAST, 2);
     assert_eq!(zone.crossings(), []);
-    let mut zone = bordered(MEADOW, SIDE_CM - 30);
+  }
+
+  #[test]
+  fn a_player_with_no_link_stays_at_a_border() {
+    let mut zone = bordered(AROUND, SIDE_CM - 30, 10_000);
     walk(&mut zone, MEADOW, EAST, 1);
     zone.leave(GATE, Link(1));
     assert_eq!(zone.crossings(), []);
@@ -776,7 +835,7 @@ mod tests {
 
   #[test]
   fn a_player_that_logs_out_while_it_crosses_stays_until_the_next_zone_holds_it() {
-    let mut zone = bordered(MEADOW, SIDE_CM - 30);
+    let mut zone = bordered(AROUND, SIDE_CM - 30, 10_000);
     walk(&mut zone, MEADOW, EAST, 1);
     assert_eq!(zone.crossings().len(), 1);
     zone.logout(GATE, Link(1));
