@@ -226,9 +226,10 @@ jobs:
       - uses: ./.github/actions/clear
 
   gates:
-    # The one check that stands for all the gates, so that a ruleset of main requires this check alone, and the
-    # conductor merges a PR only when it passes. A job that the scope skips passes here. It runs always, and fails when
-    # a job that it needs failed or was cancelled.
+    # The one check that stands for all the gates, so that the ruleset of main requires this check and the title check
+    # alone: it requires neither the contract nor a branch that is up to date with main. So the conductor merges a PR
+    # only when this check passes on a head that holds the tip of main. A job that the scope skips passes here. It runs
+    # always, and fails when a job that it needs failed or was cancelled.
     name: the gates
     if: always()
     needs: [scope, hooks, suite, bots, crate]
