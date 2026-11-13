@@ -5,9 +5,10 @@ use std::fmt;
 use std::time::Duration;
 
 use mmo_store::keys::{TICK_BUCKET, tick_bucket};
+use tokio::time::Instant;
 
 use crate::bot::Outcome;
-use crate::layers::Seen;
+use crate::layers::{Seen, Shard};
 use crate::ticks::Counts;
 
 /// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
@@ -22,6 +23,10 @@ const UP_MEAN: f64 = 2_000.0;
 
 /// The most bytes of a datagram.
 const DATAGRAM: usize = 1100;
+
+/// The longest time that a waiting bot may go without a place: the login service gives one each
+/// 5 s.
+const PLACE_GAP: Duration = Duration::from_secs(7);
 
 /// The mean, the median, the 99th percentile and the most of some numbers.
 #[derive(Debug, Default, PartialEq)]
@@ -93,11 +98,116 @@ impl Ticks {
   }
 }
 
+/// What the queue did, from the bots that entered it.
+#[derive(Debug, PartialEq)]
+struct Queue {
+  /// The bots that waited when the measure ended.
+  waiting: usize,
+  /// The bots that had to wait.
+  expected: usize,
+  /// No bot that got a session entered the queue after a bot that waits.
+  ordered: bool,
+  /// Each waiting bot, in the order of entry, holds the place of its rank, in a queue as long as
+  /// the count of waiting bots.
+  placed: bool,
+  /// The longest time that a waiting bot went without a place, up to the end of the measure.
+  gap: Duration,
+}
+
+impl Queue {
+  /// The line of the report on the queue.
+  fn line(&self) -> String {
+    format!(
+      "queue: {} bots wait of {} that must, the longest time without a place {:.1} s",
+      self.waiting,
+      self.expected,
+      self.gap.as_secs_f64()
+    )
+  }
+
+  /// The lines of the budget on the queue.
+  fn budget(&self) -> [(&'static str, bool); 4] {
+    [
+      ("the queue holds the bots that must wait", self.waiting == self.expected),
+      ("the queue admits in the order of entry", self.ordered),
+      ("each waiting bot holds the place of its order of entry", self.placed),
+      ("each waiting bot gets its place at least each 7 s", self.gap <= PLACE_GAP),
+    ]
+  }
+
+  fn new(expected: usize, outcomes: &[Outcome]) -> Self {
+    let mut entered: Vec<&Outcome> = outcomes.iter().filter(|out| !out.places.is_empty()).collect();
+    entered.sort_by_key(|out| out.places.first().map(|(at, _)| *at));
+    let waiting: Vec<&Outcome> = entered.iter().copied().filter(|out| out.queued).collect();
+    let first = entered.iter().position(|out| out.queued).unwrap_or(entered.len());
+    let ordered = entered.iter().skip(first).all(|out| out.waited.is_none());
+    let placed = waiting.iter().enumerate().all(|(rank, out)| {
+      out.places.last().is_some_and(|(_, place)| {
+        place.position as usize == rank && place.length as usize == waiting.len()
+      })
+    });
+    let gaps = waiting.iter().flat_map(|out| {
+      let marks: Vec<Instant> = out.places.iter().map(|(at, _)| *at).chain(out.ended).collect();
+      let pairs = marks.iter().zip(marks.iter().skip(1));
+      pairs.map(|(from, to)| to.duration_since(*from)).collect::<Vec<_>>()
+    });
+    Self { waiting: waiting.len(), expected, ordered, placed, gap: gaps.max().unwrap_or_default() }
+  }
+}
+
+/// What the bots that lost their link did: the longest time that one took to play again.
+#[derive(Debug, PartialEq)]
+struct Recovery {
+  /// The longest time that the rule allows, or 0 when no bot attaches again.
+  bound: Duration,
+  /// The count of the losses of a link that ended with the player in play again.
+  recovered: usize,
+  /// The bots that lost their link and were not back when the measure ended.
+  away: usize,
+  /// The losses that ended on another layer.
+  relocated: u32,
+  /// The longest time without a snapshot of a loss that ended.
+  gap: Duration,
+}
+
+impl Recovery {
+  /// The line of the report on the bots that lost their link.
+  fn line(&self) -> String {
+    let Self { recovered, away, relocated, gap, .. } = self;
+    format!(
+      "recovery: {recovered} links came back, the longest time without a snapshot {:.1} s, {away} bots still away, {relocated} on another layer",
+      gap.as_secs_f64()
+    )
+  }
+
+  fn new(bound: Duration, outcomes: &[Outcome]) -> Self {
+    let gaps = outcomes.iter().flat_map(|out| out.recoveries.iter().copied());
+    Self {
+      bound,
+      recovered: outcomes.iter().map(|out| out.recoveries.len()).sum(),
+      away: outcomes.iter().filter(|out| out.away).count(),
+      relocated: outcomes.iter().map(|out| out.relocated).sum(),
+      gap: gaps.max().unwrap_or_default(),
+    }
+  }
+
+  /// The lines of the budget that a run with a bound for the recovery adds.
+  fn budget(&self) -> [(String, bool); 3] {
+    [
+      ("each bot that lost its link played again".to_owned(), self.away == 0),
+      (format!("each bot played again within {} s", self.bound.as_secs()), self.gap <= self.bound),
+      ("each bot played again on its layer".to_owned(), self.relocated == 0),
+    ]
+  }
+}
+
 /// The result of a run.
 #[derive(Debug)]
 pub(crate) struct Report {
   bots: usize,
   played: usize,
+  queue: Queue,
+  recovery: Recovery,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -124,10 +234,13 @@ fn needed(players: usize, cap: u32) -> usize {
 }
 
 impl Report {
-  /// The report of the `outcomes` of `bots` bots, the `ticks` of the writers during `window`, and
-  /// the `layers` that the directory showed. A bot that gave no outcome failed.
+  /// The report of the `outcomes` of `bots` bots, of which `waiting` must wait in the queue at the
+  /// end, the `ticks` of the writers during `window`, and the `layers` that the directory showed.
+  /// A bot that gave no outcome failed.
   pub(crate) fn new(
     bots: usize,
+    waiting: usize,
+    recover: Duration,
     outcomes: &[Outcome],
     ticks: &Counts,
     layers: Seen,
@@ -149,6 +262,8 @@ impl Report {
     Self {
       bots,
       played: outcomes.iter().filter(|out| out.joined.is_some()).count(),
+      queue: Queue::new(waiting, outcomes),
+      recovery: Recovery::new(recover, outcomes),
       faults,
       position: Stats::new(
         outcomes.iter().filter_map(|out| out.place).map(|p| f64::from(p.position)).collect(),
@@ -187,13 +302,28 @@ fn millis(d: Duration) -> f64 {
   d.as_secs_f64() * 1000.0
 }
 
+impl Report {
+  /// The line of the report on one shard: its layers and the players on each.
+  fn shard_line(&self, id: u32, shard: &Shard) -> String {
+    let players: Vec<String> = shard.layers.values().map(|layer| layer.now.to_string()).collect();
+    format!(
+      "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer: {}",
+      shard.layers.len(),
+      shard.cap,
+      self.shards.get(&id).copied().unwrap_or_default(),
+      players.join(" ")
+    )
+  }
+}
+
 impl fmt::Display for Report {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let queued = self.queue.waiting;
     let mut lines = vec![format!(
-      "load test: {} bots, {} played, {} failed",
+      "load test: {} bots, {} played, {queued} waiting, {} failed",
       self.bots,
       self.played,
-      self.bots - self.played
+      self.bots.saturating_sub(self.played + queued)
     )];
     lines.extend(self.faults.iter().map(|(fault, bots)| format!("  {bots} bots: {fault}")));
     lines.extend([
@@ -208,6 +338,11 @@ impl fmt::Display for Report {
       "snapshots {}, refused by the world {}, largest {} bytes",
       self.snapshots, self.gaps, self.largest
     ));
+    lines.push(self.queue.line());
+    let bound = self.recovery.bound;
+    if !bound.is_zero() {
+      lines.push(self.recovery.line());
+    }
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -215,16 +350,7 @@ impl fmt::Display for Report {
       millis(*p99),
       millis(*max),
     ));
-    for (id, shard) in &self.layers {
-      let players: Vec<String> = shard.layers.values().map(|layer| layer.now.to_string()).collect();
-      lines.push(format!(
-        "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer: {}",
-        shard.layers.len(),
-        shard.cap,
-        self.shards.get(id).copied().unwrap_or_default(),
-        players.join(" ")
-      ));
-    }
+    lines.extend(self.layers.iter().map(|(id, shard)| self.shard_line(*id, shard)));
     let capped =
       self.layers.values().all(|shard| shard.layers.values().all(|l| l.most <= shard.cap));
     let opened = self.layers.iter().all(|(id, shard)| {
@@ -237,11 +363,16 @@ impl fmt::Display for Report {
       ("data down, p99 at most 20000 B/s", self.down.p99 <= DOWN_WORST),
       ("data up, mean at most 2000 B/s", self.up.mean <= UP_MEAN),
       ("no datagram over 1100 bytes", self.largest <= DATAGRAM),
-      ("each bot played", self.played == self.bots),
+      ("each bot played or waits in the queue", self.played + queued == self.bots),
       ("no layer over its cap", capped),
       ("each shard opened the layers that its players need", opened),
     ];
-    lines.extend(budget.map(|(label, holds)| format!("budget {label}: {}", verdict(holds))));
+    let line = |(label, holds): (&str, bool)| format!("budget {label}: {}", verdict(holds));
+    lines.extend(budget.map(line));
+    lines.extend(self.queue.budget().map(line));
+    if !bound.is_zero() {
+      lines.extend(self.recovery.budget().map(|(label, holds)| line((&label, holds))));
+    }
     writeln!(f, "{}", lines.join("\n"))
   }
 }
@@ -254,7 +385,7 @@ mod tests {
   use mmo_client::Place;
   use tokio::time::Instant;
 
-  use super::{Report, Stats, Ticks};
+  use super::{Queue, Report, Stats, Ticks};
   use crate::bot::Outcome;
   use crate::layers::{Players, Seen, Shard};
 
@@ -279,6 +410,25 @@ mod tests {
   fn shard(cap: u32, layers: &[(u32, u32, u32)]) -> Shard {
     let layers = layers.iter().map(|&(number, now, most)| (number, Players { now, most }));
     Shard { cap, layers: layers.collect() }
+  }
+
+  /// A bot that entered the queue at the places `(ms, position)`, in a queue of `length`, and that
+  /// waited when it ended at `end` ms, all from `base`.
+  fn waiter(base: Instant, places: &[(u64, u32)], length: u32, end: u64) -> Outcome {
+    let at = |ms| base + Duration::from_millis(ms);
+    let places = places.iter().map(|&(ms, position)| (at(ms), Place { position, length, wait: 0 }));
+    Outcome { places: places.collect(), queued: true, ended: Some(at(end)), ..Outcome::default() }
+  }
+
+  /// A bot that entered the queue at `enter` ms from `base`, and got its session.
+  fn admitted(base: Instant, enter: u64) -> Outcome {
+    let place = Place { position: 0, length: 1, wait: 0 };
+    Outcome {
+      places: vec![(base + Duration::from_millis(enter), place)],
+      waited: Some(Duration::from_secs(1)),
+      joined: Some(base),
+      ..Outcome::default()
+    }
   }
 
   fn failed(fault: &str) -> Outcome {
@@ -328,9 +478,10 @@ mod tests {
     ];
     let counts = BTreeMap::from([(10, 90), (60, 9), (120, 1)]);
     let seen = Seen::from([(1, shard(1, &[(1, 1, 1), (2, 1, 2)]))]);
-    let report = Report::new(3, &outcomes, &counts, seen, Duration::from_secs(30));
+    let report =
+      Report::new(3, 0, Duration::ZERO, &outcomes, &counts, seen, Duration::from_secs(30));
     let lines = [
-      "load test: 3 bots, 2 played, 1 failed",
+      "load test: 3 bots, 2 played, 0 waiting, 1 failed",
       "  1 bots: the link fails",
       "place in the queue at login (place, 2 bots): mean 2.0, p50 2.0, p99 2.0, max 2.0",
       "wait from login to session (s, 2 bots): mean 2.0, p50 1.0, p99 3.0, max 3.0",
@@ -338,6 +489,7 @@ mod tests {
       "data down for one client (B/s, 2 bots): mean 5000.0, p50 4000.0, p99 6000.0, max 6000.0",
       "data up for one client (B/s, 2 bots): mean 1500.0, p50 1000.0, p99 2000.0, max 2000.0",
       "snapshots 200, refused by the world 2, largest 900 bytes",
+      "queue: 0 bots wait of 0 that must, the longest time without a place 0.0 s",
       "ticks of the writers in 30 s: 100, p50 2.75 ms, p99 15.25 ms, max 30.25 ms, 1 over 25 ms, 0 over 50 ms",
       "shard 1: 2 layers of cap 1 opened, 2 bots played, players on each layer: 1 1",
       "budget tick p99 at most 25 ms: ok",
@@ -346,17 +498,115 @@ mod tests {
       "budget data down, p99 at most 20000 B/s: ok",
       "budget data up, mean at most 2000 B/s: ok",
       "budget no datagram over 1100 bytes: ok",
-      "budget each bot played: over",
+      "budget each bot played or waits in the queue: over",
       "budget no layer over its cap: over",
       "budget each shard opened the layers that its players need: ok",
+      "budget the queue holds the bots that must wait: ok",
+      "budget the queue admits in the order of entry: ok",
+      "budget each waiting bot holds the place of its order of entry: ok",
+      "budget each waiting bot gets its place at least each 7 s: ok",
     ];
     assert_eq!(report.to_string(), lines.join("\n") + "\n");
-    let empty = Report::new(0, &[], &BTreeMap::new(), Seen::new(), Duration::from_secs(1));
+    let empty =
+      Report::new(0, 0, Duration::ZERO, &[], &BTreeMap::new(), Seen::new(), Duration::from_secs(1));
     let text = empty.to_string();
-    assert!(text.starts_with("load test: 0 bots, 0 played, 0 failed\n"), "{text}");
+    assert!(text.starts_with("load test: 0 bots, 0 played, 0 waiting, 0 failed\n"), "{text}");
     assert!(
       text.contains("budget tick p99 at most 25 ms: over\nbudget no tick of 50 ms or more: over\n")
     );
+  }
+
+  #[test]
+  fn the_queue_of_waiting_bots_is_ordered_placed_and_served_each_few_seconds() {
+    let base = Instant::now();
+    let none = Queue { waiting: 0, expected: 0, ordered: true, placed: true, gap: Duration::ZERO };
+    assert_eq!(Queue::new(0, &[admitted(base, 0), failed("no")]), none);
+    let outcomes = [
+      waiter(base, &[(300, 2), (5300, 1)], 2, 10_000),
+      admitted(base, 100),
+      waiter(base, &[(200, 1), (5200, 0)], 2, 10_000),
+      admitted(base, 0),
+    ];
+    let good = Queue::new(2, &outcomes);
+    let ok =
+      Queue { waiting: 2, expected: 2, ordered: true, placed: true, gap: Duration::from_secs(5) };
+    assert_eq!(good, ok);
+    let late = [waiter(base, &[(100, 0)], 1, 5000), admitted(base, 200)];
+    let lagging = Queue {
+      waiting: 1,
+      expected: 1,
+      ordered: false,
+      placed: true,
+      gap: Duration::from_millis(4900),
+    };
+    assert_eq!(Queue::new(1, &late), lagging);
+    let far = [waiter(base, &[(0, 3)], 1, 5000)];
+    assert!(!Queue::new(1, &far).placed);
+    let short = [waiter(base, &[(0, 0)], 2, 5000)];
+    assert!(!Queue::new(1, &short).placed);
+    let slow = [waiter(base, &[(0, 0)], 1, 9000)];
+    assert_eq!(Queue::new(1, &slow).gap, Duration::from_secs(9));
+  }
+
+  #[test]
+  fn the_report_says_which_rule_of_the_queue_a_run_breaks() {
+    let base = Instant::now();
+    let outcomes =
+      [admitted(base, 0), waiter(base, &[(100, 0)], 1, 9000), waiter(base, &[(200, 5)], 2, 9000)];
+    let text =
+      Report::new(3, 1, Duration::ZERO, &outcomes, &BTreeMap::new(), Seen::new(), Duration::ZERO)
+        .to_string();
+    assert!(text.starts_with("load test: 3 bots, 1 played, 2 waiting, 0 failed\n"), "{text}");
+    let lines = [
+      "queue: 2 bots wait of 1 that must, the longest time without a place 8.9 s",
+      "budget each bot played or waits in the queue: ok",
+      "budget the queue holds the bots that must wait: over",
+      "budget the queue admits in the order of entry: ok",
+      "budget each waiting bot holds the place of its order of entry: over",
+      "budget each waiting bot gets its place at least each 7 s: over",
+    ];
+    for line in lines {
+      assert!(text.contains(line), "{text} lacks {line}");
+    }
+  }
+
+  #[test]
+  fn the_report_says_how_long_the_bots_that_lost_their_link_took_to_play_again() {
+    let mut back = played(1, 1, 1, 1, 1);
+    back.recoveries = vec![Duration::from_secs(3), Duration::from_millis(4200)];
+    let mut away = played(1, 1, 1, 1, 1);
+    away.away = true;
+    away.relocated = 1;
+    let outcomes = [back, away, played(1, 1, 1, 1, 1)];
+    let text = |bound| {
+      Report::new(3, 0, bound, &outcomes, &BTreeMap::new(), Seen::new(), Duration::ZERO).to_string()
+    };
+    let none = text(Duration::ZERO);
+    assert!(!none.contains("recovery"), "{none}");
+    let report = text(Duration::from_secs(4));
+    let lines = [
+      "recovery: 2 links came back, the longest time without a snapshot 4.2 s, 1 bots still away, 1 on another layer",
+      "budget each bot that lost its link played again: over",
+      "budget each bot played again within 4 s: over",
+      "budget each bot played again on its layer: over",
+    ];
+    for line in lines {
+      assert!(report.contains(line), "{report} lacks {line}");
+    }
+    let mut slow = played(1, 1, 1, 1, 1);
+    slow.recoveries = vec![Duration::from_secs(4)];
+    let fine = [played(1, 1, 1, 1, 1), slow];
+    let ok = Report::new(
+      2,
+      0,
+      Duration::from_secs(4),
+      &fine,
+      &BTreeMap::new(),
+      Seen::new(),
+      Duration::ZERO,
+    )
+    .to_string();
+    assert!(ok.contains("budget each bot played again within 4 s: ok"), "{ok}");
   }
 
   #[test]
@@ -364,7 +614,8 @@ mod tests {
     let outcomes = [played(1, 2, 1, 1, 1), played(1, 2, 1, 1, 1)];
     let text = |shard| {
       let seen = Seen::from([(1, shard)]);
-      Report::new(2, &outcomes, &BTreeMap::new(), seen, Duration::from_secs(1)).to_string()
+      Report::new(2, 0, Duration::ZERO, &outcomes, &BTreeMap::new(), seen, Duration::from_secs(1))
+        .to_string()
     };
     let capped = "budget no layer over its cap: ";
     let opened = "budget each shard opened the layers that its players need: ";

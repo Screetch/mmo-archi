@@ -58,7 +58,8 @@ impl Peer {
 }
 
 /// A server on a local address, with a certificate that [`Fake::trust`] trusts. It serves one
-/// connection with its script, and holds the connection until the client closes it.
+/// connection with its script (two for [`Fake::start_twice`]), and holds the connection until the
+/// client closes it.
 pub struct Fake {
   /// The address of the server, as `host:port` with a host that its certificate holds.
   pub address: String,
@@ -77,7 +78,24 @@ impl Fake {
     S: FnOnce(Peer) -> F + Send + 'static,
     F: Future<Output = Peer> + Send + 'static,
   {
-    Self::serve(true, Box::new(move |peer| Box::pin(script(peer))))
+    Self::serve(true, vec![Box::new(move |peer| Box::pin(script(peer)))])
+  }
+
+  /// A server whose hello is done when each script starts. It serves a connection with `first`,
+  /// and then, once that connection is closed, another with `second`, as a gateway does for a
+  /// client that attaches again.
+  pub fn start_twice<S, F, T, G>(first: S, second: T) -> Self
+  where
+    S: FnOnce(Peer) -> F + Send + 'static,
+    F: Future<Output = Peer> + Send + 'static,
+    T: FnOnce(Peer) -> G + Send + 'static,
+    G: Future<Output = Peer> + Send + 'static,
+  {
+    let scripts: Vec<Script> = vec![
+      Box::new(move |peer| Box::pin(first(peer))),
+      Box::new(move |peer| Box::pin(second(peer))),
+    ];
+    Self::serve(true, scripts)
   }
 
   /// A server whose script starts at the stream of the client, with the hello of each side
@@ -87,10 +105,10 @@ impl Fake {
     S: FnOnce(Peer) -> F + Send + 'static,
     F: Future<Output = Peer> + Send + 'static,
   {
-    Self::serve(false, Box::new(move |peer| Box::pin(script(peer))))
+    Self::serve(false, vec![Box::new(move |peer| Box::pin(script(peer)))])
   }
 
-  fn serve(greeting: bool, script: Script) -> Self {
+  fn serve(greeting: bool, scripts: Vec<Script>) -> Self {
     let made = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("a key");
     let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
     let tls = ServerConfig::with_single_cert(vec![made.cert.der().clone()], key).expect("a server");
@@ -98,18 +116,20 @@ impl Fake {
     let port = endpoint.local_addr().expect("a bound address").port();
     let serving = endpoint.clone();
     let task = tokio::spawn(async move {
-      let Ok(connection) = serving.accept().await.expect("a client").await else {
-        return;
-      };
-      let (send, recv) = connection.accept_bi().await.expect("a stream");
-      let mut peer = Peer { connection, send, recv, frames: Frames::default() };
-      if greeting {
-        Hello::decode(&peer.payload().await).expect("a hello of this version");
-        let hello = Hello { build: 7 }.encode();
-        peer.write_raw(&frame(&hello).expect("a frame")).await;
+      for script in scripts {
+        let Ok(connection) = serving.accept().await.expect("a client").await else {
+          return;
+        };
+        let (send, recv) = connection.accept_bi().await.expect("a stream");
+        let mut peer = Peer { connection, send, recv, frames: Frames::default() };
+        if greeting {
+          Hello::decode(&peer.payload().await).expect("a hello of this version");
+          let hello = Hello { build: 7 }.encode();
+          peer.write_raw(&frame(&hello).expect("a frame")).await;
+        }
+        let peer = script(peer).await;
+        peer.connection.closed().await;
       }
-      let peer = script(peer).await;
-      peer.connection.closed().await;
     });
     Self {
       address: format!("localhost:{port}"),

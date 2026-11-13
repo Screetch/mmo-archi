@@ -704,7 +704,7 @@ the hosts of the servers.
 | 3 | 500, with crossings | 2 shards of cap 250, layers of cap 20, 2 zones | the shards and the placement | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and a bot that crosses enters the layer with the same number when that layer has room |
 | 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
 | 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, each bot left plays, and each move fell on a safe point of its bot |
-| 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 2 zones | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
+| 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
 
 No test runs more than 500 bots, on a machine or in CI. The stages prove the rules of scale with small caps, so a run
 of 500 bots or fewer opens many layers and more than one shard, and stage 2 proves the cap of a layer that the game
@@ -738,13 +738,35 @@ of section 6 for each shard, and `bots` gives the bots one login service for eac
 shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed link for 30 s,
 so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
 
-The workflow `load` (`.github/workflows/load.yml`) runs the stages 2 and 3 on a runner of CI, for each pull request
+The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4 and 6 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the
 pull request, then of the change, on the same runner. It fails when a bot of the change cannot play, when a layer of the
 change passes its cap, and when a shard of the change opens fewer layers than its players need, as
 `sh script/report.sh` reads them from the report of the bots. Its summary gives
 the report of the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the
 hottest functions of each, from `perf`.
+
+Stage 4 runs 300 bots on a shard of cap 200. `MMO_BOTS_WAITING=100` tells the bots that the queue must hold 100 of them
+when the measure ends, so the measure starts when the other 200 play. The report then prints a `queue:` line and 4
+lines of the budget: the queue holds the 100 bots, no bot that got a session entered the queue after a bot that waits,
+each waiting bot holds the place of its order of entry in a queue as long as the count of waiting bots, and each
+waiting bot got a place at least each 7 s, since the login service gives one each 5 s. `sh script/report.sh <report>
+300 1 100` fails when one of them is over.
+
+Stage 6 runs 200 bots once for each fault, on a new stack of the change, as `sh script/faults.sh <writer|gateway|keeper>
+200 <log>` says. The script waits until the directory counts 200 players, waits 10 s, and ends one process with `sh
+script/local.sh fault`, which sends KILL and starts the process again, as the process manager does.
+`MMO_BOTS_RECOVER_SECONDS` makes each bot that loses its link attach to the gateway again with its token. The report
+gives, for each of those bots, the time from its last snapshot to the first snapshot that shows its player again, and
+the layer that it came back to. The stop of the layer writer of the bots allows 10 s and the same layer, and the stop of
+the gateway allows 5 s. For the stop of the keeper, which `fault` holds for 60 s, no bot may lose its link for more than
+1 s, and the script reads the version of each character from `sh script/local.sh versions` before the stop and 25 s
+after the keeper came back: the version of each character that played must have grown, so no save is lost. The stage
+runs one zone, since the recovery of a layer does not need a second one.
+
+Stage 5 runs nowhere. It needs the drain and the move of section 6, and nothing calls the drain on main yet. Its close
+half, a layer that holds no player for 30 s closes and its writer is idle again, is the test of `mmo-zone` that proves
+it, and a run of bots would add nothing to that proof. Stage 5 waits for the drain.
 
 ### The first local results
 

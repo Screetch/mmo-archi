@@ -26,11 +26,20 @@
 //! - `DATABASE_URL` and `REDIS_URL`: the database and the Redis of the game.
 //! - `MMO_BOTS_ZONE` and `MMO_BOTS_COUNT`: the zone where the characters stand, which the table
 //!   `zones` holds, and the count of bots, which is at most 500, since no test runs more.
+//! - `MMO_BOTS_WAITING`: how many of the bots the queue must hold when the measure ends, as `100`.
+//!   The measure waits for the other bots to play, and the report fails when another count of bots
+//!   waits, when a bot with a session entered the queue after one that waits, when a waiting bot
+//!   holds no place of its order of entry, or when it gets no place for more than 7 s. The default
+//!   is 0.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.
 //! - `MMO_BOTS_JOIN_SECONDS`: the time that the measure waits for each bot to play, as `60`. A
 //!   bot that waits in the queue for longer does not count in the measure of the ticks.
+//! - `MMO_BOTS_RECOVER_SECONDS`: when it is not 0, a bot that loses its link after it played
+//!   attaches to the gateway again with its token, as a client does, and the report fails when
+//!   a bot is not back in play within that time, counted from its last snapshot, when a bot is
+//!   still away at the end, or when a bot comes back on another layer. The default is 0.
 //! - `MMO_BOTS_PLAY_SECONDS`: the time of the measure, as `30`.
 //! - `MMO_BOTS_RUN`: 1 to 6 letters from a to z in the name of each account, as `abc`, so a run
 //!   makes new accounts. The default comes from the clock.
@@ -141,7 +150,8 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let mut redis = client.get_multiplexed_async_connection().await?;
   let gateway = config.gateway.clone();
   let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
-  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready });
+  let reconnect = !config.recover.is_zero();
+  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready, reconnect });
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
   for bot in bots {
@@ -152,7 +162,7 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
       bot::run(&shared, &bot, stopped).await
     });
   }
-  settle(&shared, tasks.len(), config.join).await;
+  settle(&shared, tasks.len().saturating_sub(config.waiting as usize), config.join).await;
   let before = ticks::read(&mut redis, config.shards(), config.zone).await;
   let mut opened = Seen::new();
   let looked = look_during(&mut redis, config, &mut opened).await;
@@ -167,6 +177,8 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   looked?;
   Ok(Report::new(
     usize::try_from(config.bots).unwrap_or(usize::MAX),
+    usize::try_from(config.waiting).unwrap_or(usize::MAX),
+    config.recover,
     &outcomes,
     &counts,
     opened,
@@ -247,7 +259,7 @@ mod tests {
     let read = |name: &str| one.iter().rev().find(|(key, _)| *key == name).map(|(_, v)| v.clone());
     let report = measure(&Config::read(&read).expect("a config")).await.expect("a report");
     let text = report.to_string();
-    assert!(text.starts_with("load test: 1 bots, 1 played, 0 failed\n"), "{text}");
+    assert!(text.starts_with("load test: 1 bots, 1 played, 0 waiting, 0 failed\n"), "{text}");
     gateway.end().await;
     login.end().await;
     let none = vars(&path, url.as_str(), &redis.url(), 0, &[]);
