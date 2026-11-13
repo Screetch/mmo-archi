@@ -134,7 +134,7 @@ impl Claim {
   }
 
   /// The lease of `layer` in the directory of the shard of this writer, which a placement gave.
-  async fn serving(&self, layer: Layer) -> Result<Serving, Error> {
+  pub(crate) async fn serving(&self, layer: Layer) -> Result<Serving, Error> {
     let shard = self.held.shard;
     let lease = (Directory { shard }).serving(&mut self.redis.clone(), layer).await?;
     lease.ok_or(Error::Unserved(layer))

@@ -16,12 +16,13 @@ use quinn::{
   Connection, ConnectionError, Endpoint, Incoming, ReadError, RecvStream, VarInt, WriteError,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
 use tokio::time;
 
 use crate::Error;
 use crate::claim::{self, Claim, Entry};
 use crate::keeper::{self, Keeper};
-use crate::remote::{self, Dial};
+use crate::remote::{self, Dial, Remote};
 use crate::zone::{Crossing, Gateway, Leaver, Refusal, Zone};
 
 /// The time of one tick: the zone runs 20 ticks each second, as the step of `mmo-collide` does.
@@ -94,7 +95,7 @@ enum Refused {
   Zone(#[from] Refusal),
 }
 
-/// Why a hand-over to the next zone does not end at once.
+/// Why a message to the writer of a layer across a border does not end at once.
 #[derive(Debug, thiserror::Error)]
 enum Handover {
   #[error(transparent)]
@@ -201,6 +202,17 @@ struct Writer {
   owed: BTreeMap<i64, Leaver>,
   /// The ticks since the layer last held a player or a save that the store did not acknowledge.
   empty: u32,
+  /// The task that tells the layer across each border, by its zone, which entities of this layer
+  /// stand near that border.
+  edges: BTreeMap<i32, Edge>,
+}
+
+/// The task that tells the layer across a border what stands near it.
+struct Edge {
+  /// The entities to tell, which replace those of the last message that the task did not send yet.
+  to: watch::Sender<Vec<Entity>>,
+  /// True when the last list that the task got held an entity.
+  shown: bool,
 }
 
 impl Writer {
@@ -224,6 +236,7 @@ impl Writer {
       timing,
       owed,
       empty,
+      edges: BTreeMap::new(),
     };
     // The first lease of the epoch of the writer opens the layer.
     writer.write(Entry::Layer { players: 0, taken: Vec::new() });
@@ -246,7 +259,7 @@ impl Writer {
           self.tell(gateway, link, ToClient::Full { zone });
         }
       }
-      Event::Message(gateway, message) => self.message(gateway, &message),
+      Event::Message(gateway, message) => self.message(gateway, message),
       Event::Intents(gateway, Relayed { link, message }) => {
         self.zone.intents(gateway, link, &message);
       }
@@ -282,8 +295,8 @@ impl Writer {
     });
   }
 
-  fn message(&mut self, gateway: Gateway, message: &ToZone) {
-    match *message {
+  fn message(&mut self, gateway: Gateway, message: ToZone) {
+    match message {
       ToZone::Join { link, account, character } => self.load(gateway, link, account, character),
       ToZone::Client(Relayed { link, message: FromClient::Logout }) => {
         self.zone.logout(gateway, link);
@@ -294,6 +307,10 @@ impl Writer {
       ToZone::Leave { link } => self.zone.leave(gateway, link),
       ToZone::Neighbour(ToNeighbour::Transfer { account, state, version }) => {
         self.receive(gateway, account, state, version);
+      }
+      ToZone::Neighbour(ToNeighbour::Edge { zone, entities }) => {
+        self.zone.seen(zone, entities);
+        self.answer(gateway, &FromNeighbour::Seen);
       }
     }
   }
@@ -338,6 +355,22 @@ impl Writer {
       };
       drop(events.send(Event::Crossed { character, to: layer }));
     });
+  }
+
+  /// Tells the layer across a border which entities of this layer stand near it, in a task, so the
+  /// tick goes on. A border with no entity near it, and none the last time, tells nothing.
+  fn edge(&mut self, layer: Layer, entities: Vec<Entity>) {
+    let edge = self.edges.entry(layer.zone.0).or_insert_with(|| {
+      let (to, heard) = watch::channel(Vec::new());
+      let (claim, dial, from) = (self.claim.clone(), self.dial.clone(), self.zone.zone());
+      tokio::spawn(report(claim, dial, from, layer, heard));
+      Edge { to, shown: false }
+    });
+    if !entities.is_empty() || edge.shown {
+      edge.shown = !entities.is_empty();
+      // The send fails only when the task ended, and it ends with the layer writer.
+      drop(edge.to.send(entities));
+    }
   }
 
   /// Writes `bytes` on the stream of the peer on the link `gateway`, when that link stands.
@@ -488,6 +521,9 @@ impl Writer {
     for crossing in self.zone.crossings() {
       self.hand_over(crossing);
     }
+    for (layer, entities) in self.zone.edges() {
+      self.edge(layer, entities);
+    }
     let mut lost = Vec::new();
     for (gateway, peer) in &self.gateways {
       for (_, snapshot) in snapshots.iter().filter(|(via, _)| via == gateway) {
@@ -531,8 +567,45 @@ async fn offer(claim: &Claim, dial: &Dial, crossing: &Crossing) -> Result<Option
   let mut remote = dial.to(serving.address, "neighbour");
   Ok(match remote.ask(&encode(&message), decode::<FromNeighbour>).await? {
     FromNeighbour::Accepted { .. } => Some(layer),
-    FromNeighbour::Full { .. } => None,
+    FromNeighbour::Full { .. } | FromNeighbour::Seen => None,
   })
+}
+
+/// Tells the writer of `layer`, which is across a border of the zone `from`, the last entities that
+/// stand near that border, until the layer writer stops. It tells the last list that came while it
+/// waited for the writer. When no writer serves the layer, or the writer fails, it waits 1 s.
+async fn report(
+  claim: Claim,
+  dial: Dial,
+  from: ZoneId,
+  layer: Layer,
+  mut heard: watch::Receiver<Vec<Entity>>,
+) {
+  let mut remote = None;
+  while heard.changed().await.is_ok() {
+    let entities = heard.borrow_and_update().clone();
+    let message = encode(&ToZone::Neighbour(ToNeighbour::Edge { zone: from, entities }));
+    if tell(&claim, &dial, &mut remote, layer, &message).await.is_err() {
+      remote = None;
+      time::sleep(RETRY).await;
+    }
+  }
+}
+
+/// Sends `message` to the writer of `layer` on `remote`, which it opens when it holds none.
+async fn tell(
+  claim: &Claim,
+  dial: &Dial,
+  remote: &mut Option<Remote>,
+  layer: Layer,
+  message: &[u8],
+) -> Result<(), Handover> {
+  let link = match remote {
+    Some(link) => link,
+    None => remote.insert(dial.to(claim.serving(layer).await?.address, "neighbour")),
+  };
+  link.ask(message, decode::<FromNeighbour>).await?;
+  Ok(())
 }
 
 /// Sends each batch to the keeper in turn, and tells the layer writer its result, until the writer
@@ -1372,6 +1445,57 @@ mod tests {
     let start = State { position, yaw: Angle(0), hit_points: 100 };
     let enters = Position { x: 10_000, y: 0, z: 0 };
     crosses(pool, start, Angle(16384), RIDGE_LAYER, enters).await;
+  }
+
+  /// The place of `who` in the first snapshot of the link 1 of `peer` that holds him, within 200
+  /// snapshots.
+  async fn sight(peer: &Peer, who: CharacterId) -> Position {
+    let mut found = None;
+    for _ in 0..200 {
+      let snapshot = within(peer.snapshot(Link(1))).await;
+      found = snapshot.entered.iter().find(|one| one.id == who).map(|one| one.position);
+      if found.is_some() {
+        break;
+      }
+    }
+    found.expect("the other player in view")
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn two_players_near_the_border_of_two_zones_see_each_other_across_it(pool: PgPool) {
+    let near =
+      |x| State { position: Position { x, y: 0, z: 10_000 }, yaw: Angle(0), hit_points: 100 };
+    let meadow = Meadow::at(pool, near(SIDE_CM - 300)).await;
+    let cael = NewCharacter {
+      account: meadow.account,
+      shard: SHARD,
+      name: "Cael",
+      zone: FOREST,
+      state: near(300),
+    };
+    let cael = meadow.store.create_character(&cael).await.expect("Cael");
+    let (a_endpoint, a) = meadow.claimed_for(LAYER, dialable).await;
+    let (b_endpoint, b) = meadow.claimed_for(FOREST_LAYER, dialable).await;
+    let at = |endpoint: &Endpoint| endpoint.local_addr().expect("an address");
+    let (a_at, b_at) = (at(&a_endpoint), at(&b_endpoint));
+    let writers = [tokio::spawn(serve(a_endpoint, a)), tokio::spawn(serve(b_endpoint, b))];
+    served(&meadow.redis, "writer:1:1:1").await;
+    served(&meadow.redis, "writer:1:2:1").await;
+    let gateways = meadow.world.gateway(true);
+    let mut one = Peer::link(&gateways, a_at).await;
+    one.greet().await;
+    let mut two = Peer::link(&gateways, b_at).await;
+    two.greet().await;
+    let account = meadow.account;
+    one.tell(&ToZone::Join { link: Link(1), account, character: meadow.character }).await;
+    two.tell(&ToZone::Join { link: Link(1), account, character: cael }).await;
+    let in_meadow = Position { x: SIDE_CM + 300, y: 0, z: 10_000 };
+    assert_eq!(sight(&one, cael).await, in_meadow);
+    let in_forest = Position { x: -300, y: 0, z: 10_000 };
+    assert_eq!(sight(&two, meadow.character).await, in_forest);
+    for writer in writers {
+      writer.abort();
+    }
   }
 
   #[sqlx::test(migrations = false)]

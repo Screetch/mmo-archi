@@ -314,6 +314,17 @@ pub enum ToNeighbour {
     /// The version of the character, which the target adds 1 to when it saves the character.
     version: i64,
   },
+  /// Gives the entities that stand near the border that the two zones share, each tick. The writer
+  /// that sends it is a layer of `zone`, and the target has the same layer number. The target
+  /// shows the entities, and replaces those of the last message of `zone`, so an empty list takes
+  /// them all away. It answers [`FromNeighbour::Seen`].
+  Edge {
+    /// The zone of the sender.
+    zone: ZoneId,
+    /// The entities of the sender within 48 m of the border, in the coordinates of the target,
+    /// which put them outside its square.
+    entities: Vec<Entity>,
+  },
 }
 
 /// The answer of the writer of a target layer to a [`ToNeighbour`], on the same stream.
@@ -330,6 +341,8 @@ pub enum FromNeighbour {
     /// The character that the target refused.
     character: CharacterId,
   },
+  /// The target took the entities of a [`ToNeighbour::Edge`].
+  Seen,
 }
 
 /// The state of a character that a save keeps, as the layer writer holds it.
@@ -580,11 +593,17 @@ mod tests {
         state: entity(42),
         version: 17,
       }),
+      ToZone::Neighbour(ToNeighbour::Edge {
+        zone: ZoneId(3),
+        entities: vec![entity(42), entity(43)],
+      }),
+      ToZone::Neighbour(ToNeighbour::Edge { zone: ZoneId(3), entities: vec![] }),
     ]);
     round_trip(&[Relayed { link: LINK, message: ToClient::Moved { zone: ZoneId(3), layer: 2 } }]);
     round_trip(&[
       FromNeighbour::Accepted { character: CharacterId(42) },
       FromNeighbour::Full { character: CharacterId(42) },
+      FromNeighbour::Seen,
     ]);
   }
 
