@@ -90,7 +90,7 @@ fn terrain() -> Terrain {
 
 impl Walk {
   /// Takes a snapshot. It gives true when the snapshot shows the player. A snapshot that starts
-  /// from one that the world does not hold empties the world, so the zone sends a full snapshot.
+  /// from one that the world does not hold empties the world, so the writer sends a full snapshot.
   fn hear(&mut self, snapshot: &Snapshot) -> Result<bool, Gap> {
     self.world.apply(snapshot).inspect_err(|gap| {
       if matches!(gap, Gap::Base { .. }) {
@@ -183,7 +183,7 @@ async fn play(
 
 /// Runs one bot until `stop` changes, and gives what it measured. A fault ends the bot, and the
 /// outcome holds it. A bot leaves as a player who closes the game does: it closes its link, and the
-/// zone writer keeps its player for 30 s.
+/// layer writer keeps its player for 30 s.
 pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>) -> Outcome {
   let mut out = Outcome { shard: bot.shard, ..Outcome::default() };
   let ended = play(shared, bot, stop, &mut out).await;

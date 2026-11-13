@@ -2,7 +2,7 @@
 //! Redis, finds the zone of its player in the directory of zones, and relays each message between
 //! the client and the writer of that zone.
 //!
-//! It keeps no state of a player. It holds only its open connections, and a link to each zone
+//! It keeps no state of a player. It holds only its open connections, and a link to each layer
 //! writer that the directory names, which it can drop at any time and open again from Redis. So
 //! any gateway serves any client, and a gateway that stops loses nothing: its clients attach to
 //! another gateway with the same session. It reads these variables of its environment:
@@ -12,7 +12,7 @@
 //!   clients trust, and of its private key.
 //! - `GATEWAY_LINK_CERTIFICATE` and `GATEWAY_LINK_KEY`: the PEM files of the certificate with
 //!   which the gateway shows each layer writer that the operator runs it, and of its private key.
-//! - `GATEWAY_AUTHORITY`: the PEM file of the certificates that sign the certificate of each zone
+//! - `GATEWAY_AUTHORITY`: the PEM file of the certificates that sign the certificate of each layer
 //!   writer. The gateway relays no intent to a peer whose certificate they do not sign.
 //! - `REDIS_URL`: the Redis of the world, as `redis://redis:6379`.
 //!
@@ -437,7 +437,7 @@ mod tests {
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
   #[tokio::test]
-  async fn each_fault_of_a_zone_writer_ends_its_link_and_its_clients() {
+  async fn each_fault_of_a_layer_writer_ends_its_link_and_its_clients() {
     let world = World::new().await;
     let zones = [world.zone(1).await, world.zone(2).await, world.zone(3).await];
     let address = world.gateway().await;

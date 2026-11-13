@@ -1,4 +1,4 @@
-//! The link of the zone writer to the keeper, the one writer of the game data: the writer claims
+//! The link of the layer writer to the keeper, the one writer of the game data: the writer claims
 //! the epoch of its layer on it, and sends its save batches on it.
 
 use std::io;
@@ -15,28 +15,28 @@ use tokio::net::lookup_host;
 
 use crate::link::BUILD;
 
-/// Why the keeper takes no message of the zone writer.
+/// Why the keeper takes no message of the layer writer.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-  #[error("the zone writer cannot find the keeper at {address}: {source}")]
+  #[error("the layer writer cannot find the keeper at {address}: {source}")]
   Resolve { address: String, source: io::Error },
-  #[error("the zone writer finds no address of the keeper at {0} that its endpoint can dial")]
+  #[error("the layer writer finds no address of the keeper at {0} that its endpoint can dial")]
   Unresolved(String),
-  #[error("the zone writer cannot dial the keeper: {0}")]
+  #[error("the layer writer cannot dial the keeper: {0}")]
   Dial(#[from] ConnectError),
   #[error("the link to the keeper fails: {0}")]
   Link(#[from] ConnectionError),
   #[error("the stream of the keeper fails: {0}")]
   Read(#[from] ReadError),
-  #[error("the zone writer cannot write to the keeper: {0}")]
+  #[error("the layer writer cannot write to the keeper: {0}")]
   Write(#[from] WriteError),
   #[error("the keeper ended its stream")]
   Ended,
   #[error(transparent)]
   Codec(#[from] mmo_protocol::Error),
-  #[error("the keeper gives {0:?}, which does not answer the message of the zone writer")]
+  #[error("the keeper gives {0:?}, which does not answer the message of the layer writer")]
   Answer(FromKeeper),
-  #[error("the keeper holds no zone of the id that the zone writer claims")]
+  #[error("the keeper holds no zone of the layer that the layer writer claims")]
   NoZone,
   #[error("the keeper holds the epoch {} of the layer, which is newer than the epoch of the batch", held.0)]
   Stale { held: Epoch },
@@ -54,7 +54,7 @@ impl From<KeeperRefusal> for Error {
   }
 }
 
-/// The link of the zone writer to the keeper at `address`, as `host:port`. It dials the keeper at
+/// The link of the layer writer to the keeper at `address`, as `host:port`. It dials the keeper at
 /// the first message, and again at the next message after a fault ends the link, so a keeper that
 /// stops and comes back takes the next batch.
 pub(crate) struct Keeper {
@@ -210,7 +210,7 @@ mod tests {
     }
   }
 
-  /// A writer that dials `address` with the certificate of the zone writer of `world`.
+  /// A writer that dials `address` with the certificate of the layer writer of `world`.
   fn dialing(world: &World, address: &str) -> Keeper {
     let mut vars = world.vars("127.0.0.1:0", "postgres://zone@localhost/game", "nope");
     vars.insert(0, ("ZONE_KEEPER", address.to_owned()));
@@ -265,9 +265,9 @@ mod tests {
       claims,
       [
         Err("the keeper cannot write in PostgreSQL now".to_owned()),
-        Err("the keeper holds no zone of the id that the zone writer claims".to_owned()),
+        Err("the keeper holds no zone of the layer that the layer writer claims".to_owned()),
         Err(
-          "the keeper gives Saved { written: 3 }, which does not answer the message of the zone \
+          "the keeper gives Saved { written: 3 }, which does not answer the message of the layer \
            writer"
             .to_owned()
         ),
@@ -280,7 +280,7 @@ mod tests {
         Err(stale.to_owned()),
         Err(
           "the keeper gives Claimed { epoch: Epoch(2) }, which does not answer the message of the \
-           zone writer"
+           layer writer"
             .to_owned()
         ),
         Ok(3),
@@ -356,7 +356,8 @@ mod tests {
         Err("the bytes are not a message of this version of the protocol".to_owned()),
         Err("the stream of the keeper fails: stream reset by peer: error 7".to_owned()),
         Err(
-          "the zone writer cannot write to the keeper: sending stopped by peer: error 7".to_owned()
+          "the layer writer cannot write to the keeper: sending stopped by peer: error 7"
+            .to_owned()
         ),
       ]
     );
@@ -383,11 +384,11 @@ mod tests {
             .to_owned()
         ),
         Err(
-          "the zone writer cannot dial the keeper: invalid remote address: 127.0.0.1:0".to_owned()
+          "the layer writer cannot dial the keeper: invalid remote address: 127.0.0.1:0".to_owned()
         ),
-        Err("the zone writer cannot find the keeper at nope: invalid socket address".to_owned()),
+        Err("the layer writer cannot find the keeper at nope: invalid socket address".to_owned()),
         Err(
-          "the zone writer finds no address of the keeper at [::1]:4433 that its endpoint can \
+          "the layer writer finds no address of the keeper at [::1]:4433 that its endpoint can \
            dial"
             .to_owned()
         ),

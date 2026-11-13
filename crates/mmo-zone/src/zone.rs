@@ -19,7 +19,7 @@ const KEPT: u32 = 30 * TICKS_PER_SECOND;
 /// The zone takes an input whose tick is at most this many ticks after its present tick.
 const REACH: u32 = 4;
 
-/// The number that the zone writer gives to the link of a gateway, which relays the links of its
+/// The number that the layer writer gives to the link of a gateway, which relays the links of its
 /// clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Gateway(pub(crate) u64);

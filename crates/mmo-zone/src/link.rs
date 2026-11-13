@@ -1,4 +1,4 @@
-//! The links of the gateways, which relay the messages of the players to the zone writer, and its
+//! The links of the gateways, which relay the messages of the players to the layer writer, and its
 //! snapshots to the players.
 
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ const SAVE_EVERY: u32 = 10 * TICKS_PER_SECOND;
 /// player of a closed link.
 const EMPTY_FOR: u32 = 30 * TICKS_PER_SECOND;
 
-/// The build in the hello of the zone writer: the version of the workspace, as 1002003 for 1.2.3.
+/// The build in the hello of the layer writer: the version of the workspace, as 1002003 for 1.2.3.
 pub(crate) const BUILD: u32 = {
   let parts = [
     env!("CARGO_PKG_VERSION_MAJOR"),
@@ -56,18 +56,18 @@ pub(crate) const BUILD: u32 = {
   build
 };
 
-/// The code with which the zone writer closes the link of a gateway after a fault. The reason of
+/// The code with which the layer writer closes the link of a gateway after a fault. The reason of
 /// the close holds the text of the fault.
 const FAULT: VarInt = VarInt::from_u32(1);
 
-/// Why the zone writer ends the link of a gateway.
+/// Why the layer writer ends the link of a gateway.
 #[derive(Debug, thiserror::Error)]
 enum Fault {
   #[error("the link fails: {0}")]
   Link(#[from] ConnectionError),
   #[error("the stream of the gateway fails: {0}")]
   Read(#[from] ReadError),
-  #[error("the zone writer cannot write to the gateway: {0}")]
+  #[error("the layer writer cannot write to the gateway: {0}")]
   Write(#[from] WriteError),
   #[error("the gateway ended its stream")]
   Ended,
@@ -75,7 +75,7 @@ enum Fault {
   Codec(#[from] mmo_protocol::Error),
 }
 
-/// Why the zone writer takes no player for a [`ToZone::Join`].
+/// Why the layer writer takes no player for a [`ToZone::Join`].
 #[derive(Debug, thiserror::Error)]
 enum Refused {
   #[error("the database cannot load the character: {0}")]
@@ -88,7 +88,7 @@ enum Refused {
   Zone(#[from] Refusal),
 }
 
-/// What the tasks of the links tell the zone writer.
+/// What the tasks of the links tell the layer writer.
 enum Event {
   Opened(Gateway, Connection),
   Message(Gateway, ToZone),
@@ -109,8 +109,9 @@ enum Event {
   Released(Result<bool, claim::Error>),
 }
 
-/// What a zone writer holds once it claimed its zone: the zone, the store that it reads the last
-/// saves from, its claim in Redis, and its link to the keeper, which writes its saves.
+/// What a layer writer holds once it claimed its layer: the state of the layer, the store that it
+/// reads the last saves from, its claim in Redis, and its link to the keeper, which writes its
+/// saves.
 pub(crate) struct Claimed {
   pub(crate) zone: Zone,
   pub(crate) store: Store,
@@ -177,7 +178,7 @@ impl Writer {
     writer
   }
 
-  /// Takes an event, and gives the fault that stops the zone writer when the event brings one.
+  /// Takes an event, and gives the fault that stops the layer writer when the event brings one.
   fn hear(&mut self, event: Event) -> Option<Error> {
     match event {
       Event::Opened(gateway, connection) => {
@@ -189,19 +190,19 @@ impl Writer {
       }
       Event::Loaded { gateway, link, account, found } => {
         if let Err(why) = self.loaded(gateway, link, account, found) {
-          eprintln!("the zone writer takes no player on the link {}: {why}", link.0);
+          eprintln!("the layer writer takes no player on the link {}: {why}", link.0);
         }
       }
       Event::Saved { batch, result } => return self.saved(&batch, result),
       Event::Entries(Err(error @ claim::Error::Superseded { .. })) => return Some(error.into()),
-      Event::Entries(Err(error)) => eprintln!("the zone writer cannot write in Redis: {error}"),
+      Event::Entries(Err(error)) => eprintln!("the layer writer cannot write in Redis: {error}"),
       Event::Entries(Ok(())) => {}
       Event::Closed(gateway) => self.close(gateway),
       Event::Released(Ok(true)) => return Some(Error::Released),
       Event::Released(answer) => {
         // A place or a player came, or Redis failed: the layer runs on, and tries again later.
         if let Err(error) = answer {
-          eprintln!("the zone writer cannot close its layer: {error}");
+          eprintln!("the layer writer cannot close its layer: {error}");
         }
         self.empty = 0;
       }
@@ -214,7 +215,7 @@ impl Writer {
     let claim = self.claim.clone();
     let events = self.events.clone();
     tokio::spawn(async move {
-      // The send fails only when the zone writer stopped, and then no one needs the result.
+      // The send fails only when the layer writer stopped, and then no one needs the result.
       drop(events.send(Event::Released(claim.close().await)));
     });
   }
@@ -226,7 +227,7 @@ impl Writer {
         self.zone.logout(gateway, link);
         self.leave();
       }
-      // The zone writer sends no chat yet, so a line goes nowhere.
+      // The layer writer sends no chat yet, so a line goes nowhere.
       ToZone::Client(Relayed { message: FromClient::Say { .. }, .. }) => {}
       ToZone::Leave { link } => self.zone.leave(gateway, link),
     }
@@ -238,7 +239,7 @@ impl Writer {
     let events = self.events.clone();
     tokio::spawn(async move {
       let found = store.load(&[character]).await;
-      // The send fails only when the zone writer stopped, and then no player waits for the load.
+      // The send fails only when the layer writer stopped, and then no player waits for the load.
       drop(events.send(Event::Loaded { gateway, link, account, found }));
     });
   }
@@ -282,7 +283,7 @@ impl Writer {
     let claim = self.claim.clone();
     let events = self.events.clone();
     tokio::spawn(async move {
-      // The send fails only when the zone writer stopped, and then no one needs the result.
+      // The send fails only when the layer writer stopped, and then no one needs the result.
       drop(events.send(Event::Entries(claim.write(entry).await)));
     });
   }
@@ -290,7 +291,7 @@ impl Writer {
   /// Sends `saves` to the keeper in batches of `SAVES` at most, so each batch fits in one frame.
   fn send(&self, saves: &[Save]) {
     for saves in saves.chunks(SAVES) {
-      // The send fails only when the zone writer stopped, and then no one needs the batch.
+      // The send fails only when the layer writer stopped, and then no one needs the batch.
       drop(self.batches.send(self.claim.batch(saves.to_vec())));
     }
   }
@@ -313,8 +314,8 @@ impl Writer {
     self.send(&saves);
   }
 
-  /// The keeper takes a batch, or refuses it. A newer writer of the zone ends this one. Any other
-  /// refusal, and a fault of the link to the keeper, change nothing, so the zone keeps the last
+  /// The keeper takes a batch, or refuses it. A newer writer of the layer ends this one. Any other
+  /// refusal, and a fault of the link to the keeper, change nothing, so the writer keeps the last
   /// state of each player that the keeper does not hold, and sends it again at the next save. A
   /// player that left keeps its presence until then.
   fn saved(&mut self, batch: &Batch, result: Result<u64, keeper::Error>) -> Option<Error> {
@@ -332,7 +333,7 @@ impl Writer {
       }
       Err(error) => {
         eprintln!(
-          "the keeper takes no batch of {} saves, and the zone writer sends them again: {error}",
+          "the keeper takes no batch of {} saves, and the layer writer sends them again: {error}",
           batch.saves.len()
         );
         None
@@ -388,7 +389,7 @@ impl Writer {
   }
 }
 
-/// Sends each batch to the keeper in turn, and tells the zone writer its result, until the writer
+/// Sends each batch to the keeper in turn, and tells the layer writer its result, until the writer
 /// stops.
 async fn deliver(
   mut keeper: Keeper,
@@ -397,16 +398,16 @@ async fn deliver(
 ) {
   while let Some(batch) = batches.recv().await {
     let result = keeper.save(batch.clone()).await;
-    // The send fails only when the zone writer stopped, and then no one needs the result.
+    // The send fails only when the layer writer stopped, and then no one needs the result.
     drop(events.send(Event::Saved { batch, result }));
   }
 }
 
-/// Relays the messages of the link of a gateway to the zone writer until a fault ends it.
+/// Relays the messages of the link of a gateway to the layer writer until a fault ends it.
 async fn gateway(incoming: Incoming, gateway: Gateway, events: UnboundedSender<Event>) {
   let fault = match incoming.await {
     Ok(connection) => {
-      // Each send of this task fails only when the zone writer stopped, and then no one needs it.
+      // Each send of this task fails only when the layer writer stopped, and then no one needs it.
       drop(events.send(Event::Opened(gateway, connection.clone())));
       let Err(fault) = relay(&connection, gateway, &events).await;
       connection.close(FAULT, fault.to_string().as_bytes());
@@ -524,7 +525,7 @@ mod tests {
       Self { world, redis: Redis::start().await, keeper, store, account, character }
     }
 
-    /// The endpoint of a zone writer, and what it holds once it claimed the zone from the keeper.
+    /// The endpoint of a layer writer, and what it holds once it claimed a layer from the keeper.
     async fn claimed(&self) -> (Endpoint, Claimed) {
       let mut vars = self.world.vars("127.0.0.1:0", "postgres://zone@localhost/game", "nope");
       vars.insert(0, ("ZONE_KEEPER", self.keeper.address()));
@@ -664,7 +665,7 @@ mod tests {
         reason(malformed),
         reason("a relayed datagram starts with a link of 8 bytes, and this one holds 1 bytes"),
         reason(malformed),
-        reason("the zone writer cannot write to the gateway: sending stopped by peer: error 7"),
+        reason("the layer writer cannot write to the gateway: sending stopped by peer: error 7"),
         reason("the stream of the gateway fails: stream reset by peer: error 7"),
         reason("the gateway ended its stream"),
       ]
@@ -864,7 +865,7 @@ mod tests {
     writer.write(Entry::Absent(Vec::new()));
   }
 
-  /// Doc lines 105-110: the keeper stops and comes back, and each zone writer sends it again the
+  /// Doc lines 105-110: the keeper stops and comes back, and each layer writer sends it again the
   /// last state of each player that it did not save.
   #[sqlx::test(migrations = false)]
   async fn a_keeper_that_stops_and_comes_back_loses_no_save(pool: PgPool) {

@@ -116,7 +116,7 @@ pub struct Attach {
   pub session: Token,
 }
 
-/// A message of a client on stream 0, after its [`Attach`], which the gateway relays to the zone
+/// A message of a client on stream 0, after its [`Attach`], which the gateway relays to the layer
 /// writer of the player.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum FromClient {
@@ -127,11 +127,11 @@ pub enum FromClient {
     /// The line.
     text: String,
   },
-  /// Ends the play of the character. The zone writer saves it before it removes its presence.
+  /// Ends the play of the character. The layer writer saves it before it removes its presence.
   Logout,
 }
 
-/// A message to a client on stream 0, from its gateway or from the zone writer of its player.
+/// A message to a client on stream 0, from its gateway or from the layer writer of its player.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToClient {
   /// The gateway finds no session for the token of [`Attach`], so the client logs in again.
@@ -171,11 +171,11 @@ pub struct Intents {
   pub layer: u32,
   /// The tick of the last snapshot that the client received, or `None` before the first.
   pub ack: Option<Tick>,
-  /// The last 3 inputs of the player, so the zone writer recovers the inputs of a lost datagram.
+  /// The last 3 inputs of the player, so the layer writer recovers the inputs of a lost datagram.
   pub inputs: [Input; 3],
 }
 
-/// The intent of a player for one tick. It never carries a position or a speed: the zone writer
+/// The intent of a player for one tick. It never carries a position or a speed: the layer writer
 /// reads the speed from its own table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Input {
@@ -187,7 +187,7 @@ pub struct Input {
   pub view: Angle,
 }
 
-/// The datagram of a zone writer to a client, each tick: the entities that the player sees.
+/// The datagram of a layer writer to a client, each tick: the entities that the player sees.
 ///
 /// With no base, the snapshot is full: `entered` holds each visible entity, and `changed` and
 /// `left` are empty. With a base, it is a delta against the snapshot of that tick, which the
@@ -264,7 +264,7 @@ pub struct Change {
   pub hit_points: Option<i32>,
 }
 
-/// A message of a gateway to a zone writer, on a stream.
+/// A message of a gateway to a layer writer, on a stream.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToZone {
   /// A client attached on a link with the session of a character whose zone is this zone.
@@ -278,14 +278,14 @@ pub enum ToZone {
   },
   /// A message of the client of a link.
   Client(Relayed<FromClient>),
-  /// The connection of a link closed. The zone writer keeps the player in the world for 30 s.
+  /// The connection of a link closed. The layer writer keeps the player in the world for 30 s.
   Leave {
     /// The link that closed.
     link: Link,
   },
 }
 
-/// A message that a gateway relays between one link and a zone writer on a stream: a
+/// A message that a gateway relays between one link and a layer writer on a stream: a
 /// [`FromClient`] in [`ToZone::Client`], and a [`ToClient`] from the writer. A datagram of a link
 /// goes as [`crate::relayed`] makes it. The writer drops a message of a link that is not the link
 /// of one of its players.
@@ -297,7 +297,7 @@ pub struct Relayed<M> {
   pub message: M,
 }
 
-/// A message of a zone writer to the writer of a next zone, on a stream.
+/// A message of a layer writer to the writer of a layer of a next zone, on a stream.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToNeighbour {
   /// Gives a player that crosses the border. The writer that sends it takes no more inputs of the
@@ -332,7 +332,7 @@ pub enum ToNeighbour {
   },
 }
 
-/// The state of a character that a save keeps, as the zone writer holds it.
+/// The state of a character that a save keeps, as the layer writer holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct State {
   /// The point under the character, in whole centimetres, as the step of `mmo-collide` gives it.
@@ -354,7 +354,7 @@ pub struct Save {
   pub version: i64,
 }
 
-/// The saves that a zone writer sends to the keeper, one for each character at most.
+/// The saves that a layer writer sends to the keeper, one for each character at most.
 ///
 /// A batch goes in one frame, so it holds [`SAVES`] saves at most: a writer with more dirty
 /// characters sends more batches.
@@ -373,7 +373,7 @@ pub struct Batch {
 /// The most saves of a [`Batch`] that fit in one frame, whatever their values.
 pub const SAVES: usize = 1926;
 
-/// A message of a zone writer to the keeper.
+/// A message of a layer writer to the keeper.
 ///
 /// The writer opens one bidirectional stream to the keeper. After the hello of each side, the
 /// keeper answers each message with one [`FromKeeper`], in the order of the messages.

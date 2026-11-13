@@ -3,7 +3,7 @@
 //! [`step`] moves one body for one tick of [`DT`] in a [`Terrain`]. The same terrain, the same
 //! body and the same input give the same bits on each system: parry3d runs with its feature
 //! `enhanced-determinism`, the crate takes its sine and its cosine from libm, and each position
-//! is rounded to the centimetre. So a client that predicts its body and the zone writer that
+//! is rounded to the centimetre. So a client that predicts its body and the layer writer that
 //! decides it agree. A change of the result of a step changes the version of the protocol.
 
 mod ground;

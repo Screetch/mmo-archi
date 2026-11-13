@@ -31,15 +31,15 @@ pub(crate) const BUILD: u32 = {
   build
 };
 
-/// The code with which the keeper closes the link of a zone writer after a fault. The reason of the
-/// close holds the text of the fault.
+/// The code with which the keeper closes the link of a layer writer after a fault. The reason of
+/// the close holds the text of the fault.
 const FAULT: VarInt = VarInt::from_u32(1);
 
 /// The most time that the keeper waits, after a fault, for the writer to read its last bytes and
 /// close the link: the idle timeout of QUIC.
 const GRACE: Duration = Duration::from_secs(3);
 
-/// Why the keeper ends the link of a zone writer.
+/// Why the keeper ends the link of a layer writer.
 #[derive(Debug, thiserror::Error)]
 enum Fault {
   #[error("the link fails: {0}")]
@@ -52,7 +52,7 @@ enum Fault {
   Codec(#[from] mmo_protocol::Error),
 }
 
-/// Takes the links of the zone writers, each in a task of its own, until the endpoint closes. Then
+/// Takes the links of the layer writers, each in a task of its own, until the endpoint closes. Then
 /// it waits for the end of each link.
 pub(crate) async fn serve(endpoint: Endpoint, store: Store) -> Error {
   let links = TaskTracker::new();
@@ -91,10 +91,10 @@ async fn link(incoming: Incoming, store: Store) {
 }
 
 fn ended(fault: &Fault) {
-  eprintln!("a link of a zone writer ends: {fault}");
+  eprintln!("a link of a layer writer ends: {fault}");
 }
 
-/// Answers the zone writer on the stream that it opened. Each side writes its hello first, then
+/// Answers the layer writer on the stream that it opened. Each side writes its hello first, then
 /// the keeper answers each message of the writer in order, until the writer ends the stream.
 async fn talk(stream: &mut Stream, store: &Store) -> Result<(), Fault> {
   let hello = stream.exchange(&framed(&Hello { build: BUILD }.encode())).await?;

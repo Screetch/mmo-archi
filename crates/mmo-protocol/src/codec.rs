@@ -38,7 +38,7 @@ pub enum Error {
     /// The bytes of the message.
     size: usize,
   },
-  /// A datagram between a gateway and a zone writer holds no link, which takes 8 bytes.
+  /// A datagram between a gateway and a layer writer holds no link, which takes 8 bytes.
   #[error("a relayed datagram starts with a link of 8 bytes, and this one holds {size} bytes")]
   Relayed {
     /// The bytes of the datagram.
@@ -108,7 +108,7 @@ pub fn datagram<M: Encode>(message: &M) -> Result<Vec<u8>, Error> {
   Ok(bytes)
 }
 
-/// The bytes of a datagram between a gateway and a zone writer: the link of the client, as a
+/// The bytes of a datagram between a gateway and a layer writer: the link of the client, as a
 /// `u64` in little-endian, then `datagram`, the bytes of a datagram of that client as they go on
 /// its link. So a gateway relays the intents of a client, and each snapshot for it, with no
 /// decode and no encode.

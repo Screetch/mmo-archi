@@ -7,7 +7,7 @@
 //!
 //! - The login service: [`Store::create_account`], [`Store::sign_in`], and
 //!   [`Store::create_character`] and [`Store::characters`], each in the shard of the service.
-//! - A zone writer: [`Store::load`], when it takes a zone or a player.
+//! - A layer writer: [`Store::load`], when it takes a layer or a player.
 //! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
 //!   Redis, with its scripts.
 //! - The keeper: [`Store::add_zone`], [`Store::claim`], which gives a writer the next
@@ -98,7 +98,7 @@ pub enum Error {
 }
 
 impl Error {
-  /// The refusal that the keeper answers to a zone writer for this error: a zone that the table
+  /// The refusal that the keeper answers to a layer writer for this error: a zone that the table
   /// does not hold, a batch of an old epoch, or else a fault of PostgreSQL, after which the writer
   /// sends its batch again.
   #[must_use]

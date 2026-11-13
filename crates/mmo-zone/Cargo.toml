@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The zone writer of mmo-archi: the one authority of the state of one zone."
+description = "The layer writer of mmo-archi: the one authority of the state of one layer of a zone."
 
 [dependencies]
 mmo-collide = { path = "../mmo-collide" }

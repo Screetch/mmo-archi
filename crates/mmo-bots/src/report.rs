@@ -10,7 +10,7 @@ use crate::bot::Outcome;
 use crate::layers::Seen;
 use crate::ticks::Counts;
 
-/// The target of the tick of a zone writer at the 99th percentile, and its hard limit.
+/// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
 const BUDGET: Duration = Duration::from_millis(25);
 const LIMIT: Duration = Duration::from_millis(50);
 

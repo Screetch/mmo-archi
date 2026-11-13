@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "The gateway of mmo-archi: it ends the connection of each client and relays its messages to the writer of its zone."
+description = "The gateway of mmo-archi: it ends the connection of each client and relays its messages to the writer of its layer."
 
 [dependencies]
 getrandom = "0.4.3"

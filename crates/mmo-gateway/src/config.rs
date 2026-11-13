@@ -10,7 +10,7 @@ pub(crate) struct Config {
   pub(crate) address: SocketAddr,
   /// The QUIC of the clients.
   pub(crate) clients: ServerConfig,
-  /// The QUIC of the links to the zone writers, which shows the certificate of the gateway and
+  /// The QUIC of the links to the layer writers, which shows the certificate of the gateway and
   /// takes only a writer whose certificate the authority signed.
   pub(crate) writers: ClientConfig,
   /// The Redis of the world, in RESP3, so the one connection of the gateway also hears the

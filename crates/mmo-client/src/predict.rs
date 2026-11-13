@@ -6,7 +6,7 @@ use mmo_collide::{Body, Terrain, step};
 use mmo_protocol::{Angle, Entity, Input, Position, Tick};
 
 /// The ticks that the client runs ahead of the last snapshot that it got: an input must reach the
-/// zone writer 1 to 4 ticks before the tick that it names.
+/// layer writer 1 to 4 ticks before the tick that it names.
 const LEAD: u32 = 3;
 
 /// The client runs ahead of the last snapshot by 1 to this many ticks. Outside that range, its
@@ -19,14 +19,14 @@ const PENDING: usize = 64;
 /// The inputs that a datagram carries.
 const REDUNDANT: usize = 3;
 
-/// One input that the zone writer did not answer yet: the input as it goes on the wire, and the
+/// One input that the layer writer did not answer yet: the input as it goes on the wire, and the
 /// walk that it asks of `mmo-collide`.
 struct Pending {
   input: Input,
   walk: mmo_collide::Input,
 }
 
-/// The body of the player, which the client runs ahead of the zone writer with the same step.
+/// The body of the player, which the client runs ahead of the layer writer with the same step.
 ///
 /// The client runs one [`Predictor::step`] each tick of 50 ms, and shows the result at once. Each
 /// snapshot of the writer holds the state of the player at its tick: [`Predictor::correct`] takes

@@ -1,6 +1,6 @@
 //! The load test of mmo-archi: headless clients that log in through the login service, wait in
 //! its queue, link to a gateway, and send the inputs of a walk 20 times each second, as the
-//! players do. It measures the time of each tick of the zone writer, the bytes of each client, the
+//! players do. It measures the time of each tick of the layer writer, the bytes of each client, the
 //! wait in the queue and the faults, and prints a report against the budget of
 //! `docs/architecture.md`.
 //!

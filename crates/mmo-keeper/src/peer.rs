@@ -1,5 +1,5 @@
-//! A world for the tests: an authority, the keeper and a zone writer with their certificates, and
-//! the link of a zone writer to the keeper.
+//! A world for the tests: an authority, the keeper and a layer writer with their certificates, and
+//! the link of a layer writer to the keeper.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -71,7 +71,7 @@ impl World {
     ]
   }
 
-  /// The endpoint of a zone writer, which trusts the authority, and which shows the certificate
+  /// The endpoint of a layer writer, which trusts the authority, and which shows the certificate
   /// of the writer when it is `signed`.
   pub(crate) fn writer(&self, signed: bool) -> Endpoint {
     let mut roots = RootCertStore::empty();
@@ -100,7 +100,7 @@ pub(crate) fn var(vars: &[(&'static str, String)]) -> impl Fn(&str) -> Option<St
   |name| vars.iter().find(|(key, _)| *key == name).map(|(_, value)| value.clone())
 }
 
-/// A zone writer, with the stream that it opened to the keeper.
+/// A layer writer, with the stream that it opened to the keeper.
 pub(crate) struct Writer {
   connection: Connection,
   pub(crate) send: SendStream,
