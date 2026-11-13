@@ -198,8 +198,9 @@ fix what your change broke, and report what was broken before.
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
   `MMO_LOCAL_SHARDS` (1) sets the count of shards, `MMO_LOCAL_SHARD_CAP` (100) the cap of each shard and
-  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, and the stack runs a login service and a pool of layer writers for
-  each shard, the writers on the ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the shards, and their report
+  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, and `MMO_LOCAL_ZONES` (1) the count of zones, each on the next square
+  of one row of the map. The stack runs a login service and a pool of layer writers for each shard, the writers on the
+  ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the shards, and their report
   gives the layers that opened in each shard and the players on each. Set the same `MMO_LOCAL_SHARDS` for `bots` as for
   `start`. `sh script/report.sh <report> <count> <shards> [<waiting> [<recover>]]` reads that report and fails on a bot
   that did not play or wait in the queue, on a layer over its cap, on a shard with too few layers, on a queue that
