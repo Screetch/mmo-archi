@@ -273,14 +273,15 @@ mod tests {
   use std::sync::Arc;
 
   use mmo_protocol::{
-    Character, FRAME, Frames, FromLogin, Hello, PROTOCOL, ToLogin, ZoneId, decode, encode, frame,
+    Character, FRAME, Frames, FromLogin, Hello, PROTOCOL, ShardId, ToLogin, ZoneId, decode, encode,
+    frame,
   };
   use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
   use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
   use sqlx::PgPool;
 
   use super::{Config, Fault, run, serve};
-  use crate::game::{Game, MEADOW, START, login};
+  use crate::game::{Game, MEADOW, login};
   use crate::{Login, World};
 
   /// A certificate of TLS for `localhost`, and its files of PEM in a folder of the test alone.
@@ -403,7 +404,7 @@ mod tests {
   ) -> Result<(), Fault> {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
-    let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
+    let brom = game.character(ada, ShardId(1), "Brom").await;
     let tls = Tls::new();
     let address = tls.serve(game.copy(1));
     let mut peer = Peer::new(address, &tls).await;
@@ -414,7 +415,7 @@ mod tests {
     assert_eq!((position, length), (0, 1));
     let characters = vec![Character { id: brom, name: "Brom".to_owned() }];
     assert_eq!(peer.answer().await, FromLogin::Characters(characters));
-    game.layer(ZoneId(7)).await;
+    game.layer(ShardId(1), ZoneId(7)).await;
     let session = peer.ask(&ToLogin::Select { character: brom }).await;
     assert!(matches!(session, FromLogin::Session { .. }), "a session, and not {session:?}");
     peer.send.finish().expect("the stream ends");

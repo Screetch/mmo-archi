@@ -199,7 +199,7 @@ async fn answer(incoming: Incoming, store: Store, ends: UnboundedSender<()>) {
         store.claim(shard, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
       }
       ToKeeper::Save(batch) => {
-        store.save(&batch).await.map(|written| FromKeeper::Saved { written })
+        store.save(&batch).await.map(|written| FromKeeper::Saved { written: written.characters })
       }
     };
     let answer = answer.unwrap_or_else(|error| FromKeeper::Refused(error.refusal()));

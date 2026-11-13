@@ -5,8 +5,8 @@
 //! [`Store::migrate`], which runs the migrations of `migrations/`, and each other process with
 //! [`Store::open`], which refuses a database that lacks a migration of this build.
 //!
-//! - The login service: [`Store::create_account`], [`Store::sign_in`],
-//!   [`Store::create_character`] and [`Store::characters`].
+//! - The login service: [`Store::create_account`], [`Store::sign_in`], and
+//!   [`Store::create_character`] and [`Store::characters`], each in the shard of the service.
 //! - A zone writer: [`Store::load`], when it takes a zone or a player.
 //! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
 //!   Redis, with its scripts.
@@ -26,8 +26,9 @@ use mmo_protocol::{Epoch, KeeperRefusal, Layer, ShardId, ZoneId};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
-pub use characters::Saved;
+pub use characters::{NewCharacter, Saved};
 pub use directory::{Directory, LEASE, Lease, Leased, PARTY, PartyId, Placed};
+pub use zones::Written;
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -160,7 +161,7 @@ mod tests {
   };
   use sqlx::PgPool;
 
-  use super::{Error, Store};
+  use super::{Error, NewCharacter, Store};
 
   #[sqlx::test(migrations = false)]
   async fn a_process_opens_only_a_database_that_the_keeper_migrated(
@@ -185,13 +186,20 @@ mod tests {
     let state = State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 1 };
     let layer = Layer { zone: ZoneId(1), number: 1 };
     let batch = Batch { shard: ShardId(1), layer, epoch: Epoch(1), saves: Vec::new() };
+    let brom = NewCharacter {
+      account: AccountId(1),
+      shard: ShardId(1),
+      name: "Brom",
+      zone: ZoneId(1),
+      state,
+    };
     let refusals = [
       Store::migrate(pool.clone()).await.err(),
       Store::open(pool).await.err(),
       store.create_account("alice", Password("one".to_owned())).await.err(),
       store.sign_in("alice", Password("one".to_owned())).await.err(),
-      store.create_character(AccountId(1), "Brom", ZoneId(1), state).await.err(),
-      store.characters(AccountId(1)).await.err(),
+      store.create_character(&brom).await.err(),
+      store.characters(AccountId(1), ShardId(1)).await.err(),
       store.load(&[CharacterId(1)]).await.err(),
       store.add_zone(ZoneId(1), "meadow").await.err(),
       store.claim(ShardId(1), layer).await.err(),

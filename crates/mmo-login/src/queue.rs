@@ -60,6 +60,11 @@ pub(crate) enum Place {
 }
 
 impl World {
+  /// The shard of the world, whose characters alone its login service lists, makes and places.
+  pub(crate) const fn shard(self) -> ShardId {
+    ShardId(self.id)
+  }
+
   /// Writes the caps of the world, renews or ends each slot that ended, then admits the head of the
   /// queue into the free slots.
   pub(crate) async fn admit(self, redis: &mut ConnectionManager) -> Result<u32, Error> {
@@ -67,7 +72,7 @@ impl World {
       .key(keys::queue(self.id))
       .key(keys::admitted(self.id))
       .key(keys::admissions(self.id))
-      .key(keys::shard(ShardId(self.id)))
+      .key(keys::shard(self.shard()))
       .arg(self.cap)
       .arg(BURST)
       .arg(SLOT)

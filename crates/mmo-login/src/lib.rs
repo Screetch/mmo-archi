@@ -19,10 +19,10 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, ShardId, State, ToLogin,
-  Token, ZoneId,
+  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, State, ToLogin, Token,
+  ZoneId,
 };
-use mmo_store::{Directory, Placed, Store, keys};
+use mmo_store::{Directory, NewCharacter, Placed, Store, keys};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use tokio::time;
@@ -254,17 +254,18 @@ impl Login {
   }
 
   async fn admitted(&self, client: &mut Client, account: AccountId) -> Result<FromLogin, Error> {
-    let listed = self.store.characters(account).await?;
+    let listed = self.store.characters(account, self.world.shard()).await?;
     let characters = listed.iter().map(|one| one.id).collect();
     *client = Client::Admitted { account, characters };
     Ok(FromLogin::Characters(listed))
   }
 
-  /// Makes a character of the admitted account at the start of the world, and lists the characters
-  /// of the account again. The name is written with its first letter in upper case and the rest
-  /// in lower case, so two names never differ by their case alone. An account that holds 8
-  /// characters gets no more: the list of the client answers at once, and the store decides for
-  /// two clients of one account that make a character together.
+  /// Makes a character of the admitted account in the shard of the world, at its start, and lists
+  /// the characters of the account in the shard again. The name is written with its first letter in
+  /// upper case and the rest in lower case, so two names never differ by their case alone. An
+  /// account holds 8 characters at most over all the shards: the list of the client answers at once
+  /// when it holds 8, and else the store decides, also for two clients of one account that make a
+  /// character together.
   async fn new_character(&self, client: &mut Client, name: &str) -> Result<FromLogin, Error> {
     let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
@@ -281,7 +282,9 @@ impl Login {
     }
     let name = name[..1].to_ascii_uppercase() + &name[1..].to_ascii_lowercase();
     let state = State { position: self.start.position, yaw: Angle(0), hit_points: HIT_POINTS };
-    match self.store.create_character(account, &name, self.start.zone, state).await {
+    let (shard, zone) = (self.world.shard(), self.start.zone);
+    let new = NewCharacter { account, shard, name: &name, zone, state };
+    match self.store.create_character(&new).await {
       Ok(_) => self.admitted(client, account).await,
       Err(mmo_store::Error::Full { .. }) => Ok(FromLogin::Refused(Refusal::Limit)),
       Err(mmo_store::Error::Taken { .. }) => Ok(FromLogin::Refused(Refusal::Taken)),
@@ -289,10 +292,11 @@ impl Login {
     }
   }
 
-  /// Makes the session of `character`, in the layer of its zone that the placement of the
-  /// directory gives. While the placement gives none, it runs again each second, until the slot of
-  /// the account ends. The slot of the account gives one session at most, so two clients of one
-  /// account never hold two sessions.
+  /// Makes the session of `character`, in the layer of its zone in the shard of the world that the
+  /// placement of the directory gives. The client selects one of the characters that it got, which
+  /// are those of the shard alone. While the placement gives none, it runs again each second, until
+  /// the slot of the account ends. The slot of the account gives one session at most, so two
+  /// clients of one account never hold two sessions.
   async fn select(&self, client: &mut Client, character: CharacterId) -> Result<FromLogin, Error> {
     let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
@@ -303,7 +307,7 @@ impl Login {
     let Some(saved) = saved.first() else {
       return Ok(FromLogin::Refused(Refusal::Character));
     };
-    let shard = ShardId(self.world.id);
+    let shard = self.world.shard();
     let directory = Directory { shard };
     let layer = loop {
       let (online, slot): (bool, bool) = redis::pipe()
@@ -379,14 +383,18 @@ mod tests {
   use std::net::{IpAddr, Ipv4Addr};
 
   use mmo_protocol::{
-    Angle, Character, CharacterId, FromLogin, Password, Refusal, State, ToLogin, Token, ZoneId,
+    Angle, Character, CharacterId, FromLogin, Password, Refusal, ShardId, State, ToLogin, Token,
+    ZoneId,
   };
   use mmo_store::{Saved, Store, keys};
   use redis::AsyncCommands;
   use sqlx::PgPool;
 
   use super::{Client, Error, Login, World};
-  use crate::game::{Game, HOME, MEADOW, START, login, place, secret};
+  use crate::game::{Game, HOME, MEADOW, login, place, secret};
+
+  /// The shard of the world of `Game::copy`.
+  const SHARD: ShardId = ShardId(1);
 
   /// The address of a client that guesses the passwords of other players.
   const STRANGER: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
@@ -502,7 +510,7 @@ mod tests {
     let mut expected: Vec<_> = (1..=8).map(Ok).collect();
     expected.push(Err(FromLogin::Refused(Refusal::Limit)));
     assert_eq!(answers, expected);
-    assert_eq!(game.store.characters(ada).await?.len(), 8);
+    assert_eq!(game.store.characters(ada, SHARD).await?.len(), 8);
     assert!(matches!(&client, Client::Admitted { characters, .. } if characters.len() == 8));
     Ok(())
   }
@@ -532,7 +540,7 @@ mod tests {
     let answers = [hana?, iris?];
     let refused = answers.iter().filter(|answer| **answer == FromLogin::Refused(Refusal::Limit));
     assert_eq!(refused.count(), 1);
-    assert_eq!(game.store.characters(ada).await?.len(), 8);
+    assert_eq!(game.store.characters(ada, SHARD).await?.len(), 8);
     Ok(())
   }
 
@@ -543,7 +551,7 @@ mod tests {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
     let bob = game.account("bob").await;
-    game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
+    game.character(bob, SHARD, "Dara").await;
     let copy = game.copy(1);
     let mut client = Client::default();
     copy.answer(&mut client, HOME, login("ada")).await?;
@@ -557,7 +565,7 @@ mod tests {
       copy.answer(&mut client, HOME, new_character("Br")).await?,
       copy.answer(&mut client, HOME, new_character("Br0m")).await?,
     ];
-    let listed = game.store.characters(ada).await?;
+    let listed = game.store.characters(ada, SHARD).await?;
     let brom = listed.first().map(|one| one.id).expect("a character of ada");
     assert_eq!(
       answers,
@@ -578,7 +586,62 @@ mod tests {
     let () = game.redis.clone().del(keys::admit(ada)).await?;
     let ended = copy.answer(&mut client, HOME, new_character("Cael")).await?;
     assert_eq!(ended, FromLogin::Refused(Refusal::Expired));
-    assert_eq!((client, game.store.characters(ada).await?.len()), (Client::Out, 1));
+    assert_eq!((client, game.store.characters(ada, SHARD).await?.len()), (Client::Out, 1));
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn the_login_service_of_a_shard_lists_makes_and_places_the_characters_of_its_shard_alone(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let brom = game.character(ada, SHARD, "Brom").await;
+    let cael = game.character(ada, ShardId(2), "Cael").await;
+    game.layer(ShardId(2), ZoneId(7)).await;
+    let copy = game.world(2, 1);
+    let mut client = Client::default();
+    copy.answer(&mut client, HOME, login("ada")).await?;
+    copy.admit().await?;
+    let listed = copy.ready(&mut client).await?;
+    let foreign = copy.answer(&mut client, HOME, ToLogin::Select { character: brom }).await?;
+    let made = copy.answer(&mut client, HOME, new_character("Dara")).await?;
+    let mut lists = Vec::new();
+    for shard in [SHARD, ShardId(2)] {
+      lists.push(game.store.characters(ada, shard).await?);
+    }
+    let dara = lists[1].last().map(|one| one.id).expect("a character in shard 2");
+    let character = |id, name: &str| Character { id, name: name.to_owned() };
+    assert_eq!(
+      [listed, Some(foreign), Some(made)],
+      [
+        Some(FromLogin::Characters(vec![character(cael, "Cael")])),
+        Some(FromLogin::Refused(Refusal::Character)),
+        Some(FromLogin::Characters(vec![character(cael, "Cael"), character(dara, "Dara")])),
+      ]
+    );
+    assert_eq!(
+      lists,
+      [vec![character(brom, "Brom")], vec![character(cael, "Cael"), character(dara, "Dara")]]
+    );
+    let FromLogin::Session { token } =
+      copy.answer(&mut client, HOME, ToLogin::Select { character: dara }).await?
+    else {
+      panic!("a session of Dara");
+    };
+    let mut fields: Vec<(String, i64)> = game.redis.clone().hgetall(keys::session(&token)).await?;
+    fields.sort();
+    let field = |name: &str, value| (name.to_owned(), value);
+    assert_eq!(
+      fields,
+      [
+        field("account", ada.0),
+        field("character", dara.0),
+        field("layer", 1),
+        field("shard", 2),
+        field("zone", 7)
+      ]
+    );
     Ok(())
   }
 
@@ -755,9 +818,9 @@ mod tests {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
     let bob = game.account("bob").await;
-    let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
-    let dara = game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
-    game.layer(ZoneId(7)).await;
+    let brom = game.character(ada, SHARD, "Brom").await;
+    let dara = game.character(bob, SHARD, "Dara").await;
+    game.layer(SHARD, ZoneId(7)).await;
     let copy = game.copy(1);
     let mut clients = game.enter(&copy, &["ada", "ada"]).await;
     copy.admit().await?;
@@ -810,8 +873,8 @@ mod tests {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
     let bob = game.account("bob").await;
-    let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
-    let dara = game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
+    let brom = game.character(ada, SHARD, "Brom").await;
+    let dara = game.character(bob, SHARD, "Dara").await;
     let copy = game.copy(2);
     let mut clients = game.enter(&copy, &["ada", "bob"]).await;
     copy.admit().await?;
@@ -824,14 +887,14 @@ mod tests {
     let later = std::time::Duration::from_millis(1500);
     let opened = async {
       tokio::time::sleep(later).await;
-      game.layer(ZoneId(7)).await;
+      game.layer(SHARD, ZoneId(7)).await;
     };
     let select = ToLogin::Select { character: brom };
     let (made, ()) = tokio::join!(copy.answer(first, HOME, select), opened);
     assert!(matches!(made?, FromLogin::Session { .. }), "a session once the layer opens");
     let layer = mmo_protocol::Layer { zone: ZoneId(7), number: 1 };
     let mut redis = game.redis.clone();
-    let () = redis.del(keys::writer(mmo_protocol::ShardId(1), layer)).await?;
+    let () = redis.del(keys::writer(SHARD, layer)).await?;
     let ended = async {
       tokio::time::sleep(later).await;
       let () = game.redis.clone().del(keys::admit(bob)).await.expect("the end of the slot");
@@ -846,8 +909,8 @@ mod tests {
   async fn a_fault_of_a_store_ends_the_answer_with_its_error(pool: PgPool) -> Result<(), Error> {
     let game = Game::new(pool.clone()).await;
     let ada = game.account("ada").await;
-    let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
-    game.layer(ZoneId(7)).await;
+    let brom = game.character(ada, SHARD, "Brom").await;
+    game.layer(SHARD, ZoneId(7)).await;
     let copy = game.copy(1);
     let mut queued = Client::default();
     copy.answer(&mut queued, HOME, login("ada")).await?;

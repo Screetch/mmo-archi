@@ -5,11 +5,11 @@
 use futures_util::future::try_join_all;
 use mmo_client::Account;
 use mmo_protocol::{Angle, CharacterId, Password, Position, State};
-use mmo_store::Store;
+use mmo_store::{NewCharacter, Store};
 
-use crate::Failure;
 use crate::config::Config;
 use crate::rng::Rng;
+use crate::{Failure, SHARD};
 
 /// The accounts that the bots make at once: each one hashes a password, which takes 19 MiB.
 pub(crate) const SEEDERS: u32 = 8;
@@ -54,7 +54,9 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
   let (name, character) =
     (format!("bot{run}{index}"), format!("B{run}{}", letters(index.into(), 4)));
   let id = store.create_account(&name, Password(PASSWORD.to_owned())).await?;
-  let saved = store.create_character(id, &character, config.zone, start(config, index)).await?;
+  let state = start(config, index);
+  let new = NewCharacter { account: id, shard: SHARD, name: &character, zone: config.zone, state };
+  let saved = store.create_character(&new).await?;
   let password = Password(PASSWORD.to_owned());
   Ok(Bot { index, account: Account { name, password, character, create: false }, character: saved })
 }
