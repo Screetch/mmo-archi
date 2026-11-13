@@ -61,6 +61,11 @@ pub(crate) struct Outcome {
   pub(crate) joined: Option<Instant>,
   /// The shard that the bot plays in.
   pub(crate) shard: u32,
+  /// True when the bot walks east from near the border of its zone, to cross it.
+  pub(crate) crosser: bool,
+  /// Each move of the bot to another layer, which the gateway tells it, from the layer that it
+  /// left to the layer that it entered.
+  pub(crate) crossings: Vec<(Layer, Layer)>,
   /// The time from the first snapshot that shows the player to the end.
   pub(crate) played: Duration,
   /// The bytes of the datagrams up and down, with no header of IP, UDP or QUIC.
@@ -88,6 +93,8 @@ struct Walk {
   /// The layer of the player, which the gateway names first, before the snapshot that shows the
   /// player and so before the first datagram of the bot.
   layer: Layer,
+  /// True when the bot walks east and never turns.
+  crosser: bool,
   rng: Rng,
   world: World,
   body: Option<Predictor>,
@@ -114,6 +121,7 @@ impl Walk {
     Self {
       character: bot.character,
       layer,
+      crosser: bot.crosser,
       rng,
       world: World::default(),
       body: None,
@@ -182,11 +190,25 @@ impl Walk {
     out.away = false;
   }
 
+  /// The gateway names the layer of the player. After the first time, a new layer is a crossing:
+  /// the walk forgets the world and its body, as a client does, since the next writer sends the
+  /// world in full.
+  fn moved(&mut self, to: Layer, out: &mut Outcome) {
+    if self.layer.number != 0 && self.layer != to {
+      out.crossings.push((self.layer, to));
+      self.world.clear();
+      self.body = None;
+    }
+    self.layer = to;
+  }
+
   /// Runs one tick of the walk, and gives the datagram of the inputs. A bot sends nothing before
   /// the first snapshot that shows its player.
   fn tick(&mut self) -> Option<Intents> {
     let body = self.body.as_mut()?;
-    if self.ticks.is_multiple_of(TURN) {
+    if self.crosser {
+      self.heading = Some(Angle(0));
+    } else if self.ticks.is_multiple_of(TURN) {
       self.heading = u16::try_from(self.rng.below(9) * 8192).ok().map(Angle);
     }
     self.ticks += 1;
@@ -260,7 +282,9 @@ async fn play(
         }
         down => match down? {
         Down::Snapshot(snapshot) => walk.count(shared, out, started, &snapshot),
-        Down::Message(ToClient::Moved { zone, layer }) => walk.layer = Layer { zone, number: layer },
+        Down::Message(ToClient::Moved { zone, layer }) => {
+          walk.moved(Layer { zone, number: layer }, out);
+        }
         Down::Message(ToClient::Line { .. }) => {}
         Down::Message(other) => return Err(Error::Message(other)),
         },
@@ -275,7 +299,7 @@ async fn play(
 /// fault. A bot leaves as a player who closes the game does: it closes its link, and the layer
 /// writer keeps its player for 30 s.
 pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>) -> Outcome {
-  let mut out = Outcome { shard: bot.shard, ..Outcome::default() };
+  let mut out = Outcome { shard: bot.shard, crosser: bot.crosser, ..Outcome::default() };
   let ended = play(shared, bot, stop, &mut out).await;
   out.queued = matches!(ended, Ok(true));
   out.fault = ended.err().map(|error| error.to_string());
@@ -296,8 +320,8 @@ mod tests {
   use mmo_client::testing::{Fake, hold};
   use mmo_client::{Account, Place, Trust};
   use mmo_protocol::{
-    Attach, CharacterId, FromClient, FromLogin, Layer, Password, Refusal, Snapshot, ToClient,
-    ToLogin, Token, ZoneId, encode,
+    Angle, Attach, CharacterId, FromClient, FromLogin, Layer, Password, Refusal, Snapshot,
+    ToClient, ToLogin, Token, ZoneId, encode,
   };
   use tokio::sync::{oneshot, watch};
   use tokio::time::{sleep, timeout};
@@ -314,7 +338,14 @@ mod tests {
       character: "Brom".to_owned(),
       create: false,
     };
-    Bot { index: 0, shard: 1, login: login.address.clone(), account, character: CharacterId(42) }
+    Bot {
+      index: 0,
+      shard: 1,
+      login: login.address.clone(),
+      account,
+      character: CharacterId(42),
+      crosser: false,
+    }
   }
 
   fn shared_by(login: &Fake, gateway: &Fake) -> Shared {
@@ -438,6 +469,7 @@ mod tests {
     Walk {
       character,
       layer,
+      crosser: false,
       rng,
       world,
       body: None,
@@ -550,6 +582,26 @@ mod tests {
     assert!(out.joined.is_some());
     gateway.end().await;
     login.end().await;
+  }
+
+  #[test]
+  fn a_crosser_walks_east_and_a_walk_that_changes_layer_records_a_crossing() {
+    let mut crosser = Walk { crosser: true, ..walk() };
+    let mut out = Outcome::default();
+    assert_eq!(crosser.hear(&snapshot(10, None, vec![entity(42)])).ok(), Some(true));
+    for _ in 0..=TURN {
+      crosser.tick();
+      assert_eq!(crosser.heading, Some(Angle(0)));
+    }
+    let (from, next) = (crosser.layer, Layer { zone: ZoneId(2), number: 1 });
+    crosser.moved(next, &mut out);
+    assert_eq!(out.crossings, [(from, next)]);
+    assert!(crosser.body.is_none() && crosser.world.entity(CharacterId(42)).is_none());
+    crosser.moved(next, &mut out);
+    assert_eq!(out.crossings.len(), 1);
+    let mut fresh = Walk { layer: Layer { zone: ZoneId(1), number: 0 }, ..walk() };
+    fresh.moved(Layer { zone: ZoneId(1), number: 2 }, &mut out);
+    assert_eq!((out.crossings.len(), fresh.layer.number), (1, 2));
   }
 
   #[test]

@@ -710,7 +710,7 @@ the hosts of the servers.
 | --- | ---: | --- | --- | --- |
 | 1 | 200 | 1 shard of cap 200, layers of cap 20, 1 zone | the path from login to play, and the opening of layers | each bot plays, no message fails to decode, and the zone runs 10 layers, none with more than 20 players |
 | 2 | 500, half in a town | 1 shard of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
-| 3 | 500, with crossings | 2 shards of cap 250, layers of cap 20, 2 zones | the shards and the placement | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and a bot that crosses enters the layer with the same number when that layer has room |
+| 3 | 500, of which 50 cross a border | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the hand-over | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and each crosser enters the next zone |
 | 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
 | 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, each bot left plays, and each move fell on a safe point of its bot |
 | 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
@@ -742,7 +742,8 @@ bots make their accounts in PostgreSQL, since the login service makes 5 new acco
 bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this
 document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for the cap of each shard,
 `MMO_LOCAL_LAYER_CAP` for the cap of a layer, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
-`MMO_BOTS_TOWN` for the bots that start in one square of 128 m. The stack runs the login service and the pool of writers
+`MMO_BOTS_TOWN` for the bots that start in one square of 128 m, and `MMO_BOTS_CROSSERS` for the bots that walk east from
+near the east border of the zone. The stack runs the login service and the pool of writers
 of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small, 100 for a
 shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed link for 30 s,
 so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
@@ -750,7 +751,7 @@ so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_C
 The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4 and 6 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the
 pull request, then of the change, on the same runner. It fails when a bot of the change cannot play, when a layer of the
-change passes its cap, and when a shard of the change opens fewer layers than its players need, as
+change passes its cap, when a shard of the change opens fewer layers than its players need, and when a crosser of stage 3 does not enter the next zone, as
 `sh script/report.sh` reads them from the report of the bots. Its summary gives
 the report of the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the
 hottest functions of each, from `perf`.

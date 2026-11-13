@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use mmo_protocol::Layer;
 use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 use tokio::time::Instant;
 
@@ -201,6 +202,43 @@ impl Recovery {
   }
 }
 
+/// What the bots that cross the border of their zone did.
+#[derive(Debug, PartialEq)]
+struct Crossing {
+  /// The bots that start near the east border and walk east.
+  crossers: usize,
+  /// The crossers that entered the zone after their own.
+  crossed: usize,
+  /// The moves of the bots to another layer, of each zone.
+  moves: usize,
+}
+
+impl Crossing {
+  fn new(outcomes: &[Outcome]) -> Self {
+    let next = |(from, to): &(Layer, Layer)| to.zone.0 == from.zone.0 + 1;
+    Self {
+      crossers: outcomes.iter().filter(|out| out.crosser).count(),
+      crossed: outcomes.iter().filter(|out| out.crossings.iter().any(next)).count(),
+      moves: outcomes.iter().map(|out| out.crossings.len()).sum(),
+    }
+  }
+
+  /// The line of the report, when some bots cross.
+  fn line(&self) -> Option<String> {
+    let Self { crossers, crossed, moves } = self;
+    let text = format!(
+      "crossings: {moves} moves to another layer, {crossed} of {crossers} crossers entered the next zone"
+    );
+    (*crossers > 0).then_some(text)
+  }
+
+  /// The line of the budget, when some bots cross.
+  fn budget(&self) -> Option<(&'static str, bool)> {
+    let label = "each crosser entered the next zone";
+    (self.crossers > 0).then_some((label, self.crossed >= self.crossers))
+  }
+}
+
 /// The result of a run.
 #[derive(Debug)]
 pub(crate) struct Report {
@@ -208,6 +246,7 @@ pub(crate) struct Report {
   played: usize,
   queue: Queue,
   recovery: Recovery,
+  crossing: Crossing,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -264,6 +303,7 @@ impl Report {
       played: outcomes.iter().filter(|out| out.joined.is_some()).count(),
       queue: Queue::new(waiting, outcomes),
       recovery: Recovery::new(recover, outcomes),
+      crossing: Crossing::new(outcomes),
       faults,
       position: Stats::new(
         outcomes.iter().filter_map(|out| out.place).map(|p| f64::from(p.position)).collect(),
@@ -343,6 +383,7 @@ impl fmt::Display for Report {
     if !bound.is_zero() {
       lines.push(self.recovery.line());
     }
+    lines.extend(self.crossing.line());
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -373,6 +414,7 @@ impl fmt::Display for Report {
     if !bound.is_zero() {
       lines.extend(self.recovery.budget().map(|(label, holds)| line((&label, holds))));
     }
+    lines.extend(self.crossing.budget().map(line));
     writeln!(f, "{}", lines.join("\n"))
   }
 }
@@ -383,6 +425,7 @@ mod tests {
   use std::time::Duration;
 
   use mmo_client::Place;
+  use mmo_protocol::{Layer, ZoneId};
   use tokio::time::Instant;
 
   use super::{Queue, Report, Stats, Ticks};
@@ -514,6 +557,27 @@ mod tests {
     assert!(
       text.contains("budget tick p99 at most 25 ms: over\nbudget no tick of 50 ms or more: over\n")
     );
+  }
+
+  #[test]
+  fn the_report_counts_the_crossers_that_entered_the_next_zone() {
+    let layer = |zone, number| Layer { zone: ZoneId(zone), number };
+    let one = |crossings| Outcome { crosser: true, crossings, ..played(1, 2, 0, 0, 0) };
+    let crossed = one(vec![(layer(1, 3), layer(2, 1))]);
+    let moved = one(vec![(layer(1, 3), layer(1, 4))]);
+    let report = |outcomes: &[Outcome]| {
+      let (zero, seen) = (Duration::ZERO, Seen::new());
+      Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
+    };
+    let text = report(&[crossed, moved, one(vec![])]);
+    let mixed = "crossings: 2 moves to another layer, 1 of 3 crossers entered the next zone\n";
+    assert!(text.contains(mixed), "{text}");
+    assert!(text.ends_with("budget each crosser entered the next zone: over\n"), "{text}");
+    let text = report(&[one(vec![(layer(1, 1), layer(2, 1))])]);
+    let all = "crossings: 1 moves to another layer, 1 of 1 crossers entered the next zone\n";
+    assert!(text.contains(all) && text.ends_with("entered the next zone: ok\n"), "{text}");
+    let text = report(&[played(1, 2, 0, 0, 0)]);
+    assert!(!text.contains("crossings") && !text.contains("crosser"), "{text}");
   }
 
   #[test]

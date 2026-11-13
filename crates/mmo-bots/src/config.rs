@@ -21,6 +21,8 @@ pub(crate) struct Config {
   pub(crate) bots: u32,
   /// The bots that the queue must hold when the measure ends.
   pub(crate) waiting: u32,
+  /// The bots that start near the east border of the zone and walk east, which cross it.
+  pub(crate) crossers: u32,
   pub(crate) town: u32,
   pub(crate) ramp: u32,
   pub(crate) join: Duration,
@@ -44,6 +46,10 @@ pub enum Error {
   Number { name: &'static str, source: ParseIntError },
   #[error("the variable MMO_BOTS_COUNT holds {0} bots, over the bound of {max}", max = MAX_BOTS)]
   Count(u32),
+  #[error(
+    "the variable MMO_BOTS_CROSSERS holds {crossers} bots, over the {bots} of MMO_BOTS_COUNT"
+  )]
+  Crossers { crossers: u32, bots: u32 },
   #[error("MMO_BOTS_RUN holds 1 to 6 letters from a to z, and {0:?} does not")]
   Run(String),
 }
@@ -97,6 +103,7 @@ impl Config {
       zone: ZoneId(number(var, "MMO_BOTS_ZONE", None)?),
       bots: number(var, "MMO_BOTS_COUNT", None)?,
       waiting: number(var, "MMO_BOTS_WAITING", Some(0))?,
+      crossers: number(var, "MMO_BOTS_CROSSERS", Some(0))?,
       town: number(var, "MMO_BOTS_TOWN", Some(0))?,
       ramp: number(var, "MMO_BOTS_RAMP", Some(50))?,
       join: seconds("MMO_BOTS_JOIN_SECONDS", 60)?,
@@ -107,6 +114,9 @@ impl Config {
     };
     if config.bots > MAX_BOTS {
       return Err(Error::Count(config.bots));
+    }
+    if config.crossers > config.bots {
+      return Err(Error::Crossers { crossers: config.crossers, bots: config.bots });
     }
     Ok(config)
   }
@@ -146,11 +156,12 @@ mod tests {
       (config.zone.0, config.bots, config.town, config.ramp, config.seed, config.run.len()),
       (1, 500, 0, 50, 1, 6)
     );
-    assert_eq!((config.waiting, config.recover), (0, Duration::ZERO));
+    assert_eq!((config.waiting, config.recover, config.crossers), (0, Duration::ZERO, 0));
     assert_eq!((config.join, config.play), (Duration::from_secs(60), Duration::from_secs(30)));
     let all = [
       ("MMO_BOTS_TOWN", "250"),
       ("MMO_BOTS_WAITING", "100"),
+      ("MMO_BOTS_CROSSERS", "40"),
       ("MMO_BOTS_RECOVER_SECONDS", "10"),
       ("MMO_BOTS_RAMP", "10"),
       ("MMO_BOTS_JOIN_SECONDS", "5"),
@@ -161,6 +172,7 @@ mod tests {
     let config = read(&all, "").expect("a config");
     assert_eq!((config.town, config.ramp, config.seed, config.run.as_str()), (250, 10, 9, "abc"));
     assert_eq!((config.waiting, config.recover), (100, Duration::from_secs(10)));
+    assert_eq!(config.crossers, 40);
     assert_eq!((config.join, config.play), (Duration::from_secs(5), Duration::from_secs(6)));
   }
 
@@ -194,6 +206,7 @@ mod tests {
     );
     for name in [
       "MMO_BOTS_WAITING",
+      "MMO_BOTS_CROSSERS",
       "MMO_BOTS_RECOVER_SECONDS",
       "MMO_BOTS_TOWN",
       "MMO_BOTS_RAMP",
@@ -211,6 +224,11 @@ mod tests {
     assert_eq!(
       over.as_deref(),
       Some("the variable MMO_BOTS_COUNT holds 501 bots, over the bound of 500")
+    );
+    let many = read(&[("MMO_BOTS_COUNT", "10"), ("MMO_BOTS_CROSSERS", "11")], "").err();
+    assert_eq!(
+      many.as_deref(),
+      Some("the variable MMO_BOTS_CROSSERS holds 11 bots, over the 10 of MMO_BOTS_COUNT")
     );
     for run in ["", "Abc", "abcdefg", "a1"] {
       let bad = read(&[("MMO_BOTS_RUN", run)], "").err().expect("a refusal");
