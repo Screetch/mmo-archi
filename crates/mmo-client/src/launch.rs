@@ -177,20 +177,25 @@ mod tests {
     peer
   }
 
-  /// The gateway of a test: it gives the zone, sends a snapshot each 20 ms until the client sends
-  /// its intents, checks them, and closes the link. A snapshot can pass the zone, so it sends more.
+  /// The gateway of a test: it gives the zone, sends a snapshot each 20 ms from a task of its own
+  /// until the client sends its intents, checks them, and closes the link. A snapshot can pass the
+  /// zone, so the task sends more, and no bound in time decides which path of the test runs.
   async fn gateway(mut peer: Peer) -> Peer {
     assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
     peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 1 }).await;
-    let mut tick = 12;
-    let sent = loop {
-      let bytes = datagram(&snapshot(tick)).expect("a datagram");
-      peer.connection.send_datagram(bytes.into()).expect("sent");
-      tick += 1;
-      if let Ok(got) = timeout(Duration::from_millis(20), peer.connection.read_datagram()).await {
-        break got.expect("a datagram");
+    let sender = peer.connection.clone();
+    let snapshots = tokio::spawn(async move {
+      let mut tick = 12;
+      loop {
+        let bytes = datagram(&snapshot(tick)).expect("a datagram");
+        sender.send_datagram(bytes.into()).expect("sent");
+        tick += 1;
+        sleep(Duration::from_millis(20)).await;
       }
-    };
+    });
+    let sent = peer.connection.read_datagram().await.expect("a datagram");
+    snapshots.abort();
+    assert!(snapshots.await.is_err(), "the snapshots stop before the link closes");
     let intents: Intents = decode(&sent).expect("intents");
     assert_eq!(intents.zone, ZoneId(1));
     assert!(intents.ack.is_some());
