@@ -6,6 +6,10 @@ use crate::Solid;
 /// The side of the square of a zone, in metres. Its corner is at the origin.
 const SIDE: f32 = 1024.0;
 
+/// The side of the square of a zone, in whole centimetres, which is `SIDE`. A player that walks
+/// past it leaves the zone.
+pub const SIDE_CM: i32 = 102_400;
+
 /// The blocks on the floor: the x and the z of the middle of each, and its height, in metres. Each
 /// is 4 m wide on the axes x and z.
 const BLOCKS: [[f32; 3]; 4] =
@@ -27,12 +31,18 @@ pub fn ground() -> Vec<Solid> {
 
 #[cfg(test)]
 mod tests {
-  use super::ground;
+  use super::{SIDE, SIDE_CM, ground};
   use crate::{Body, Input, Terrain, step};
 
   fn settle(position: [i32; 3]) -> Body {
     let terrain = Terrain::new(&ground()).expect("the ground is valid");
     (0..40).fold(Body { position, vertical_speed: 0 }, |body, _| step(&terrain, body, Input::Idle))
+  }
+
+  #[test]
+  fn the_side_in_centimetres_is_the_side_in_metres() {
+    let metres = f32::from(i16::try_from(SIDE_CM / 100).expect("1024 fits"));
+    assert_eq!(metres.to_bits(), SIDE.to_bits());
   }
 
   #[test]

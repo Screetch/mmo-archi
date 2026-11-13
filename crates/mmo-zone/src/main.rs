@@ -10,6 +10,10 @@
 //! nearest entities in the 9 cells of 32 m around
 //! it, as a delta against the last snapshot that its client acknowledged.
 //!
+//! A player that walks past the border of its zone goes to a layer of the next zone, with the
+//! hand-off of section 6: the writer asks the placement of the directory for that layer, dials its
+//! writer, and drops the player when that writer answers that it saved the player.
+//!
 //! The writer keeps its state as sections 2, 5, 6 and 9 of `docs/architecture.md` say. When it
 //! takes a layer, it claims the layer from the keeper, which gives it the next epoch of that
 //! layer, and it renews the lease of the layer in the directory with that epoch. It stops when a
@@ -46,6 +50,7 @@ mod keeper;
 mod link;
 #[cfg(test)]
 mod peer;
+mod remote;
 mod view;
 mod zone;
 
@@ -61,6 +66,7 @@ use crate::claim::Taken;
 use crate::config::Config;
 use crate::keeper::Keeper;
 use crate::link::Claimed;
+use crate::remote::Dial;
 use crate::zone::Zone;
 
 /// The most connections of the layer writer to PostgreSQL. It reads a character at each join.
@@ -132,8 +138,9 @@ impl Pool {
       Keeper::new(self.endpoint.clone(), self.client.clone(), self.keeper.clone(), ipv4);
     let taken = Taken::wait(&self.redis, self.shard, self.public.clone()).await?;
     let epoch = keeper.claim(taken.shard, taken.layer).await?;
-    let zone = Zone::new(taken.layer, taken.cap);
-    Ok(Claimed { zone, store: self.store.clone(), claim: taken.hold(epoch), keeper })
+    let zone = Zone::new(taken.layer, taken.cap).beside(&self.store.zones().await?);
+    let dial = Dial { endpoint: self.endpoint.clone(), client: self.client.clone(), ipv4 };
+    Ok(Claimed { zone, store: self.store.clone(), claim: taken.hold(epoch), keeper, dial })
   }
 }
 
@@ -334,7 +341,8 @@ mod tests {
       "the database refuses the layer writer: the database lacks the migration 1, which the \
        keeper runs"
     );
-    let store = Store::migrate(PgPool::connect_with(connect).await?).await?;
+    let pool = PgPool::connect_with(connect).await?;
+    let store = Store::migrate(pool.clone()).await?;
     let in_use = write(var(world.vars(&address, database.as_str(), "nope"))).await;
     assert!(
       matches!(in_use, Error::Address(ref error) if error.kind() == io::ErrorKind::AddrInUse),
@@ -357,6 +365,12 @@ mod tests {
         "the keeper holds no zone of the layer that the layer writer claims",
       ]
     );
+    store.add_zone(ZoneId(1), "meadow").await?;
+    sqlx::query("ALTER TABLE zones RENAME TO places").execute(&pool).await?;
+    let () = admin.del("writer:1:1:1").await.expect("an end of the lease");
+    let gone = claim(&redis.url()).await;
+    let missing = "the database refuses the layer writer: error returned from database: relation \"zones\" does not exist";
+    assert!(gone.starts_with(missing), "{gone}");
     let unset = write(var(Vec::new())).await.to_string();
     assert_eq!(unset, "the variable ZONE_SHARD is not set");
     Ok(())

@@ -408,21 +408,30 @@ of the hand-off below. The client gets `Moved { zone, layer }` with its own zone
 
 ### The hand-off between two zones
 
+The zones lie in a row along the axis x: the zone with the next id lies east of a zone. The border between two
+zones is the east edge of the west zone, at x = 1024 m, and the west edge of the east zone, at x = 0. A border with no
+zone beyond it, which the table `zones` does not hold, is the edge of the world, and its floor ends there. A writer
+reads the ids of the zones from that table when it takes a layer.
+
 Each writer sends the quantized state of its entities within 48 m of a border, each tick, to the writer of the layer
 with the same number in the next zone, when that layer stands. The next writer shows them as entities that it does not
 own, so a player near a border sees across it.
 
-When a player crosses a border, the writer of the layer that the player leaves, the source, does these steps:
+When a player walks past a border, the writer of the layer that the player leaves, the source, does these steps:
 
-1. It runs `place` for the next zone, the target. When `place` answers wait, the source keeps the player at the
-   border, tells the client why, and runs `place` again after 1 s.
-2. It stops taking the inputs of the player, and sends `Transfer { account, link, state, version }` to the writer of
-   the layer that `place` gave.
-3. The target adds the player, and writes the presence of the account with its own zone, layer and epoch. It asks the
-   keeper to save the character with the new zone. Then it answers `Accepted`. When its layer holds its cap, it
-   refuses the player, and the source takes the inputs of the player again and goes back to step 1 after 1 s.
-4. The source drops the player and sends the event `Moved { zone, layer }` to the client. The client names the new
-   zone and the new layer in its next datagram, and the target sends it a full snapshot.
+1. It stops the player where it stands: it takes no more inputs of the player, and it saves the player no more. It runs
+   `place` for the next zone, the target. When `place` answers wait, the source tells the client with
+   `Full { zone }`, keeps the player at the border, and runs `place` again after 1 s.
+2. It dials the writer of the layer that `place` gave, and sends `Transfer { account, state, version }` on a stream of
+   that link. The state is in the coordinates of the target: the position at x = 0 of an east crossing, or at x = 1024 m
+   of a west crossing.
+3. The target adds the player, with no link, and writes the presence of the account with its own zone, layer and
+   epoch. It asks the keeper to save the character with the new zone. Then it answers `Accepted`. When its layer holds
+   its cap, it answers `Full`, and the source goes back to step 1 after 1 s.
+4. The source drops the player and sends the event `Moved { zone, layer }` to the client. The gateway of the client
+   joins the client to the writer of the new layer, as at an attach, which ties the link of the client to the player
+   that the target holds. The client names the new zone and the new layer in its next datagram, and the target sends
+   it a full snapshot. The target keeps a player that no client joins for 30 s, as it does for a closed link.
 
 Each save carries the `version` of the character, and the target adds 1 to it. The keeper refuses a save whose version
 is not more than the saved one. So when a writer stops during a hand-off, an old copy of the character never writes

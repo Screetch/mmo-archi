@@ -7,8 +7,9 @@ use std::mem;
 use std::time::{Duration, Instant};
 
 use mmo_protocol::{
-  AccountId, Batch, CharacterId, Frames, FromClient, Hello, Intents, Link, Relayed, SAVES, Save,
-  TICKS_PER_SECOND, ToZone, decode, encode, frame, relayed, unrelayed,
+  AccountId, Batch, CharacterId, Entity, Frames, FromClient, FromNeighbour, Hello, Intents, Layer,
+  Link, Relayed, SAVES, Save, TICKS_PER_SECOND, ToClient, ToNeighbour, ToZone, ZoneId, decode,
+  encode, frame, relayed, unrelayed,
 };
 use mmo_store::{Saved, Store, keys};
 use quinn::{
@@ -20,7 +21,8 @@ use tokio::time;
 use crate::Error;
 use crate::claim::{self, Claim, Entry};
 use crate::keeper::{self, Keeper};
-use crate::zone::{Gateway, Leaver, Refusal, Zone};
+use crate::remote::{self, Dial};
+use crate::zone::{Crossing, Gateway, Leaver, Refusal, Zone};
 
 /// The time of one tick: the zone runs 20 ticks each second, as the step of `mmo-collide` does.
 const TICK: Duration = Duration::from_millis(50);
@@ -56,6 +58,10 @@ pub(crate) const BUILD: u32 = {
   build
 };
 
+/// The time that a hand-over waits before it asks again: the next zone has no room for the player,
+/// or no writer takes the layer that the placement gave.
+const RETRY: Duration = Duration::from_secs(1);
+
 /// The code with which the layer writer closes the link of a gateway after a fault. The reason of
 /// the close holds the text of the fault.
 const FAULT: VarInt = VarInt::from_u32(1);
@@ -88,9 +94,30 @@ enum Refused {
   Zone(#[from] Refusal),
 }
 
+/// Why a hand-over to the next zone does not end at once.
+#[derive(Debug, thiserror::Error)]
+enum Handover {
+  #[error(transparent)]
+  Claim(#[from] claim::Error),
+  #[error(transparent)]
+  Remote(#[from] remote::Error),
+}
+
 /// What the tasks of the links tell the layer writer.
 enum Event {
-  Opened(Gateway, Connection),
+  /// A peer opened a link, and the sender writes the frames of the stream to it.
+  Opened(Gateway, Connection, UnboundedSender<Vec<u8>>),
+  /// The writer of `to` took the player of `character`, which walked past a border.
+  Crossed {
+    character: CharacterId,
+    to: Layer,
+  },
+  /// The next zone does not take the player of `character` yet, which waits at the border. Each
+  /// retry sends it again.
+  Held {
+    character: CharacterId,
+    zone: ZoneId,
+  },
   Message(Gateway, ToZone),
   Intents(Gateway, Relayed<Intents>),
   Loaded {
@@ -110,13 +137,21 @@ enum Event {
 }
 
 /// What a layer writer holds once it claimed its layer: the state of the layer, the store that it
-/// reads the last saves from, its claim in Redis, and its link to the keeper, which writes its
-/// saves.
+/// reads the last saves from, its claim in Redis, its link to the keeper, which writes its saves,
+/// and what it needs to dial the writer of the next zone.
 pub(crate) struct Claimed {
   pub(crate) zone: Zone,
   pub(crate) store: Store,
   pub(crate) claim: Claim,
   pub(crate) keeper: Keeper,
+  pub(crate) dial: Dial,
+}
+
+/// The link that a peer opened to the writer: the connection, and the frames to write on its
+/// stream. A peer is a gateway, or the writer of a layer that hands a player over.
+struct Opened {
+  connection: Connection,
+  out: UnboundedSender<Vec<u8>>,
 }
 
 /// Runs the tick of the zone, and takes the links of the gateways, each in a task of its own,
@@ -153,7 +188,11 @@ struct Writer {
   /// The batches for the task that sends them to the keeper, one after the other.
   batches: UnboundedSender<Batch>,
   events: UnboundedSender<Event>,
-  gateways: BTreeMap<Gateway, Connection>,
+  gateways: BTreeMap<Gateway, Opened>,
+  dial: Dial,
+  /// The players that a writer of the next zone handed over, which wait for the keeper to save
+  /// them in this zone, with the link of the writer that answers, by character.
+  pending: BTreeMap<i64, Gateway>,
   /// The ticks since the last save, from 0 to `SAVE_EVERY - 1`.
   ticks: u32,
   /// The count of the ticks since the last entry, by the bucket of their time in [`keys::ticks`].
@@ -166,13 +205,26 @@ struct Writer {
 
 impl Writer {
   fn new(claimed: Claimed, events: UnboundedSender<Event>) -> Self {
-    let Claimed { zone, store, claim, keeper } = claimed;
+    let Claimed { zone, store, claim, keeper, dial } = claimed;
     let (batches, sent) = unbounded_channel();
     tokio::spawn(deliver(keeper, sent, events.clone()));
-    let (gateways, owed) = (BTreeMap::new(), BTreeMap::new());
+    let (gateways, owed, pending) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
     let timing = BTreeMap::new();
-    let writer =
-      Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed, empty: 0 };
+    let (ticks, empty) = (0, 0);
+    let writer = Self {
+      zone,
+      store,
+      claim,
+      batches,
+      events,
+      gateways,
+      dial,
+      pending,
+      ticks,
+      timing,
+      owed,
+      empty,
+    };
     // The first lease of the epoch of the writer opens the layer.
     writer.write(Entry::Layer { players: 0, taken: Vec::new() });
     writer
@@ -181,8 +233,18 @@ impl Writer {
   /// Takes an event, and gives the fault that stops the layer writer when the event brings one.
   fn hear(&mut self, event: Event) -> Option<Error> {
     match event {
-      Event::Opened(gateway, connection) => {
-        self.gateways.insert(gateway, connection);
+      Event::Opened(gateway, connection, out) => {
+        self.gateways.insert(gateway, Opened { connection, out });
+      }
+      Event::Crossed { character, to } => {
+        if let Some((gateway, link)) = self.zone.depart(character) {
+          self.tell(gateway, link, ToClient::Moved { zone: to.zone, layer: to.number });
+        }
+      }
+      Event::Held { character, zone } => {
+        if let Some((gateway, link)) = self.zone.linked(character) {
+          self.tell(gateway, link, ToClient::Full { zone });
+        }
       }
       Event::Message(gateway, message) => self.message(gateway, &message),
       Event::Intents(gateway, Relayed { link, message }) => {
@@ -230,7 +292,69 @@ impl Writer {
       // The layer writer sends no chat yet, so a line goes nowhere.
       ToZone::Client(Relayed { message: FromClient::Say { .. }, .. }) => {}
       ToZone::Leave { link } => self.zone.leave(gateway, link),
+      ToZone::Neighbour(ToNeighbour::Transfer { account, state, version }) => {
+        self.receive(gateway, account, state, version);
+      }
     }
+  }
+
+  /// Takes the player that the writer on the link `gateway` hands over, writes the count of the
+  /// layer, which ends the place of the player, and its presence, and asks the keeper to save the
+  /// player in this zone. The writer gets its answer when the keeper acknowledges the save.
+  fn receive(&mut self, gateway: Gateway, account: AccountId, state: Entity, version: i64) {
+    let character = state.id;
+    match self.zone.receive(account, &state, version) {
+      Err(_) => self.answer(gateway, &FromNeighbour::Full { character }),
+      Ok(save) => {
+        self.write(Entry::Layer { players: self.zone.count(), taken: vec![account] });
+        self.write(Entry::Present(vec![(account, character)]));
+        if let Some(save) = save {
+          self.pending.insert(character.0, gateway);
+          self.send(&[save]);
+        } else {
+          self.answer(gateway, &FromNeighbour::Accepted { character });
+        }
+      }
+    }
+  }
+
+  /// Hands the player of `crossing` over to the writer of the layer that the placement gives, in a
+  /// task, so the tick goes on. The task asks again each second until a writer takes the player.
+  fn hand_over(&self, crossing: Crossing) {
+    let (claim, dial, events) = (self.claim.clone(), self.dial.clone(), self.events.clone());
+    tokio::spawn(async move {
+      let character = crossing.state.id;
+      let layer = loop {
+        match offer(&claim, &dial, &crossing).await {
+          Ok(Some(layer)) => break layer,
+          Ok(None) => {}
+          Err(error) => {
+            eprintln!("the layer writer cannot hand the character {} over: {error}", character.0);
+          }
+        }
+        // The sends of this task fail only when the layer writer stopped.
+        drop(events.send(Event::Held { character, zone: crossing.zone }));
+        time::sleep(RETRY).await;
+      };
+      drop(events.send(Event::Crossed { character, to: layer }));
+    });
+  }
+
+  /// Writes `bytes` on the stream of the peer on the link `gateway`, when that link stands.
+  fn send_to(&self, gateway: Gateway, bytes: Vec<u8>) {
+    if let Some(peer) = self.gateways.get(&gateway) {
+      // The send fails only when the task of the link ended, and its close comes next.
+      drop(peer.out.send(bytes));
+    }
+  }
+
+  /// Tells the client of `link`, through its gateway.
+  fn tell(&self, gateway: Gateway, link: Link, message: ToClient) {
+    self.send_to(gateway, framed(&encode(&Relayed { link, message })));
+  }
+
+  fn answer(&self, gateway: Gateway, message: &FromNeighbour) {
+    self.send_to(gateway, framed(&encode(message)));
   }
 
   /// Loads the last save of `character` in a task, so the tick goes on.
@@ -322,6 +446,11 @@ impl Writer {
     match result {
       Ok(_) => {
         self.zone.saved(&batch.saves);
+        for save in &batch.saves {
+          if let Some(gateway) = self.pending.remove(&save.character.0) {
+            self.answer(gateway, &FromNeighbour::Accepted { character: save.character });
+          }
+        }
         let left = batch.saves.iter().filter_map(|save| self.owed.remove(&save.character.0));
         let absent = left.map(|leaver| leaver.account).collect();
         self.write(Entry::Absent(absent));
@@ -356,11 +485,14 @@ impl Writer {
   fn tick(&mut self) {
     let started = Instant::now();
     let snapshots = self.zone.tick();
+    for crossing in self.zone.crossings() {
+      self.hand_over(crossing);
+    }
     let mut lost = Vec::new();
-    for (gateway, connection) in &self.gateways {
+    for (gateway, peer) in &self.gateways {
       for (_, snapshot) in snapshots.iter().filter(|(via, _)| via == gateway) {
         let bytes = relayed(snapshot.link, &encode(&snapshot.message));
-        if let Err(error) = connection.send_datagram(bytes.into()) {
+        if let Err(error) = peer.connection.send_datagram(bytes.into()) {
           eprintln!("a snapshot does not reach the gateway {}: {error}", gateway.0);
           lost.push(*gateway);
           break;
@@ -389,6 +521,20 @@ impl Writer {
   }
 }
 
+/// Asks the writer of the layer that the placement gives in the zone of `crossing` to take the
+/// player, and gives that layer when it does. It gives `None` when no layer has room, no writer
+/// serves the layer yet, or the writer refuses the player.
+async fn offer(claim: &Claim, dial: &Dial, crossing: &Crossing) -> Result<Option<Layer>, Handover> {
+  let Crossing { zone, account, state, version } = *crossing;
+  let Some((layer, serving)) = claim.crossing(account, zone).await? else { return Ok(None) };
+  let message = ToZone::Neighbour(ToNeighbour::Transfer { account, state, version });
+  let mut remote = dial.to(serving.address, "neighbour");
+  Ok(match remote.ask(&encode(&message), decode::<FromNeighbour>).await? {
+    FromNeighbour::Accepted { .. } => Some(layer),
+    FromNeighbour::Full { .. } => None,
+  })
+}
+
 /// Sends each batch to the keeper in turn, and tells the layer writer its result, until the writer
 /// stops.
 async fn deliver(
@@ -408,8 +554,9 @@ async fn gateway(incoming: Incoming, gateway: Gateway, events: UnboundedSender<E
   let fault = match incoming.await {
     Ok(connection) => {
       // Each send of this task fails only when the layer writer stopped, and then no one needs it.
-      drop(events.send(Event::Opened(gateway, connection.clone())));
-      let Err(fault) = relay(&connection, gateway, &events).await;
+      let (out, outgoing) = unbounded_channel();
+      drop(events.send(Event::Opened(gateway, connection.clone(), out)));
+      let Err(fault) = relay(&connection, gateway, &events, outgoing).await;
       connection.close(FAULT, fault.to_string().as_bytes());
       fault
     }
@@ -419,12 +566,14 @@ async fn gateway(incoming: Incoming, gateway: Gateway, events: UnboundedSender<E
   drop(events.send(Event::Closed(gateway)));
 }
 
-/// Takes the stream that the gateway opens. Each side writes its hello first, then the gateway
-/// sends its messages on the stream and the intents of its players in datagrams.
+/// Takes the stream that the peer opens. Each side writes its hello first, then the peer sends its
+/// messages on the stream, and the intents of its players in datagrams when it is a gateway. The
+/// writer answers on the stream with the frames of `outgoing`.
 async fn relay(
   connection: &Connection,
   gateway: Gateway,
   events: &UnboundedSender<Event>,
+  mut outgoing: UnboundedReceiver<Vec<u8>>,
 ) -> Result<Infallible, Fault> {
   let (mut send, recv) = connection.accept_bi().await?;
   let mut stream = Stream { recv, frames: Frames::default() };
@@ -433,16 +582,19 @@ async fn relay(
   loop {
     let event = tokio::select! {
       payload = stream.next() => {
-        payload.and_then(|payload| Ok(Event::Message(gateway, decode(&payload)?)))
+        payload.and_then(|payload| Ok(Some(Event::Message(gateway, decode(&payload)?))))
       }
       datagram = connection.read_datagram() => datagram
         .map_err(Fault::from)
         .and_then(|datagram| {
           let (link, intents) = unrelayed(&datagram)?;
-          Ok(Event::Intents(gateway, Relayed { link, message: decode(intents)? }))
+          Ok(Some(Event::Intents(gateway, Relayed { link, message: decode(intents)? })))
         }),
+      Some(bytes) = outgoing.recv() => send.write_all(&bytes).await.map(|()| None).map_err(Fault::from),
     }?;
-    drop(events.send(event));
+    if let Some(event) = event {
+      drop(events.send(event));
+    }
   }
 }
 
@@ -465,9 +617,12 @@ impl Stream {
   }
 }
 
-#[expect(clippy::expect_used, reason = "a hello holds 6 bytes")]
+#[expect(
+  clippy::expect_used,
+  reason = "a hello and a message of the writer hold less than a frame"
+)]
 fn framed(payload: &[u8]) -> Vec<u8> {
-  frame(payload).expect("a hello holds less than a frame")
+  frame(payload).expect("a message of the writer holds less than a frame")
 }
 
 #[cfg(test)]
@@ -475,11 +630,14 @@ mod tests {
   use std::cell::Cell;
   use std::cell::RefCell;
   use std::collections::BTreeMap;
+  use std::time::Duration;
 
+  use mmo_collide::SIDE_CM;
   use mmo_protocol::{
     AccountId, Angle, CharacterId, FromClient, Input, Intents, Link, PROTOCOL, Password, Position,
     Relayed, SAVES, Save, State, TICKS_PER_SECOND, Tick, ToZone, ZoneId, frame,
   };
+  use mmo_protocol::{Entity, Frames, FromNeighbour, ToClient, ToNeighbour, Velocity, decode};
   use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
   use mmo_store::{Directory, Lease, Leased, NewCharacter, Saved, Store, keys};
@@ -487,19 +645,31 @@ mod tests {
   use redis::AsyncCommands;
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+  use tokio::time;
 
   use super::{
-    Claimed, EMPTY_FOR, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve,
+    Claimed, EMPTY_FOR, Entry, Event, Gateway, Opened, SAVE_EVERY, Writer, claim, keeper, serve,
   };
   use crate::claim::Taken;
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
+  use crate::remote::Dial;
   use crate::zone::Zone;
 
   const MEADOW: ZoneId = ZoneId(1);
   const SHARD: ShardId = ShardId(1);
   const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
   const GATE: Gateway = Gateway(1);
+  const FOREST: ZoneId = ZoneId(2);
+  const FOREST_LAYER: Layer = Layer { zone: FOREST, number: 1 };
+  /// Brom stands one step from the east border of the meadow.
+  const BORDER: State = State {
+    position: Position { x: SIDE_CM - 30, y: 0, z: 10_000 },
+    yaw: Angle(0),
+    hit_points: 100,
+  };
+  /// The time that a test waits for a message: a fault fails the test, and never hangs it.
+  const WAIT: Duration = Duration::from_secs(60);
   const START: State =
     State { position: Position { x: 0, y: 0, z: 10_000 }, yaw: Angle(0), hit_points: 100 };
 
@@ -515,34 +685,53 @@ mod tests {
 
   impl Meadow {
     async fn new(pool: PgPool) -> Self {
+      Self::at(pool, START).await
+    }
+
+    /// A world whose one character starts in the meadow at `state`.
+    async fn at(pool: PgPool, state: State) -> Self {
       let store = Store::migrate(pool).await.expect("a migrated database");
       store.add_zone(MEADOW, "meadow").await.expect("a zone");
+      store.add_zone(FOREST, "forest").await.expect("a zone");
       let account = store.create_account("alice", Password("one".to_owned())).await.expect("one");
-      let brom = NewCharacter { account, shard: SHARD, name: "Brom", zone: MEADOW, state: START };
+      let brom = NewCharacter { account, shard: SHARD, name: "Brom", zone: MEADOW, state };
       let character = store.create_character(&brom).await.expect("Brom");
       let world = World::new();
       let keeper = Keeper::start(&world, store.clone());
       Self { world, redis: Redis::start().await, keeper, store, account, character }
     }
 
-    /// The endpoint of a layer writer, and what it holds once it claimed a layer from the keeper.
+    /// The endpoint of the layer writer of the meadow, and what it holds once it claimed its layer
+    /// from the keeper.
     async fn claimed(&self) -> (Endpoint, Claimed) {
+      self.claimed_for(LAYER, |_| "zone-1:4433".to_owned()).await
+    }
+
+    /// The same for `layer`, whose lease holds the address that `address` makes of the endpoint.
+    async fn claimed_for(
+      &self,
+      layer: Layer,
+      address: impl FnOnce(&Endpoint) -> String,
+    ) -> (Endpoint, Claimed) {
       let mut vars = self.world.vars("127.0.0.1:0", "postgres://zone@localhost/game", "nope");
       vars.insert(0, ("ZONE_KEEPER", self.keeper.address()));
       let config = Config::read(var(vars)).expect("a config");
       let endpoint = Endpoint::server(config.server, config.address).expect("an endpoint");
+      let dial = Dial { endpoint: endpoint.clone(), client: config.client.clone(), ipv4: true };
       let mut keeper = keeper::Keeper::new(endpoint.clone(), config.client, config.keeper, true);
       let mut admin = self.admin().await;
       let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, 500).await.expect("a cap");
-      let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), 0).await.expect("a layer");
-      let () = admin.del(keys::writer(SHARD, LAYER)).await.expect("no lease");
-      let address = "zone-1:4433".to_owned();
-      let taken = Taken::wait(&self.redis.url(), SHARD, address).await.expect("a layer");
+      let () = admin.hset(keys::layers(SHARD), keys::field(layer), 0).await.expect("a layer");
+      let () = admin.del(keys::writer(SHARD, layer)).await.expect("no lease");
+      let url = self.redis.url();
+      let taken = Taken::wait(&url, SHARD, address(&endpoint)).await.expect("a layer");
+      assert_eq!(taken.layer, layer);
       let epoch = keeper.claim(SHARD, taken.layer).await.expect("an epoch");
-      let zone = Zone::new(taken.layer, taken.cap);
+      let zones = self.store.zones().await.expect("the zones");
+      let zone = Zone::new(taken.layer, taken.cap).beside(&zones);
       let claim = taken.hold(epoch);
       let store = self.store.clone();
-      (endpoint, Claimed { zone, store, claim, keeper })
+      (endpoint, Claimed { zone, store, claim, keeper, dial })
     }
 
     async fn admin(&self) -> redis::aio::MultiplexedConnection {
@@ -564,6 +753,22 @@ mod tests {
       let (events, heard) = unbounded_channel();
       let writer = Writer::new(self.claimed().await.1, events);
       (writer, heard)
+    }
+
+    /// A peer that dialled `writer` as a gateway does, and the frames that the writer writes to it.
+    async fn open(
+      &self,
+      writer: &mut Writer,
+      gateway: Gateway,
+    ) -> (Peer, Endpoint, UnboundedReceiver<Vec<u8>>) {
+      let endpoint = self.world.keeper();
+      let address = endpoint.local_addr().expect("an address");
+      let accepted = async { endpoint.accept().await.expect("a peer").await.expect("a link") };
+      let gateways = self.world.gateway(true);
+      let (peer, connection) = tokio::join!(Peer::link(&gateways, address), accepted);
+      let (out, frames) = unbounded_channel();
+      assert!(writer.hear(Event::Opened(gateway, connection, out)).is_none());
+      (peer, endpoint, frames)
     }
 
     /// Takes the character into `writer`, from its last save.
@@ -595,7 +800,8 @@ mod tests {
     done: impl Fn(&Writer, &Event) -> bool,
   ) -> Option<String> {
     loop {
-      let event = heard.recv().await.expect("an event");
+      let event = time::timeout(WAIT, heard.recv()).await.expect("an event in time");
+      let event = event.expect("an event");
       let finished = done(writer, &event);
       if let Some(fault) = writer.hear(event) {
         return Some(fault.to_string());
@@ -718,7 +924,8 @@ mod tests {
     let accepted = async { endpoint.accept().await.expect("a gateway").await.expect("a link") };
     let (peer, connection) = tokio::join!(peer, accepted);
     connection.close(0u32.into(), b"");
-    writer.gateways.insert(Gateway(1), connection);
+    let (out, _) = unbounded_channel();
+    writer.gateways.insert(Gateway(1), Opened { connection, out });
     let joined = writer.loaded(Gateway(1), Link(1), account, Ok(vec![saved]));
     assert!(matches!(joined, Ok(())), "{joined:?}");
     writer.tick();
@@ -972,5 +1179,216 @@ mod tests {
     assert!(writer.owed.is_empty());
     let saved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
     assert_eq!(saved.version, 0);
+  }
+
+  /// Waits for `work`, which a fault of the code stops, so a test never hangs.
+  async fn within<T>(work: impl Future<Output = T>) -> T {
+    time::timeout(WAIT, work).await.expect("the work ends in time")
+  }
+
+  /// The payload of the next frame that the writer writes to a peer.
+  async fn payload(frames: &mut UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
+    let bytes = within(frames.recv()).await.expect("a frame");
+    let mut parts = Frames::default();
+    parts.push(&bytes);
+    parts.pop().expect("a frame").expect("a whole frame")
+  }
+
+  /// The answer that the writer writes to the writer of a layer that hands a player over.
+  async fn answer(frames: &mut UnboundedReceiver<Vec<u8>>) -> FromNeighbour {
+    decode(&payload(frames).await).expect("an answer")
+  }
+
+  /// Waits until the writer that holds `key` leases its layer with the epoch 1 of the keeper.
+  async fn served(redis: &Redis, key: &str) {
+    within(async {
+      while hash(redis, key).await.get("epoch").map(String::as_str) != Some("1") {
+        time::sleep(Duration::from_millis(20)).await;
+      }
+    })
+    .await;
+  }
+
+  /// The address that a writer leases when its endpoint takes the links of other writers.
+  fn dialable(endpoint: &Endpoint) -> String {
+    format!("localhost:{}", endpoint.local_addr().expect("an address").port())
+  }
+
+  fn held(_: &Writer, event: &Event) -> bool {
+    matches!(event, Event::Held { .. })
+  }
+
+  /// A writer of the meadow with Brom linked on a gateway, who walked one step past the east
+  /// border and waits for the next zone.
+  struct Border {
+    writer: Writer,
+    heard: UnboundedReceiver<Event>,
+    frames: UnboundedReceiver<Vec<u8>>,
+    _gateway: (Peer, Endpoint),
+  }
+
+  async fn border(meadow: &Meadow) -> Border {
+    let (mut writer, heard) = meadow.writer().await;
+    let (peer, endpoint, frames) = meadow.open(&mut writer, GATE).await;
+    meadow.join(&mut writer).await;
+    Border { writer, heard, frames, _gateway: (peer, endpoint) }
+  }
+
+  impl Border {
+    /// Brom walks one step east, which takes him past the border.
+    fn cross(&mut self) {
+      walk(&mut self.writer, 1, 1);
+    }
+
+    /// Waits until the writer tells the client why Brom waits, and checks the message.
+    async fn waits(&mut self) {
+      assert_eq!(hear(&mut self.writer, &mut self.heard, held).await, None);
+      let told = decode::<Relayed<ToClient>>(&payload(&mut self.frames).await);
+      let why = Relayed { link: Link(1), message: ToClient::Full { zone: FOREST } };
+      assert_eq!(told.expect("a message"), why);
+      assert_eq!(self.writer.zone.count(), 1);
+    }
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_at_the_border_waits_for_the_next_zone_and_crosses_once_a_writer_leases_a_layer(
+    pool: PgPool,
+  ) {
+    let meadow = Meadow::at(pool, BORDER).await;
+    let mut at_border = border(&meadow).await;
+    at_border.cross();
+    at_border.waits().await;
+    assert_eq!(hash(&meadow.redis, "layers:1").await["2:1"], "0", "the placement opened a layer");
+
+    let (endpoint, next) = meadow.claimed_for(FOREST_LAYER, dialable).await;
+    let forest = tokio::spawn(serve(endpoint, next));
+    served(&meadow.redis, "writer:1:2:1").await;
+    let crossed = |_: &Writer, event: &Event| matches!(event, Event::Crossed { .. });
+    assert_eq!(hear(&mut at_border.writer, &mut at_border.heard, crossed).await, None);
+    let told = decode::<Relayed<ToClient>>(&payload(&mut at_border.frames).await);
+    let to = ToClient::Moved { zone: FOREST, layer: 1 };
+    assert_eq!(told.expect("a message"), Relayed { link: Link(1), message: to });
+    assert_eq!(at_border.writer.zone.count(), 0);
+    forest.abort();
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_waits_when_the_writer_of_the_next_layer_has_no_room(pool: PgPool) {
+    let meadow = Meadow::at(pool, BORDER).await;
+    let (endpoint, mut full) = meadow.claimed_for(FOREST_LAYER, dialable).await;
+    full.zone = Zone::new(FOREST_LAYER, 0);
+    let forest = tokio::spawn(serve(endpoint, full));
+    served(&meadow.redis, "writer:1:2:1").await;
+    let mut at_border = border(&meadow).await;
+    at_border.cross();
+    at_border.waits().await;
+    forest.abort();
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_waits_when_the_lease_of_the_next_layer_names_no_address_to_dial(pool: PgPool) {
+    let meadow = Meadow::at(pool, BORDER).await;
+    let mut admin = meadow.admin().await;
+    let () = admin.hset(keys::layers(SHARD), keys::field(FOREST_LAYER), 0).await.expect("a layer");
+    let lease = [(keys::ADDRESS, "[::1]:4433"), (keys::EPOCH, "1")];
+    let () = admin.hset_multiple(keys::writer(SHARD, FOREST_LAYER), &lease).await.expect("a lease");
+    let mut at_border = border(&meadow).await;
+    at_border.cross();
+    at_border.waits().await;
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_waits_when_redis_refuses_the_placement(pool: PgPool) {
+    let meadow = Meadow::at(pool, BORDER).await;
+    let mut at_border = border(&meadow).await;
+    let () = meadow.admin().await.hdel(keys::shard(SHARD), keys::LAYER_CAP).await.expect("no cap");
+    at_border.cross();
+    at_border.waits().await;
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_that_walks_past_the_border_enters_a_layer_of_the_next_zone_and_its_client_follows(
+    pool: PgPool,
+  ) {
+    let meadow = Meadow::at(pool, BORDER).await;
+    let (a_endpoint, a) = meadow.claimed_for(LAYER, dialable).await;
+    let (b_endpoint, b) = meadow.claimed_for(FOREST_LAYER, dialable).await;
+    let at = |endpoint: &Endpoint| endpoint.local_addr().expect("an address");
+    let (a_at, b_at) = (at(&a_endpoint), at(&b_endpoint));
+    let writers = [tokio::spawn(serve(a_endpoint, a)), tokio::spawn(serve(b_endpoint, b))];
+    served(&meadow.redis, "writer:1:1:1").await;
+    served(&meadow.redis, "writer:1:2:1").await;
+    let gateways = meadow.world.gateway(true);
+    let mut one = Peer::link(&gateways, a_at).await;
+    one.greet().await;
+    let mut two = Peer::link(&gateways, b_at).await;
+    two.greet().await;
+    let join = ToZone::Join { link: Link(1), account: meadow.account, character: meadow.character };
+    one.tell(&join).await;
+    let first = within(one.snapshot(Link(1))).await;
+    let inputs = [1, 2, 3].map(|ahead| Input {
+      tick: Tick(first.tick.0 + ahead),
+      heading: Some(Angle(0)),
+      view: Angle(0),
+    });
+    let intents = Intents { zone: MEADOW, layer: 1, ack: None, inputs };
+    one.intents(&Relayed { link: Link(1), message: intents });
+    let moved = decode::<Relayed<ToClient>>(&within(one.read()).await).expect("a message");
+    let to = ToClient::Moved { zone: FOREST, layer: 1 };
+    assert_eq!(moved, Relayed { link: Link(1), message: to });
+
+    two.tell(&join).await;
+    let arrived = within(two.snapshot(Link(1))).await;
+    let at_start = Position { x: 0, y: 0, z: 10_000 };
+    assert_eq!(arrived.entered.iter().map(|one| one.position).collect::<Vec<_>>(), [at_start]);
+    let kept = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
+    assert_eq!((kept.zone, kept.version, kept.state.position), (FOREST, 1, at_start));
+    let presence = hash(&meadow.redis, &format!("presence:{}", meadow.account.0)).await;
+    assert_eq!([&presence["zone"], &presence["layer"], &presence["epoch"]], ["2", "1", "1"]);
+    for writer in writers {
+      writer.abort();
+    }
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_writer_answers_a_hand_over_after_the_keeper_saved_the_player_in_its_zone(
+    pool: PgPool,
+  ) {
+    let meadow = Meadow::new(pool).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    let (_peer, _endpoint, mut answers) = meadow.open(&mut writer, Gateway(5)).await;
+    let state = Entity {
+      id: meadow.character,
+      position: Position { x: 0, y: 0, z: 10_000 },
+      velocity: Velocity { x: 0, y: 0, z: 0 },
+      view: Angle(0),
+      animation: 0,
+      hit_points: 100,
+    };
+    let transfer = |from, state| {
+      let account = meadow.account;
+      Event::Message(from, ToZone::Neighbour(ToNeighbour::Transfer { account, state, version: 0 }))
+    };
+    let accepted = FromNeighbour::Accepted { character: meadow.character };
+    assert!(writer.hear(transfer(Gateway(5), state)).is_none());
+    assert_eq!((writer.zone.count(), writer.pending.len()), (1, 1));
+    assert_eq!(answers.try_recv().ok(), None, "the answer waits for the save");
+    assert_eq!(hear(&mut writer, &mut heard, saved_event).await, None);
+    assert_eq!(answer(&mut answers).await, accepted);
+    assert_eq!(meadow.store.load(&[meadow.character]).await.expect("a save")[0].version, 1);
+
+    assert!(writer.hear(transfer(Gateway(5), state)).is_none());
+    assert_eq!(answer(&mut answers).await, accepted);
+    writer.zone = Zone::new(LAYER, 0);
+    assert!(writer.hear(transfer(Gateway(5), state)).is_none());
+    let full = FromNeighbour::Full { character: meadow.character };
+    assert_eq!(answer(&mut answers).await, full);
+    writer.zone = Zone::new(LAYER, 500);
+    assert!(writer.hear(transfer(Gateway(9), state)).is_none());
+    assert_eq!(hear(&mut writer, &mut heard, saved_event).await, None);
+    assert_eq!(answers.try_recv().ok(), None, "no link of Gateway(9) stands to answer on");
+    let gone = CharacterId(99);
+    assert!(writer.hear(Event::Crossed { character: gone, to: FOREST_LAYER }).is_none());
+    assert!(writer.hear(Event::Held { character: gone, zone: FOREST }).is_none());
   }
 }

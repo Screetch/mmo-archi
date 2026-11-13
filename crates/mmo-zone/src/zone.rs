@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::mem;
 
-use mmo_collide::{Body, Terrain, step};
+use mmo_collide::{Body, SIDE_CM, Terrain, step};
 use mmo_protocol::{
   AccountId, Angle, CharacterId, Entity, Input, Intents, Layer, Link, Position, Relayed, Save,
   Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId,
@@ -42,9 +42,26 @@ pub(crate) struct Leaver {
   pub(crate) save: Option<Save>,
 }
 
+/// A player that walked past a border of the zone, for its writer to hand over to the next zone.
+/// The zone holds the player until [`Zone::depart`]: it takes no input of it, and saves it no more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Crossing {
+  /// The zone that the player enters.
+  pub(crate) zone: ZoneId,
+  pub(crate) account: AccountId,
+  /// The player in the coordinates of the zone that it enters.
+  pub(crate) state: Entity,
+  /// The version of the last save that this zone sent for the player.
+  pub(crate) version: i64,
+}
+
 /// The state of one layer of a zone: its players on the ground, at its present tick.
 pub(crate) struct Zone {
   layer: Layer,
+  /// The zone beyond the border at x = 0, when the world holds it.
+  west: Option<ZoneId>,
+  /// The zone beyond the border at x = [`SIDE_CM`], when the world holds it.
+  east: Option<ZoneId>,
   /// The most players of the layer, which the writer read from its shard when it claimed it.
   cap: usize,
   terrain: Terrain,
@@ -58,8 +75,9 @@ pub(crate) struct Zone {
 
 struct Player {
   account: AccountId,
-  /// The state that the store acknowledged last.
-  saved: State,
+  /// The state that the store acknowledged last, or `None` when the store holds the player in
+  /// another zone.
+  saved: Option<State>,
   /// The version of the last save that the zone sent, which each new save passes by 1.
   version: i64,
   body: Body,
@@ -69,6 +87,8 @@ struct Player {
   /// The inputs of the next ticks, by their tick.
   inputs: BTreeMap<u32, Input>,
   attachment: Attachment,
+  /// True from the tick when the player walked past a border until it departs.
+  crossing: bool,
 }
 
 enum Attachment {
@@ -80,6 +100,8 @@ impl Zone {
   pub(crate) fn new(layer: Layer, cap: usize) -> Self {
     Self {
       layer,
+      west: None,
+      east: None,
       cap,
       terrain: ground(),
       tick: Tick(0),
@@ -88,6 +110,15 @@ impl Zone {
       history: History::new(),
       left: Vec::new(),
     }
+  }
+
+  /// Sets the zones that lie beyond its borders: the zone before this one in `zones` is its west,
+  /// and the zone after it its east, as section 6 of `docs/architecture.md` says.
+  pub(crate) fn beside(mut self, zones: &[ZoneId]) -> Self {
+    let near = |zone: i32| zones.contains(&ZoneId(zone)).then_some(ZoneId(zone));
+    self.west = near(self.layer.zone.0 - 1);
+    self.east = near(self.layer.zone.0 + 1);
+    self
   }
 
   /// The count of the players that the zone holds, linked or not.
@@ -108,7 +139,8 @@ impl Zone {
   /// The save of each player whose state the store does not hold, each with the next version of
   /// its player. A save that the store does not acknowledge comes again with a greater version.
   pub(crate) fn dirty(&mut self) -> Vec<Save> {
-    self.players.iter_mut().filter_map(|(id, player)| player.unsaved(*id)).collect()
+    let walking = self.players.iter_mut().filter(|(_, player)| !player.crossing);
+    walking.filter_map(|(id, player)| player.unsaved(*id)).collect()
   }
 
   /// Notes that the store holds `saves`, so [`Zone::dirty`] gives a player again only after it
@@ -116,7 +148,7 @@ impl Zone {
   pub(crate) fn saved(&mut self, saves: &[Save]) {
     for save in saves {
       if let Some(player) = self.players.get_mut(&save.character.0) {
-        player.saved = save.state;
+        player.saved = Some(save.state);
       }
     }
   }
@@ -176,10 +208,13 @@ impl Zone {
     }
   }
 
-  /// The client of `link` ends the play of its character, which leaves the zone at once.
+  /// The client of `link` ends the play of its character, which leaves the zone at once, unless
+  /// the zone hands it to the next zone: the writer of that zone keeps it for 30 s then.
   pub(crate) fn logout(&mut self, gateway: Gateway, link: Link) {
-    if let Some(id) = self.unlink(gateway, link) {
-      self.drop_player(id);
+    let Some(id) = self.unlink(gateway, link) else { return };
+    match self.players.get_mut(&id) {
+      Some(player) if player.crossing => player.attachment = Attachment::Away { since: self.tick },
+      _ => self.drop_player(id),
     }
   }
 
@@ -195,8 +230,12 @@ impl Zone {
   pub(crate) fn intents(&mut self, gateway: Gateway, link: Link, intents: &Intents) {
     let now = self.tick.0;
     let player = self.links.get(&link.0).and_then(|id| self.players.get_mut(id));
-    let Some(Player { inputs, attachment: Attachment::Linked { gateway: via, ack, .. }, .. }) =
-      player
+    let Some(Player {
+      inputs,
+      attachment: Attachment::Linked { gateway: via, ack, .. },
+      crossing: false,
+      ..
+    }) = player
     else {
       return;
     };
@@ -221,13 +260,16 @@ impl Zone {
   pub(crate) fn tick(&mut self) -> Vec<(Gateway, Relayed<Snapshot>)> {
     self.tick = Tick(self.tick.0 + 1);
     let now = self.tick;
-    let expired = |player: &&Player| matches!(player.attachment, Attachment::Away { since } if now.0 - since.0 >= KEPT);
+    let expired = |player: &&Player| {
+      matches!(player.attachment, Attachment::Away { since } if now.0 - since.0 >= KEPT)
+        && !player.crossing
+    };
     let gone: Vec<i64> =
       self.players.iter().filter(|(_, p)| expired(p)).map(|(id, _)| *id).collect();
     for id in gone {
       self.drop_player(id);
     }
-    for player in self.players.values_mut() {
+    for player in self.players.values_mut().filter(|player| !player.crossing) {
       player.step(&self.terrain, now);
     }
     let entities = self.players.iter().map(|(id, player)| player.entity(CharacterId(*id)));
@@ -242,6 +284,72 @@ impl Zone {
       }
     }
     snapshots
+  }
+
+  /// The players that walked past a border to a zone that the world holds, since the last call.
+  /// Each stops where it stands, and the writer hands it over.
+  pub(crate) fn crossings(&mut self) -> Vec<Crossing> {
+    let mut found = Vec::new();
+    for (id, player) in &mut self.players {
+      let x = player.body.position[0];
+      let (to, shift) = if x < 0 {
+        (self.west, SIDE_CM)
+      } else if x >= SIDE_CM {
+        (self.east, -SIDE_CM)
+      } else {
+        continue;
+      };
+      let linked = matches!(player.attachment, Attachment::Linked { .. });
+      let Some(zone) = to.filter(|_| linked && !player.crossing) else { continue };
+      player.crossing = true;
+      player.velocity = Velocity { x: 0, y: 0, z: 0 };
+      let mut state = player.entity(CharacterId(*id));
+      state.position.x += shift;
+      found.push(Crossing { zone, account: player.account, state, version: player.version });
+    }
+    found
+  }
+
+  /// Drops the player of `character`, which the writer of the next zone holds now, and gives the
+  /// gateway and the link that carried it, when it had one.
+  pub(crate) fn depart(&mut self, character: CharacterId) -> Option<(Gateway, Link)> {
+    let player = self.players.remove(&character.0)?;
+    let Attachment::Linked { gateway, link, .. } = player.attachment else { return None };
+    self.links.remove(&link.0);
+    Some((gateway, link))
+  }
+
+  /// The gateway and the link of the player of `character`, when it has one.
+  pub(crate) fn linked(&self, character: CharacterId) -> Option<(Gateway, Link)> {
+    match self.players.get(&character.0)?.attachment {
+      Attachment::Linked { gateway, link, .. } => Some((gateway, link)),
+      Attachment::Away { .. } => None,
+    }
+  }
+
+  /// Takes the player that `entity` describes, which crossed a border of the next zone, with no
+  /// link: its client joins it after the writer of the next zone tells the client. It gives the
+  /// save that the store needs, which moves the character to this zone with the next version, or
+  /// `None` when the zone holds the player and the store holds its state. A zone that holds the
+  /// player already gives its save again, as a hand-over that the next zone repeats needs.
+  pub(crate) fn receive(
+    &mut self,
+    account: AccountId,
+    entity: &Entity,
+    version: i64,
+  ) -> Result<Option<Save>, Refusal> {
+    let id = entity.id.0;
+    if let Some(player) = self.players.get_mut(&id) {
+      return Ok(player.unsaved(id));
+    }
+    if self.players.len() >= self.cap {
+      return Err(Refusal::Full { cap: self.cap });
+    }
+    let mut player =
+      Player::arrived(account, entity, version, Attachment::Away { since: self.tick });
+    let save = player.unsaved(id);
+    self.players.insert(id, player);
+    Ok(save)
   }
 
   /// Takes no more messages of `link`, when it is the link of a player on `gateway`, and gives
@@ -263,7 +371,7 @@ impl Player {
     let Position { x, y, z } = saved.state.position;
     Self {
       account,
-      saved: saved.state,
+      saved: Some(saved.state),
       version: saved.version,
       body: Body { position: [x, y, z], vertical_speed: 0 },
       view: saved.state.yaw,
@@ -271,6 +379,24 @@ impl Player {
       hit_points: saved.state.hit_points,
       inputs: BTreeMap::new(),
       attachment,
+      crossing: false,
+    }
+  }
+
+  /// A player that crossed a border into this zone, which the store holds in the other zone.
+  fn arrived(account: AccountId, entity: &Entity, version: i64, attachment: Attachment) -> Self {
+    let Position { x, y, z } = entity.position;
+    Self {
+      account,
+      saved: None,
+      version,
+      body: Body { position: [x, y, z], vertical_speed: 0 },
+      view: entity.view,
+      velocity: Velocity { x: 0, y: 0, z: 0 },
+      hit_points: entity.hit_points,
+      inputs: BTreeMap::new(),
+      attachment,
+      crossing: false,
     }
   }
 
@@ -297,7 +423,7 @@ impl Player {
 
   fn unsaved(&mut self, id: i64) -> Option<Save> {
     let state = self.state();
-    (state != self.saved).then(|| {
+    (Some(state) != self.saved).then(|| {
       self.version += 1;
       Save { character: CharacterId(id), state, version: self.version }
     })
@@ -331,6 +457,7 @@ fn ground() -> Terrain {
 
 #[cfg(test)]
 mod tests {
+  use mmo_collide::SIDE_CM;
   use mmo_protocol::Layer;
   use mmo_protocol::{
     AccountId, Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed,
@@ -338,9 +465,10 @@ mod tests {
   };
   use mmo_store::Saved;
 
-  use super::{Gateway, KEPT, Leaver, Refusal, Zone};
+  use super::{Crossing, Gateway, KEPT, Leaver, Refusal, Zone};
 
   const MEADOW: ZoneId = ZoneId(1);
+  const FOREST: ZoneId = ZoneId(2);
   const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
   /// The cap of a layer at the start of a shard.
   const CAP: usize = 500;
@@ -587,5 +715,94 @@ mod tests {
       ]
     );
     assert_eq!(zone.leavers(), []);
+  }
+
+  /// A zone of the row of the meadow and the forest, with `player` of `zone` at `x`.
+  fn bordered(zone: ZoneId, x: i32) -> Zone {
+    let mut writer = Zone::new(Layer { zone, number: 1 }, CAP).beside(&[MEADOW, FOREST]);
+    let here = Saved { zone, ..saved(7, x) };
+    assert_eq!(writer.join(GATE, Link(1), ACCOUNT, &here), Ok(()));
+    writer
+  }
+
+  /// Runs `ticks` ticks of a zone with the walk of its one player, who is on the link 1.
+  fn walk(zone: &mut Zone, at: ZoneId, heading: Option<Angle>, ticks: u32) {
+    for _ in 0..ticks {
+      let now = zone.tick.0;
+      let walking = Intents { zone: at, ..intents(None, [now + 1, now + 2, now + 3], heading) };
+      zone.intents(GATE, Link(1), &walking);
+      zone.tick();
+    }
+  }
+
+  #[test]
+  fn a_player_that_walks_past_the_east_border_stops_and_waits_for_the_next_zone() {
+    let mut zone = bordered(MEADOW, SIDE_CM - 60);
+    walk(&mut zone, MEADOW, EAST, 1);
+    assert_eq!(zone.crossings(), []);
+    walk(&mut zone, MEADOW, EAST, 1);
+    let state = entity(7, 0, 0, NORTH);
+    let crossing = Crossing { zone: FOREST, account: ACCOUNT, state, version: 0 };
+    assert_eq!(zone.crossings(), [crossing]);
+    assert_eq!(zone.crossings(), []);
+    zone.intents(GATE, Link(1), &intents(None, [3, 4, 5], EAST));
+    let [(_, held)] = zone.tick().try_into().expect("one snapshot");
+    assert_eq!(held.message.entered, [entity(7, SIDE_CM, 0, NORTH)]);
+    assert_eq!((zone.dirty(), zone.linked(CharacterId(7))), (vec![], Some((GATE, Link(1)))));
+    assert_eq!(zone.linked(CharacterId(99)), None);
+    assert_eq!(zone.depart(CharacterId(7)), Some((GATE, Link(1))));
+    assert_eq!((zone.count(), zone.leavers(), zone.depart(CharacterId(7))), (0, vec![], None));
+  }
+
+  #[test]
+  fn a_player_that_walks_past_the_west_border_enters_the_east_end_of_the_next_zone() {
+    let mut zone = bordered(FOREST, 30);
+    walk(&mut zone, FOREST, Some(Angle(32768)), 2);
+    let [crossing] = zone.crossings().try_into().expect("one crossing");
+    assert_eq!((crossing.zone, crossing.state.position.x), (MEADOW, SIDE_CM - 30));
+  }
+
+  #[test]
+  fn a_zone_with_no_zone_beyond_its_border_hands_no_player_over_and_a_player_with_no_link_stays() {
+    let mut zone = Zone::new(LAYER, CAP).beside(&[MEADOW]);
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, SIDE_CM - 30)), Ok(()));
+    walk(&mut zone, MEADOW, EAST, 2);
+    assert_eq!(zone.crossings(), []);
+    let mut zone = bordered(MEADOW, SIDE_CM - 30);
+    walk(&mut zone, MEADOW, EAST, 1);
+    zone.leave(GATE, Link(1));
+    assert_eq!(zone.crossings(), []);
+  }
+
+  #[test]
+  fn a_player_that_logs_out_while_it_crosses_stays_until_the_next_zone_holds_it() {
+    let mut zone = bordered(MEADOW, SIDE_CM - 30);
+    walk(&mut zone, MEADOW, EAST, 1);
+    assert_eq!(zone.crossings().len(), 1);
+    zone.logout(GATE, Link(1));
+    drop(run(&mut zone, KEPT));
+    assert_eq!((zone.count(), zone.leavers(), zone.present()), (1, vec![], vec![]));
+    assert_eq!((zone.linked(CharacterId(7)), zone.depart(CharacterId(7))), (None, None));
+    assert_eq!(zone.count(), 0);
+  }
+
+  #[test]
+  fn a_player_that_crossed_a_border_arrives_with_no_link_and_gets_its_save_in_this_zone() {
+    let mut zone = Zone::new(Layer { zone: FOREST, number: 1 }, 2);
+    let state = State { position: Position { x: 0, y: 0, z: 10_000 }, yaw: NORTH, hit_points: 100 };
+    let save = |version| Save { character: CharacterId(7), state, version };
+    let arrived = entity(7, 0, 0, NORTH);
+    assert_eq!(zone.receive(ACCOUNT, &arrived, 4), Ok(Some(save(5))));
+    assert_eq!(zone.receive(ACCOUNT, &arrived, 4), Ok(Some(save(6))));
+    zone.saved(&[save(6)]);
+    assert_eq!(zone.receive(ACCOUNT, &arrived, 4), Ok(None));
+    assert_eq!((zone.count(), zone.present(), zone.linked(CharacterId(7))), (1, vec![], None));
+    let second = Save { character: CharacterId(8), state, version: 1 };
+    assert_eq!(zone.receive(AccountId(4), &entity(8, 0, 0, NORTH), 0), Ok(Some(second)));
+    let full = zone.receive(AccountId(5), &entity(9, 0, 0, NORTH), 0);
+    assert_eq!(full, Err(Refusal::Full { cap: 2 }));
+    let row = Saved { character: CharacterId(7), zone: FOREST, state, version: 6 };
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &row), Ok(()));
+    assert_eq!(zone.present(), [(ACCOUNT, CharacterId(7))]);
   }
 }

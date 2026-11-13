@@ -244,6 +244,11 @@ mod tests {
     let moved = ToClient::Moved { zone: ZoneId(2), layer: 1 };
     one.tell(&Relayed { link, message: moved.clone() }).await;
     assert_eq!(client.message::<ToClient>().await, moved);
+    assert_eq!(
+      two.message::<ToZone>().await,
+      join,
+      "the gateway joins the client to its new layer"
+    );
     one.tell(&Relayed { link, message: line("from the meadow") }).await;
     two.tell(&Relayed { link, message: line("from the forest") }).await;
     assert_eq!(client.message::<ToClient>().await, line("from the forest"));

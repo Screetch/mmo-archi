@@ -25,9 +25,9 @@ pub use codec::{
   DATAGRAM, Error, FRAME, Frames, Hello, datagram, decode, encode, frame, relayed, unrelayed,
 };
 pub use messages::{
-  Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, Input, Intents,
-  KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient, ToKeeper, ToLogin,
-  ToNeighbour, ToZone,
+  Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, FromNeighbour,
+  Input, Intents, KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient,
+  ToKeeper, ToLogin, ToNeighbour, ToZone,
 };
 pub use values::{
   AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, ShardId,
@@ -38,4 +38,4 @@ pub use values::{
 ///
 /// A change of a message, of the codec, of the version of bitcode or of the step of `mmo-collide`
 /// raises it. A new version needs a restart of the world, since a side accepts only its own.
-pub const PROTOCOL: u16 = 7;
+pub const PROTOCOL: u16 = 8;
