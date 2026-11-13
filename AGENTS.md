@@ -197,9 +197,13 @@ fix what your change broke, and report what was broken before.
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
-  `MMO_LOCAL_WORLD_CAP` (100) sets the cap of the world and `MMO_LOCAL_LAYER_CAP` (500) the cap of a layer, and the
-  stack runs a pool of layer writers for them on the ports from `MMO_LOCAL_ZONE_PORT` up. `MMO_LOCAL_PROFILE=release`
-  builds and runs the release profile, which the numbers of `docs/architecture.md` need.
+  `MMO_LOCAL_SHARDS` (1) sets the count of shards, `MMO_LOCAL_SHARD_CAP` (100) the cap of each shard and
+  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, and the stack runs a login service and a pool of layer writers for
+  each shard, the writers on the ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the shards, and their report
+  gives the layers that opened in each shard and the players on each. Set the same `MMO_LOCAL_SHARDS` for `bots` as for
+  `start`. `sh script/report.sh <report> <count> <shards>` reads that report and fails on a bot that did not play, on
+  a layer over its cap and on a shard with too few layers. No stage and no test runs more than 500 bots.
+  `MMO_LOCAL_PROFILE=release` builds and runs the release profile, which the numbers of `docs/architecture.md` need.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole, but for
   `crates/mmo-client/src/window.rs`, the one file that needs a window, which `.cargo/config.toml` leaves out. The tests of `mmo-render`
   draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe
@@ -257,8 +261,8 @@ Every pull request and every push to `main` runs the gates in `.github/workflows
 - `the suite` runs `cargo coverage` on Linux, and `the crate on` runs clippy and `cargo coverage` on Windows and on
   macOS, each when the scope says that the change needs it.
 - `the bots` runs the short stage 1 of the load test on Linux: `sh script/local.sh start`, then
-  `sh script/local.sh bots 200`, and it fails when a bot does not play or ends with a fault. It keeps the report as an
-  artifact.
+  `sh script/local.sh bots 200` with layers of cap 20, and it fails when a bot does not play or ends with a fault, when
+  a layer passes its cap, or when the layers do not open as the stage says. It keeps the report as an artifact.
 - `the gates` stands for all the jobs, and a job that the scope skips passes there, so a ruleset of `main` requires
   this check alone, with `the title` and `the contract`.
 

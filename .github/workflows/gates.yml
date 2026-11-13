@@ -171,17 +171,20 @@ jobs:
   bots:
     # The short stage 1 of the load test of docs/architecture.md: 200 bots against the whole stack, on Linux. The start
     # builds the servers in the dev profile and starts PostgreSQL, Redis, the keeper, the login service, the pool of
-    # layer writers and one gateway, with the cap of the world at 200 so that no bot waits in the queue. The program of the bots exits
-    # with 0 when a bot fails, so the step reads its report: it fails when a bot did not play, and when a bot ended with
-    # a fault, which a message that fails to decode is. The longest run holds 30 s to join, 20 s of play and the seed
-    # of the accounts, so the limit of 120 s is about twice that. The report and the logs of the stack are kept.
+    # layer writers and one gateway, with the cap of the shard at 200 so that no bot waits in the queue, and the cap of
+    # a layer at 20 so that the zone opens 10 layers. The program of the bots exits with 0 when a bot fails, so the step
+    # reads its report with script/report.sh: it fails when a bot did not play, when a bot ended with a fault, which a
+    # message that fails to decode is, when a layer passes its cap, and when the shard opens fewer layers than its
+    # players need. The longest run holds 30 s to join, 20 s of play and the seed of the accounts, so the limit of 120 s
+    # is about twice that. The report and the logs of the stack are kept.
     name: the bots
     needs: scope
     if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      MMO_LOCAL_WORLD_CAP: "200"
+      MMO_LOCAL_SHARD_CAP: "200"
+      MMO_LOCAL_LAYER_CAP: "20"
       MMO_BOTS_JOIN_SECONDS: "30"
       MMO_BOTS_PLAY_SECONDS: "20"
     steps:
@@ -210,16 +213,7 @@ jobs:
             echo "::error::the bots failed to run, or did not end in 120 s"
             exit 1
           fi
-          awk '
-            /^load test: / { found = 1; want = $3; played = $5 }
-            /^  [0-9]+ bots: / { count += $1; print "fault: " $0 }
-            END {
-              if (!found) { print "::error::the bots printed no report"; exit 1 }
-              if (want != 200 || played != want || count) {
-                printf "::error::%s of %s bots played, and %d ended with a fault\n", played, want, count
-                exit 1
-              }
-            }' "$report"
+          sh script/report.sh "$report" 200 1
       - if: always()
         run: sh script/local.sh stop
       - if: always()
