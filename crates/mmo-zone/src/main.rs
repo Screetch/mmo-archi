@@ -161,7 +161,7 @@ mod tests {
     ShardId, Snapshot, State, Tick, ToZone, Velocity, ZoneId,
   };
   use mmo_store::testing::Redis;
-  use mmo_store::{Directory, Placed, Store, keys};
+  use mmo_store::{Directory, NewCharacter, Placed, Store, keys};
   use redis::AsyncCommands;
   use redis::aio::MultiplexedConnection;
   use sqlx::ConnectOptions;
@@ -239,9 +239,11 @@ mod tests {
     let account = store.create_account("alice", Password("one".to_owned())).await?;
     let state =
       |x| State { position: Position { x, y: 0, z: 50_000 }, yaw: Angle(0), hit_points: 100 };
-    let brom = store.create_character(account, "Brom", ZoneId(1), state(49_000)).await?;
-    let cael = store.create_character(account, "Cael", ZoneId(1), state(48_000)).await?;
-    let dara = store.create_character(account, "Dara", ZoneId(2), state(48_000)).await?;
+    let new =
+      |name, zone, x| NewCharacter { account, shard: ShardId(1), name, zone, state: state(x) };
+    let brom = store.create_character(&new("Brom", ZoneId(1), 49_000)).await?;
+    let cael = store.create_character(&new("Cael", ZoneId(1), 48_000)).await?;
+    let dara = store.create_character(&new("Dara", ZoneId(2), 48_000)).await?;
     let world = World::new();
     let address = free();
     let redis = Redis::start().await;

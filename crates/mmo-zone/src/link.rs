@@ -481,7 +481,7 @@ mod tests {
   };
   use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
-  use mmo_store::{Directory, Lease, Leased, Saved, Store, keys};
+  use mmo_store::{Directory, Lease, Leased, NewCharacter, Saved, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use redis::AsyncCommands;
   use sqlx::PgPool;
@@ -517,7 +517,8 @@ mod tests {
       let store = Store::migrate(pool).await.expect("a migrated database");
       store.add_zone(MEADOW, "meadow").await.expect("a zone");
       let account = store.create_account("alice", Password("one".to_owned())).await.expect("one");
-      let character = store.create_character(account, "Brom", MEADOW, START).await.expect("Brom");
+      let brom = NewCharacter { account, shard: SHARD, name: "Brom", zone: MEADOW, state: START };
+      let character = store.create_character(&brom).await.expect("Brom");
       let world = World::new();
       let keeper = Keeper::start(&world, store.clone());
       Self { world, redis: Redis::start().await, keeper, store, account, character }

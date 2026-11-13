@@ -1,6 +1,9 @@
+use std::fmt::{self, Display, Formatter};
 use std::time::Duration;
 
-use mmo_protocol::{Frames, FromKeeper, Hello, KeeperRefusal, ToKeeper, decode, encode, frame};
+use mmo_protocol::{
+  Batch, CharacterId, Frames, FromKeeper, Hello, KeeperRefusal, ToKeeper, decode, encode, frame,
+};
 use mmo_store::Store;
 use quinn::{
   ConnectionError, Endpoint, Incoming, ReadError, RecvStream, SendStream, VarInt, WriteError,
@@ -137,9 +140,38 @@ async fn answered(store: &Store, message: ToKeeper) -> FromKeeper {
     ToKeeper::Claim { shard, layer } => {
       store.claim(shard, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
     }
-    ToKeeper::Save(batch) => store.save(&batch).await.map(|written| FromKeeper::Saved { written }),
+    ToKeeper::Save(batch) => store.save(&batch).await.map(|written| {
+      if !written.strangers.is_empty() {
+        eprintln!("{}", Strangers { batch: &batch, characters: &written.strangers });
+      }
+      FromKeeper::Saved { written: written.characters }
+    }),
   };
   done.unwrap_or_else(|error| FromKeeper::Refused(refusal(&error)))
+}
+
+/// The characters of a batch that no row of its shard holds. The login service places a character
+/// only in its own shard, so a writer that plays one of them shows a defect, and its play is lost.
+struct Strangers<'a> {
+  batch: &'a Batch,
+  characters: &'a [CharacterId],
+}
+
+impl Display for Strangers<'_> {
+  fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
+    let Batch { shard, layer, .. } = self.batch;
+    let ids: Vec<String> =
+      self.characters.iter().map(|character| character.0.to_string()).collect();
+    write!(
+      out,
+      "the keeper writes no save of the characters {} of a batch of layer {}:{} of shard {}, since \
+       no character of that shard holds their ids",
+      ids.join(", "),
+      layer.zone.0,
+      layer.number,
+      shard.0
+    )
+  }
 }
 
 fn refusal(error: &mmo_store::Error) -> KeeperRefusal {
@@ -153,14 +185,14 @@ fn refusal(error: &mmo_store::Error) -> KeeperRefusal {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    Batch, Epoch, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId, ToKeeper, ZoneId,
-    frame,
+    Batch, CharacterId, Epoch, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId,
+    ToKeeper, ZoneId, frame,
   };
   use mmo_store::Store;
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use sqlx::PgPool;
 
-  use super::{BUILD, answered, serve};
+  use super::{BUILD, Strangers, answered, serve};
   use crate::config::Config;
   use crate::peer::{World, Writer, var};
 
@@ -232,6 +264,18 @@ mod tests {
     assert_eq!(keeper.await.expect("serve ends").to_string(), "the endpoint of the links closed");
     drop(idle);
     Ok(())
+  }
+
+  #[test]
+  fn the_fault_of_a_batch_names_each_stranger_with_its_layer_and_its_shard() {
+    let layer = Layer { zone: ZoneId(1), number: 3 };
+    let batch = Batch { shard: ShardId(2), layer, epoch: Epoch(1), saves: vec![] };
+    let strangers = Strangers { batch: &batch, characters: &[CharacterId(4), CharacterId(9)] };
+    assert_eq!(
+      strangers.to_string(),
+      "the keeper writes no save of the characters 4, 9 of a batch of layer 1:3 of shard 2, since \
+       no character of that shard holds their ids"
+    );
   }
 
   #[sqlx::test(migrations = false)]

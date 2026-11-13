@@ -75,10 +75,10 @@ mod tests {
   use std::net::UdpSocket;
 
   use mmo_protocol::{
-    Angle, Batch, Epoch, FromKeeper, KeeperRefusal, Layer, Password, Position, Save, ShardId,
-    State, ToKeeper, ZoneId,
+    Angle, Batch, CharacterId, Epoch, FromKeeper, KeeperRefusal, Layer, Password, Position, Save,
+    ShardId, State, ToKeeper, ZoneId,
   };
-  use mmo_store::{Saved, Store};
+  use mmo_store::{NewCharacter, Saved, Store};
   use sqlx::ConnectOptions;
   use sqlx::migrate::MigrateError;
   use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
@@ -113,16 +113,28 @@ mod tests {
     let store = Store::open(PgPool::connect_with(connect).await?).await?;
     store.add_zone(ZoneId(1), "meadow").await?;
     let account = store.create_account("alice", Password("one".to_owned())).await?;
-    let brom = store.create_character(account, "Brom", ZoneId(1), START).await?;
-    let save = |epoch| {
-      let saves = vec![Save { character: brom, state: MOVED, version: 1 }];
+    let brom =
+      NewCharacter { account, shard: ShardId(1), name: "Brom", zone: ZoneId(1), state: START };
+    let brom = store.create_character(&brom).await?;
+    let save = |epoch, character| {
+      let saves = vec![Save { character, state: MOVED, version: 1 }];
       let layer = Layer { zone: ZoneId(1), number: 1 };
       ToKeeper::Save(Batch { shard: ShardId(1), layer, epoch: Epoch(epoch), saves })
     };
     let claim =
       |zone| ToKeeper::Claim { shard: ShardId(1), layer: Layer { zone: ZoneId(zone), number: 1 } };
     let mut answers = Vec::new();
-    for message in [claim(1), save(1), save(1), claim(1), save(1), claim(9)] {
+    let stranger = CharacterId(i64::MAX);
+    let messages = [
+      claim(1),
+      save(1, brom),
+      save(1, brom),
+      claim(1),
+      save(1, brom),
+      save(2, stranger),
+      claim(9),
+    ];
+    for message in messages {
       answers.push(writer.ask(&message).await);
     }
     assert_eq!(
@@ -133,6 +145,7 @@ mod tests {
         FromKeeper::Saved { written: 0 },
         FromKeeper::Claimed { epoch: Epoch(2) },
         FromKeeper::Refused(KeeperRefusal::Stale { held: Epoch(2) }),
+        FromKeeper::Saved { written: 0 },
         FromKeeper::Refused(KeeperRefusal::NoZone),
       ]
     );

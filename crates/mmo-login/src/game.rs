@@ -3,10 +3,11 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use mmo_protocol::{
-  AccountId, Angle, Epoch, FromLogin, Password, Position, ShardId, State, ToLogin, ZoneId,
+  AccountId, Angle, CharacterId, Epoch, FromLogin, Password, Position, ShardId, State, ToLogin,
+  ZoneId,
 };
 use mmo_store::testing::Redis;
-use mmo_store::{Directory, Lease, Store, keys};
+use mmo_store::{Directory, Lease, NewCharacter, Store, keys};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
@@ -54,7 +55,13 @@ impl Game {
 
   /// A copy of the login service of world 1 with a cap of `cap` accounts.
   pub(crate) fn copy(&self, cap: u32) -> Login {
-    Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap, layer_cap: 20 }, MEADOW)
+    self.world(1, cap)
+  }
+
+  /// A copy of the login service of the world `id`, whose shard is `id`, with a cap of `cap`
+  /// accounts.
+  pub(crate) fn world(&self, id: u32, cap: u32) -> Login {
+    Login::new(self.store.clone(), self.redis.clone(), World { id, cap, layer_cap: 20 }, MEADOW)
   }
 
   /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
@@ -79,12 +86,12 @@ impl Game {
     self.server.url()
   }
 
-  /// Opens a layer of `zone` in world 1 with a writer, as a placement and a layer writer do, so a
+  /// Opens a layer of `zone` in `shard` with a writer, as a placement and a layer writer do, so a
   /// selection in that zone gets it.
-  pub(crate) async fn layer(&self, zone: ZoneId) {
+  pub(crate) async fn layer(&self, shard: ShardId, zone: ZoneId) {
     let mut redis = self.redis.clone();
-    let directory = Directory { shard: ShardId(1) };
-    let () = redis.hset(keys::shard(ShardId(1)), keys::LAYER_CAP, 20).await.expect("a cap");
+    let directory = Directory { shard };
+    let () = redis.hset(keys::shard(shard), keys::LAYER_CAP, 20).await.expect("a cap");
     directory.place(&mut redis, AccountId(0), zone, None).await.expect("a placement");
     let layer = directory.claim(&mut redis, "w").await.expect("a claim").expect("a layer");
     let lease = Lease { layer, epoch: Epoch(1), address: "w", players: 0, taken: &[] };
@@ -93,6 +100,17 @@ impl Game {
 
   pub(crate) async fn account(&self, name: &str) -> AccountId {
     self.store.create_account(name, secret()).await.expect("a free name")
+  }
+
+  /// Makes the character `name` of `account` in `shard`, at `START` in the meadow.
+  pub(crate) async fn character(
+    &self,
+    account: AccountId,
+    shard: ShardId,
+    name: &str,
+  ) -> CharacterId {
+    let new = NewCharacter { account, shard, name, zone: MEADOW.zone, state: START };
+    self.store.create_character(&new).await.expect("a free name")
   }
 
   pub(crate) async fn enter(&self, copy: &Login, names: &[&str]) -> Vec<(Client, FromLogin)> {

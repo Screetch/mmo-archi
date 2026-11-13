@@ -307,6 +307,11 @@ players. A player of one shard never sees and never meets a player of another. E
 which its row in PostgreSQL holds, and the client names the shard at each login (section 4). Each shard adds its cap
 of players, so more shards hold more players.
 
+The login service finds the shard of a character in its row. It lists, selects and places only the characters whose
+row holds the shard of the login, and it writes that shard in the row of each new character. So a character plays only
+in its own shard, and a client that selects a character of another shard gets the refusal of a character that is not
+its own.
+
 The shards share the accounts, PostgreSQL, Redis, the keeper, the login services and the gateways. Each key of Redis
 that belongs to a shard holds the id of the shard (section 3). The hash `shard:{s}` holds the caps of the shard:
 `cap`, the count of the players that its queue admits (section 8), and `layer_cap`, the count of the players of each
@@ -651,8 +656,10 @@ A layer writer saves at these times:
 - Before it tells a player the result of an act that changes an item, as a trade or a purchase.
 
 The keeper writes a batch in one transaction. It first locks the row of the layer and checks its epoch. Then it writes
-only the characters whose new `version` is greater than the saved one. So a writer that stops loses at most the last
-10 s of movement of its players, and never an item.
+only the characters of the shard of the batch whose new `version` is greater than the saved one. So a writer that
+stops loses at most the last 10 s of movement of its players, and never an item. A save of a character that no row of
+the shard holds is a fault, since the login service places a character only in its own shard: the keeper writes the
+other saves of the batch, and writes the ids of those characters, the layer and the shard in its log.
 
 ## 10. The determinism
 
