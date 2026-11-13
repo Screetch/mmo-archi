@@ -1,20 +1,27 @@
-use mmo_protocol::{Batch, Epoch, Save, ZoneId};
+use mmo_protocol::{Batch, Epoch, Layer, Save, ShardId, ZoneId};
 
 use crate::{Error, Store};
 
-/// One statement, so one transaction: it locks the row of the zone, and writes only when the batch
-/// carries the epoch of that row.
-const SAVE: &str = "WITH zone AS (SELECT epoch FROM zones WHERE id = $1 FOR UPDATE), \
+/// One statement, so one transaction: it locks the row of the layer, and writes only when the
+/// batch carries the epoch of that row, and only the characters of the shard of the batch. A layer
+/// that no writer claimed holds the epoch 0.
+const SAVE: &str = "WITH layer AS (SELECT epoch FROM layers \
+  WHERE shard_id = $1 AND zone_id = $2 AND number = $3 FOR UPDATE), \
   written AS (UPDATE characters AS c \
-  SET zone_id = $1, x = s.x, y = s.y, z = s.z, yaw = s.yaw, hit_points = s.hit_points, \
+  SET zone_id = $2, x = s.x, y = s.y, z = s.z, yaw = s.yaw, hit_points = s.hit_points, \
   version = s.version, saved_at = now() \
-  FROM zone, unnest($3::bigint[], $4::integer[], $5::integer[], $6::integer[], \
-  $7::integer[], $8::integer[], $9::bigint[]) AS s (id, x, y, z, yaw, hit_points, version) \
-  WHERE zone.epoch = $2 AND c.id = s.id AND s.version > c.version RETURNING c.id) \
-  SELECT (SELECT epoch FROM zone), (SELECT count(*) FROM written)";
+  FROM layer, unnest($5::bigint[], $6::integer[], $7::integer[], $8::integer[], \
+  $9::integer[], $10::integer[], $11::bigint[]) AS s (id, x, y, z, yaw, hit_points, version) \
+  WHERE layer.epoch = $4 AND c.id = s.id AND c.shard_id = $1 AND s.version > c.version \
+  RETURNING c.id) \
+  SELECT coalesce((SELECT epoch FROM layer), 0), (SELECT count(*) FROM written)";
+
+/// The next epoch of a layer, which its first claim makes at 1.
+const CLAIM: &str = "INSERT INTO layers (shard_id, zone_id, number, epoch) VALUES ($1, $2, $3, 1) \
+  ON CONFLICT (shard_id, zone_id, number) DO UPDATE SET epoch = layers.epoch + 1 RETURNING epoch";
 
 impl Store {
-  /// Adds a zone to the world, at the epoch 0.
+  /// Adds a zone to the world.
   pub async fn add_zone(&self, zone: ZoneId, name: &str) -> Result<(), Error> {
     sqlx::query("INSERT INTO zones (id, name) VALUES ($1, $2)")
       .bind(zone.0)
@@ -24,27 +31,36 @@ impl Store {
     Ok(())
   }
 
-  /// Gives the next epoch of `zone` to the writer that claims it, so the keeper refuses each batch
-  /// of the writers before it.
-  pub async fn claim(&self, zone: ZoneId) -> Result<Epoch, Error> {
-    let epoch: Option<i64> =
-      sqlx::query_scalar("UPDATE zones SET epoch = epoch + 1 WHERE id = $1 RETURNING epoch")
-        .bind(zone.0)
-        .fetch_optional(&self.pool)
-        .await?;
-    epoch.map(Epoch).ok_or(Error::NoZone { zone })
+  /// Gives the next epoch of `layer` of `shard` to the writer that claims it, so the keeper
+  /// refuses each batch of the writers before it.
+  pub async fn claim(&self, shard: ShardId, layer: Layer) -> Result<Epoch, Error> {
+    sqlx::query_scalar(CLAIM)
+      .bind(i64::from(shard.0))
+      .bind(layer.zone.0)
+      .bind(i64::from(layer.number))
+      .fetch_one(&self.pool)
+      .await
+      .map(Epoch)
+      .map_err(|error| match error {
+        sqlx::Error::Database(ref found) if found.is_foreign_key_violation() => {
+          Error::NoZone { zone: layer.zone }
+        }
+        error => Error::Database(error),
+      })
   }
 
   /// Writes `batch` in one transaction, and gives the count of the characters that it wrote.
   ///
-  /// It refuses a batch whose epoch is not the last one of its zone. It writes a save only when its
-  /// version is greater than the saved one, so an old copy of a character never writes over a
-  /// newer one, and it moves each character that it writes to the zone of the batch, as a hand-off
-  /// needs.
+  /// It refuses a batch whose epoch is not the last one of its layer. It writes a save only when
+  /// its version is greater than the saved one and its character belongs to the shard of the
+  /// batch, so an old copy of a character never writes over a newer one, and it moves each
+  /// character that it writes to the zone of the batch, as a hand-off needs.
   pub async fn save(&self, batch: &Batch) -> Result<u64, Error> {
     let column = |of: fn(&Save) -> i32| batch.saves.iter().map(of).collect::<Vec<i32>>();
-    let (held, written): (Option<i64>, i64) = sqlx::query_as(SAVE)
-      .bind(batch.zone.0)
+    let (held, written): (i64, i64) = sqlx::query_as(SAVE)
+      .bind(i64::from(batch.shard.0))
+      .bind(batch.layer.zone.0)
+      .bind(i64::from(batch.layer.number))
       .bind(batch.epoch.0)
       .bind(batch.saves.iter().map(|save| save.character.0).collect::<Vec<i64>>())
       .bind(column(|save| save.state.position.x))
@@ -55,17 +71,20 @@ impl Store {
       .bind(batch.saves.iter().map(|save| save.version).collect::<Vec<i64>>())
       .fetch_one(&self.pool)
       .await?;
-    match held.map(Epoch) {
-      Some(held) if held == batch.epoch => Ok(written.unsigned_abs()),
-      Some(held) => Err(Error::Epoch { zone: batch.zone, held, given: batch.epoch }),
-      None => Err(Error::NoZone { zone: batch.zone }),
+    match Epoch(held) {
+      held if held == batch.epoch => Ok(written.unsigned_abs()),
+      held => {
+        Err(Error::Epoch { shard: batch.shard, layer: batch.layer, held, given: batch.epoch })
+      }
     }
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use mmo_protocol::{Angle, Batch, CharacterId, Epoch, Password, Position, Save, State, ZoneId};
+  use mmo_protocol::{
+    Angle, Batch, CharacterId, Epoch, Layer, Password, Position, Save, ShardId, State, ZoneId,
+  };
   use sqlx::PgPool;
 
   use crate::{Error, Saved, Store};
@@ -74,6 +93,11 @@ mod tests {
     State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
   const MOVED: State =
     State { position: Position { x: 102_400, y: 250, z: -3 }, yaw: Angle(16384), hit_points: 7 };
+  const SHARD: ShardId = ShardId(1);
+
+  const fn on(zone: i32, number: u32) -> Layer {
+    Layer { zone: ZoneId(zone), number }
+  }
 
   async fn world(store: &Store) -> [CharacterId; 2] {
     store.add_zone(ZoneId(1), "meadow").await.expect("a new zone");
@@ -85,12 +109,17 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
-  async fn each_claim_gives_the_next_epoch_of_its_zone(pool: PgPool) -> Result<(), Error> {
+  async fn each_claim_gives_the_next_epoch_of_its_layer_alone(pool: PgPool) -> Result<(), Error> {
     let store = Store::migrate(pool).await?;
     store.add_zone(ZoneId(1), "meadow").await?;
-    assert_eq!(store.claim(ZoneId(1)).await?, Epoch(1));
-    assert_eq!(store.claim(ZoneId(1)).await?, Epoch(2));
-    let refused = store.claim(ZoneId(9)).await.err().map(|error| error.to_string());
+    let mut epochs = Vec::new();
+    for (shard, layer) in
+      [(SHARD, on(1, 1)), (SHARD, on(1, 1)), (SHARD, on(1, 2)), (ShardId(2), on(1, 1))]
+    {
+      epochs.push(store.claim(shard, layer).await?);
+    }
+    assert_eq!(epochs, [Epoch(1), Epoch(2), Epoch(1), Epoch(1)]);
+    let refused = store.claim(SHARD, on(9, 1)).await.err().map(|error| error.to_string());
     assert_eq!(refused.as_deref(), Some("no zone has the id 9"));
     Ok(())
   }
@@ -101,12 +130,12 @@ mod tests {
   ) -> Result<(), Error> {
     let store = Store::migrate(pool).await?;
     let [brom, cael] = world(&store).await;
-    let epoch = store.claim(ZoneId(2)).await?;
+    let epoch = store.claim(SHARD, on(2, 3)).await?;
     let saves = vec![
       Save { character: brom, state: MOVED, version: 1 },
       Save { character: cael, state: MOVED, version: 0 },
     ];
-    assert_eq!(store.save(&Batch { zone: ZoneId(2), epoch, saves }).await?, 1);
+    assert_eq!(store.save(&Batch { shard: SHARD, layer: on(2, 3), epoch, saves }).await?, 1);
     assert_eq!(
       store.load(&[brom, cael]).await?,
       [
@@ -118,24 +147,28 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
-  async fn a_batch_of_an_old_writer_or_of_no_zone_writes_nothing(
+  async fn a_batch_of_an_old_writer_of_an_unclaimed_layer_or_of_another_shard_writes_nothing(
     pool: PgPool,
   ) -> Result<(), Error> {
     let store = Store::migrate(pool).await?;
     let [brom, cael] = world(&store).await;
-    let old = store.claim(ZoneId(1)).await?;
-    store.claim(ZoneId(1)).await?;
+    let old = store.claim(SHARD, on(1, 1)).await?;
+    store.claim(SHARD, on(1, 1)).await?;
+    let other = store.claim(ShardId(2), on(1, 1)).await?;
     let saves = vec![Save { character: brom, state: MOVED, version: 1 }];
-    let mut refusals = Vec::new();
-    for (zone, epoch) in [(ZoneId(1), old), (ZoneId(9), old)] {
-      let refused = store.save(&Batch { zone, epoch, saves: saves.clone() }).await;
-      refusals.push(refused.err().map(|error| error.to_string()));
+    let mut answers = Vec::new();
+    for (shard, layer, epoch) in
+      [(SHARD, on(1, 1), old), (SHARD, on(1, 2), old), (ShardId(2), on(1, 1), other)]
+    {
+      let answer = store.save(&Batch { shard, layer, epoch, saves: saves.clone() }).await;
+      answers.push(answer.map_err(|error| error.to_string()));
     }
     assert_eq!(
-      refusals,
+      answers,
       [
-        Some("zone 1 is at epoch 2, and the batch is of epoch 1".to_owned()),
-        Some("no zone has the id 9".to_owned()),
+        Err("layer 1:1 of shard 1 is at epoch 2, and the batch is of epoch 1".to_owned()),
+        Err("layer 1:2 of shard 1 is at epoch 0, and the batch is of epoch 1".to_owned()),
+        Ok(0),
       ]
     );
     let saved = store.load(&[brom, cael]).await?;

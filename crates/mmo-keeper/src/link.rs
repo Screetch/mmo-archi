@@ -134,7 +134,9 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 
 async fn answered(store: &Store, message: ToKeeper) -> FromKeeper {
   let done = match message {
-    ToKeeper::Claim { zone } => store.claim(zone).await.map(|epoch| FromKeeper::Claimed { epoch }),
+    ToKeeper::Claim { shard, layer } => {
+      store.claim(shard, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
+    }
     ToKeeper::Save(batch) => store.save(&batch).await.map(|written| FromKeeper::Saved { written }),
   };
   done.unwrap_or_else(|error| FromKeeper::Refused(refusal(&error)))
@@ -151,7 +153,8 @@ fn refusal(error: &mmo_store::Error) -> KeeperRefusal {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    Batch, Epoch, FromKeeper, Hello, KeeperRefusal, PROTOCOL, ToKeeper, ZoneId, frame,
+    Batch, Epoch, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId, ToKeeper, ZoneId,
+    frame,
   };
   use mmo_store::Store;
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
@@ -193,7 +196,8 @@ mod tests {
     deaf.write(&hello(PROTOCOL)).await;
     let mut gone = Writer::link(&writers, address).await;
     gone.greet().await;
-    let refused = gone.ask(&ToKeeper::Claim { zone: ZoneId(9) }).await;
+    let nowhere = Layer { zone: ZoneId(9), number: 1 };
+    let refused = gone.ask(&ToKeeper::Claim { shard: ShardId(1), layer: nowhere }).await;
     gone.send.reset(7u32.into()).expect("an open stream");
     let mut reasons = Vec::new();
     for writer in [other, large, wrong, deaf, gone] {
@@ -236,8 +240,9 @@ mod tests {
   ) -> Result<(), mmo_store::Error> {
     let store = Store::migrate(pool.clone()).await?;
     pool.close().await;
-    let batch = Batch { zone: ZoneId(1), epoch: Epoch(1), saves: vec![] };
-    let claim = answered(&store, ToKeeper::Claim { zone: ZoneId(1) }).await;
+    let (shard, layer) = (ShardId(1), Layer { zone: ZoneId(1), number: 1 });
+    let batch = Batch { shard, layer, epoch: Epoch(1), saves: vec![] };
+    let claim = answered(&store, ToKeeper::Claim { shard, layer }).await;
     let save = answered(&store, ToKeeper::Save(batch)).await;
     assert_eq!([claim, save], [FromKeeper::Refused(KeeperRefusal::Unavailable); 2]);
     Ok(())

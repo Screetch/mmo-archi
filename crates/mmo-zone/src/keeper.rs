@@ -1,10 +1,11 @@
 //! The link of the zone writer to the keeper, the one writer of the game data: the writer claims
-//! the epoch of its zone on it, and sends its save batches on it.
+//! the epoch of its layer on it, and sends its save batches on it.
 
 use std::io;
 
 use mmo_protocol::{
-  Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, ToKeeper, ZoneId, decode, encode, frame,
+  Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, ShardId, ToKeeper, decode, encode,
+  frame,
 };
 use quinn::{
   ClientConfig, ConnectError, Connection, ConnectionError, Endpoint, ReadError, RecvStream,
@@ -37,7 +38,7 @@ pub(crate) enum Error {
   Answer(FromKeeper),
   #[error("the keeper holds no zone of the id that the zone writer claims")]
   NoZone,
-  #[error("the keeper holds the epoch {} of the zone, which is newer than the epoch of the batch", held.0)]
+  #[error("the keeper holds the epoch {} of the layer, which is newer than the epoch of the batch", held.0)]
   Stale { held: Epoch },
   #[error("the keeper cannot write in PostgreSQL now")]
   Unavailable,
@@ -72,9 +73,9 @@ impl Keeper {
     Self { endpoint, client, address, ipv4, stream: None }
   }
 
-  /// Asks the keeper for the next epoch of `zone`, which it writes in PostgreSQL.
-  pub(crate) async fn claim(&mut self, zone: ZoneId) -> Result<Epoch, Error> {
-    match self.ask(&ToKeeper::Claim { zone }).await? {
+  /// Asks the keeper for the next epoch of `layer` of `shard`, which it writes in PostgreSQL.
+  pub(crate) async fn claim(&mut self, shard: ShardId, layer: Layer) -> Result<Epoch, Error> {
+    match self.ask(&ToKeeper::Claim { shard, layer }).await? {
       FromKeeper::Claimed { epoch } => Ok(epoch),
       answer => Err(Error::Answer(answer)),
     }
@@ -153,7 +154,8 @@ impl Stream {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, PROTOCOL, ZoneId, encode, frame,
+    Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId, ZoneId,
+    encode, frame,
   };
   use quinn::{Connection, Endpoint, RecvStream, SendStream};
 
@@ -161,7 +163,8 @@ mod tests {
   use crate::config::Config;
   use crate::peer::{World, var};
 
-  const MEADOW: ZoneId = ZoneId(1);
+  const SHARD: ShardId = ShardId(1);
+  const MEADOW: Layer = Layer { zone: ZoneId(1), number: 1 };
 
   /// The side of the keeper on a link, which the test drives.
   struct Side {
@@ -227,7 +230,7 @@ mod tests {
     let keeper = world.keeper();
     let address = format!("localhost:{}", keeper.local_addr().expect("an address").port());
     let mut writer = dialing(&world, &address);
-    let batch = Batch { zone: MEADOW, epoch: Epoch(1), saves: Vec::new() };
+    let batch = Batch { shard: SHARD, layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
     let answers = [
       FromKeeper::Refused(KeeperRefusal::Unavailable),
       FromKeeper::Refused(KeeperRefusal::NoZone),
@@ -246,17 +249,18 @@ mod tests {
       side
     };
     let ask = async {
-      let mut claims = vec![text(writer.claim(MEADOW).await), text(writer.claim(MEADOW).await)];
+      let mut claims =
+        vec![text(writer.claim(SHARD, MEADOW).await), text(writer.claim(SHARD, MEADOW).await)];
       let mut saves = vec![text(writer.save(batch.clone()).await)];
       saves.push(text(writer.save(batch.clone()).await));
-      claims.push(text(writer.claim(MEADOW).await));
+      claims.push(text(writer.claim(SHARD, MEADOW).await));
       saves.push(text(writer.save(batch.clone()).await));
-      claims.push(text(writer.claim(MEADOW).await));
+      claims.push(text(writer.claim(SHARD, MEADOW).await));
       (claims, saves)
     };
     let ((claims, saves), _side) = tokio::join!(ask, keep);
     let stale =
-      "the keeper holds the epoch 2 of the zone, which is newer than the epoch of the batch";
+      "the keeper holds the epoch 2 of the layer, which is newer than the epoch of the batch";
     assert_eq!(
       claims,
       [
@@ -338,7 +342,7 @@ mod tests {
       [Script::Foreign, Script::Large, Script::Ended, Script::Garbled, Script::Reset, Script::Deaf];
     for script in scripts {
       let side = async { Side::accept(&keeper).await.play(script).await };
-      faults.push(text(tokio::join!(writer.claim(MEADOW), side).0));
+      faults.push(text(tokio::join!(writer.claim(SHARD, MEADOW), side).0));
     }
     let foreign = PROTOCOL + 1;
     assert_eq!(
@@ -366,9 +370,9 @@ mod tests {
     let address = format!("localhost:{}", keeper.local_addr().expect("an address").port());
     let refuse = async { keeper.accept().await.expect("a writer").refuse() };
     let mut writer = dialing(&world, &address);
-    let mut faults = vec![text(tokio::join!(writer.claim(MEADOW), refuse).0)];
+    let mut faults = vec![text(tokio::join!(writer.claim(SHARD, MEADOW), refuse).0)];
     for address in ["127.0.0.1:0", "nope", "[::1]:4433"] {
-      faults.push(text(dialing(&world, address).claim(MEADOW).await));
+      faults.push(text(dialing(&world, address).claim(SHARD, MEADOW).await));
     }
     assert_eq!(
       faults,

@@ -295,7 +295,8 @@ impl Writer {
         None
       }
       Err(keeper::Error::Stale { held }) => {
-        Some(claim::Error::Superseded { zone: batch.zone, held: held.0, own: batch.epoch }.into())
+        let zone = batch.layer.zone;
+        Some(claim::Error::Superseded { zone, held: held.0, own: batch.epoch }.into())
       }
       Err(error) => {
         eprintln!(
@@ -441,6 +442,7 @@ mod tests {
     AccountId, Angle, CharacterId, FromClient, Input, Intents, Link, PROTOCOL, Password, Position,
     Relayed, SAVES, Save, State, TICKS_PER_SECOND, Tick, ToZone, ZoneId, frame,
   };
+  use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
   use mmo_store::{Saved, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
@@ -448,11 +450,14 @@ mod tests {
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
   use super::{Claim, Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
+  use crate::claim::Held;
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
   use crate::zone::Zone;
 
   const MEADOW: ZoneId = ZoneId(1);
+  const SHARD: ShardId = ShardId(1);
+  const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
   const GATE: Gateway = Gateway(1);
   const START: State =
     State { position: Position { x: 0, y: 0, z: 10_000 }, yaw: Angle(0), hit_points: 100 };
@@ -485,9 +490,10 @@ mod tests {
       let config = Config::read(var(vars)).expect("a config");
       let endpoint = Endpoint::server(config.server, config.address).expect("an endpoint");
       let mut keeper = keeper::Keeper::new(endpoint.clone(), config.client, config.keeper, true);
-      let epoch = keeper.claim(MEADOW).await.expect("an epoch");
+      let epoch = keeper.claim(SHARD, LAYER).await.expect("an epoch");
       let address = "zone-1:4433".to_owned();
-      let claim = Claim::open(&self.redis.url(), MEADOW, epoch, address).await.expect("a claim");
+      let held = Held { shard: SHARD, layer: LAYER, epoch };
+      let claim = Claim::open(&self.redis.url(), held, address).await.expect("a claim");
       let store = self.store.clone();
       (endpoint, Claimed { zone: Zone::new(MEADOW), store, claim, keeper })
     }
@@ -720,7 +726,7 @@ mod tests {
     let meadow = Meadow::new(pool).await;
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
-    meadow.store.claim(MEADOW).await.expect("a newer epoch");
+    meadow.store.claim(SHARD, LAYER).await.expect("a newer epoch");
     walk(&mut writer, 1, SAVE_EVERY);
     let fault = hear(&mut writer, &mut heard, saved_event).await;
     assert_eq!(
@@ -730,7 +736,8 @@ mod tests {
 
     let (mut other, mut heard) = meadow.writer().await;
     let url = meadow.redis.url();
-    let newer = Claim::open(&url, MEADOW, mmo_protocol::Epoch(9), "z:1".to_owned());
+    let newer = Held { shard: SHARD, layer: LAYER, epoch: Epoch(9) };
+    let newer = Claim::open(&url, newer, "z:1".to_owned());
     newer.await.expect("a claim of a newer epoch");
     walk(&mut other, 1, 20);
     let fault = hear(&mut other, &mut heard, |_, _| false).await;
@@ -851,7 +858,8 @@ mod tests {
     let meadow = Meadow::new(pool).await;
     let (endpoint, claimed) = meadow.claimed().await;
     let url = meadow.redis.url();
-    let newer = Claim::open(&url, MEADOW, mmo_protocol::Epoch(9), "z:1".to_owned());
+    let newer = Held { shard: SHARD, layer: LAYER, epoch: Epoch(9) };
+    let newer = Claim::open(&url, newer, "z:1".to_owned());
     newer.await.expect("a claim of a newer epoch");
     let fault = serve(endpoint, claimed).await;
     assert_eq!(

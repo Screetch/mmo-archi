@@ -19,12 +19,12 @@ pub struct ZoneId(pub i32);
 
 /// The id of a shard: one independent world, with its own zones, layers, queue and players. A
 /// player of one shard never meets a player of another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct ShardId(pub u32);
 
 /// A layer: one full copy of a zone in a shard, with its own state, its own players and its own
 /// writer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Layer {
   /// The zone that the layer copies.
   pub zone: ZoneId,
@@ -33,11 +33,11 @@ pub struct Layer {
   pub number: u32,
 }
 
-/// The epoch of a zone: the count of the writers that claimed it, as the table `zones` of
+/// The epoch of a layer: the count of the writers that claimed it, as the table `layers` of
 /// PostgreSQL holds it.
 ///
-/// Each save of a zone writer carries its epoch, and the keeper refuses a save of an old epoch. So
-/// a writer that lost its zone, but still runs, writes nothing.
+/// Each save of a layer writer carries its epoch, and the keeper refuses a save of an old epoch.
+/// So a writer that lost its layer, but still runs, writes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Epoch(pub i64);
 

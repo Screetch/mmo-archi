@@ -10,6 +10,6 @@ fn the_zone_writer_stops_at_once_on_a_variable_that_is_not_set() {
     .expect("the zone writer runs");
   assert_eq!(
     (output.status.code(), String::from_utf8_lossy(&output.stderr).into_owned()),
-    (Some(1), "the zone writer stops: the variable ZONE_ID is not set\n".to_owned())
+    (Some(1), "the zone writer stops: the variable ZONE_SHARD is not set\n".to_owned())
   );
 }
