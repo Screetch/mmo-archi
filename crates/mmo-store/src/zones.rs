@@ -104,13 +104,6 @@ impl Store {
     Ok(Neighbours { west: id(west), east: id(east), south: id(south), north: id(north) })
   }
 
-  /// The id of each zone of the world, in order.
-  pub async fn zones(&self) -> Result<Vec<ZoneId>, Error> {
-    let ids: Vec<i32> =
-      sqlx::query_scalar("SELECT id FROM zones ORDER BY id").fetch_all(&self.pool).await?;
-    Ok(ids.into_iter().map(ZoneId).collect())
-  }
-
   /// Gives the next epoch of `layer` of `shard` to the writer that claims it, so the keeper
   /// refuses each batch of the writers before it.
   pub async fn claim(&self, shard: ShardId, layer: Layer) -> Result<Epoch, Error> {
@@ -203,19 +196,6 @@ mod tests {
       made.push(store.create_character(&new(account, shard, name)).await.expect("a character"));
     }
     made.try_into().expect("three characters")
-  }
-
-  #[sqlx::test(migrations = false)]
-  async fn the_zones_come_in_the_order_of_their_ids(pool: PgPool) -> Result<(), Error> {
-    let store = Store::migrate(pool).await?;
-    assert_eq!(store.zones().await?, []);
-    store.add_zone(ZoneId(7), "forest").await?;
-    store.add_zone(ZoneId(2), "meadow").await?;
-    assert_eq!(store.zones().await?, [ZoneId(2), ZoneId(7)]);
-    store.pool.close().await;
-    let closed = store.zones().await.err().map(|error| error.to_string());
-    assert_eq!(closed.as_deref(), Some("attempted to acquire a connection on a closed pool"));
-    Ok(())
   }
 
   #[sqlx::test(migrations = false)]

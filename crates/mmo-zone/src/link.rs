@@ -640,7 +640,7 @@ mod tests {
   use mmo_protocol::{Entity, Frames, FromNeighbour, ToClient, ToNeighbour, Velocity, decode};
   use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
-  use mmo_store::{Directory, Lease, Leased, NewCharacter, Saved, Store, keys};
+  use mmo_store::{Directory, Lease, Leased, NewCharacter, Saved, Square, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
   use redis::AsyncCommands;
   use sqlx::PgPool;
@@ -662,6 +662,9 @@ mod tests {
   const GATE: Gateway = Gateway(1);
   const FOREST: ZoneId = ZoneId(2);
   const FOREST_LAYER: Layer = Layer { zone: FOREST, number: 1 };
+  /// The zone north of the meadow, whose id is no neighbour of the id of the meadow.
+  const RIDGE: ZoneId = ZoneId(5);
+  const RIDGE_LAYER: Layer = Layer { zone: RIDGE, number: 1 };
   /// Brom stands one step from the east border of the meadow.
   const BORDER: State = State {
     position: Position { x: SIDE_CM - 30, y: 0, z: 10_000 },
@@ -693,6 +696,10 @@ mod tests {
       let store = Store::migrate(pool).await.expect("a migrated database");
       store.add_zone(MEADOW, "meadow").await.expect("a zone");
       store.add_zone(FOREST, "forest").await.expect("a zone");
+      store.place_zone(MEADOW, Square { column: 0, row: 0 }).await.expect("a square");
+      store.place_zone(FOREST, Square { column: 1, row: 0 }).await.expect("a square");
+      store.add_zone(RIDGE, "ridge").await.expect("a zone");
+      store.place_zone(RIDGE, Square { column: 0, row: 1 }).await.expect("a square");
       let account = store.create_account("alice", Password("one".to_owned())).await.expect("one");
       let brom = NewCharacter { account, shard: SHARD, name: "Brom", zone: MEADOW, state };
       let character = store.create_character(&brom).await.expect("Brom");
@@ -727,8 +734,8 @@ mod tests {
       let taken = Taken::wait(&url, SHARD, address(&endpoint)).await.expect("a layer");
       assert_eq!(taken.layer, layer);
       let epoch = keeper.claim(SHARD, taken.layer).await.expect("an epoch");
-      let zones = self.store.zones().await.expect("the zones");
-      let zone = Zone::new(taken.layer, taken.cap).beside(&zones);
+      let across = self.store.neighbours(taken.layer.zone).await.expect("the neighbours");
+      let zone = Zone::new(taken.layer, taken.cap).beside(across);
       let claim = taken.hold(epoch);
       let store = self.store.clone();
       (endpoint, Claimed { zone, store, claim, keeper, dial })
@@ -1306,18 +1313,17 @@ mod tests {
     at_border.waits().await;
   }
 
-  #[sqlx::test(migrations = false)]
-  async fn a_player_that_walks_past_the_border_enters_a_layer_of_the_next_zone_and_its_client_follows(
-    pool: PgPool,
-  ) {
-    let meadow = Meadow::at(pool, BORDER).await;
+  /// Brom starts at `start`, walks along `heading` over the border into the zone of `target`, and
+  /// its client follows: the writer of `target` holds him at `enters`.
+  async fn crosses(pool: PgPool, start: State, heading: Angle, target: Layer, enters: Position) {
+    let meadow = Meadow::at(pool, start).await;
     let (a_endpoint, a) = meadow.claimed_for(LAYER, dialable).await;
-    let (b_endpoint, b) = meadow.claimed_for(FOREST_LAYER, dialable).await;
+    let (b_endpoint, b) = meadow.claimed_for(target, dialable).await;
     let at = |endpoint: &Endpoint| endpoint.local_addr().expect("an address");
     let (a_at, b_at) = (at(&a_endpoint), at(&b_endpoint));
     let writers = [tokio::spawn(serve(a_endpoint, a)), tokio::spawn(serve(b_endpoint, b))];
     served(&meadow.redis, "writer:1:1:1").await;
-    served(&meadow.redis, "writer:1:2:1").await;
+    served(&meadow.redis, &format!("writer:1:{}:1", target.zone.0)).await;
     let gateways = meadow.world.gateway(true);
     let mut one = Peer::link(&gateways, a_at).await;
     one.greet().await;
@@ -1328,26 +1334,44 @@ mod tests {
     let first = within(one.snapshot(Link(1))).await;
     let inputs = [1, 2, 3].map(|ahead| Input {
       tick: Tick(first.tick.0 + ahead),
-      heading: Some(Angle(0)),
+      heading: Some(heading),
       view: Angle(0),
     });
     let intents = Intents { zone: MEADOW, layer: 1, ack: None, inputs };
     one.intents(&Relayed { link: Link(1), message: intents });
     let moved = decode::<Relayed<ToClient>>(&within(one.read()).await).expect("a message");
-    let to = ToClient::Moved { zone: FOREST, layer: 1 };
+    let to = ToClient::Moved { zone: target.zone, layer: 1 };
     assert_eq!(moved, Relayed { link: Link(1), message: to });
 
     two.tell(&join).await;
     let arrived = within(two.snapshot(Link(1))).await;
-    let at_start = Position { x: 0, y: 0, z: 10_000 };
-    assert_eq!(arrived.entered.iter().map(|one| one.position).collect::<Vec<_>>(), [at_start]);
+    assert_eq!(arrived.entered.iter().map(|one| one.position).collect::<Vec<_>>(), [enters]);
     let kept = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
-    assert_eq!((kept.zone, kept.version, kept.state.position), (FOREST, 1, at_start));
+    assert_eq!((kept.zone, kept.version, kept.state.position), (target.zone, 1, enters));
     let presence = hash(&meadow.redis, &format!("presence:{}", meadow.account.0)).await;
-    assert_eq!([&presence["zone"], &presence["layer"], &presence["epoch"]], ["2", "1", "1"]);
+    let zone = target.zone.0.to_string();
+    assert_eq!([&presence["zone"], &presence["layer"], &presence["epoch"]], [&zone, "1", "1"]);
     for writer in writers {
       writer.abort();
     }
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_that_walks_past_the_east_border_enters_a_layer_of_the_zone_east_of_it(
+    pool: PgPool,
+  ) {
+    let at_start = Position { x: 0, y: 0, z: 10_000 };
+    crosses(pool, BORDER, Angle(0), FOREST_LAYER, at_start).await;
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_player_that_walks_past_the_north_border_enters_a_layer_of_the_zone_north_of_it(
+    pool: PgPool,
+  ) {
+    let position = Position { x: 10_000, y: 0, z: SIDE_CM - 30 };
+    let start = State { position, yaw: Angle(0), hit_points: 100 };
+    let enters = Position { x: 10_000, y: 0, z: 0 };
+    crosses(pool, start, Angle(16384), RIDGE_LAYER, enters).await;
   }
 
   #[sqlx::test(migrations = false)]
