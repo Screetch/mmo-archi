@@ -14,7 +14,7 @@ use core::f32::consts::TAU;
 use parry3d::math::Vector;
 use parry3d::shape::Capsule;
 
-pub use ground::ground;
+pub use ground::{SIDE_CM, ground};
 use terrain::Hit;
 pub use terrain::{Solid, Terrain, TerrainError};
 

@@ -67,6 +67,15 @@ pub enum Placed {
   Wait,
 }
 
+/// Who serves a layer: the address of its writer, and the epoch of its claim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Serving {
+  /// The address that the gateways dial, as `host:port`.
+  pub address: String,
+  /// The epoch that the keeper gave the writer.
+  pub epoch: Epoch,
+}
+
 /// The directory of the layers of one shard: the layers of each zone with their counts of
 /// players, the layers that drain, and the lease of the writer of each layer.
 ///
@@ -137,6 +146,25 @@ impl Directory {
       .invoke_async(redis)
       .await?;
     Ok(found.map(|(zone, number)| Layer { zone: ZoneId(zone), number }))
+  }
+
+  /// The lease of `layer`, or `None` when no writer holds the layer, or when its writer waits for
+  /// the epoch of the keeper and does not serve the layer yet.
+  pub async fn serving(
+    self,
+    redis: &mut impl ConnectionLike,
+    layer: Layer,
+  ) -> Result<Option<Serving>, RedisError> {
+    let fields = [keys::ADDRESS, keys::EPOCH];
+    let mut read = redis::cmd("HMGET");
+    read.arg(keys::writer(self.shard, layer)).arg(&fields);
+    let found: (Option<String>, Option<i64>) = read.query_async(redis).await?;
+    Ok(
+      found
+        .0
+        .zip(found.1.filter(|epoch| *epoch > 0))
+        .map(|(address, epoch)| Serving { address, epoch: Epoch(epoch) }),
+    )
   }
 
   /// Renews the lease of the writer of a layer and writes its count of players, as `lease` says.
@@ -216,7 +244,7 @@ mod tests {
   use redis::AsyncCommands;
   use redis::aio::MultiplexedConnection;
 
-  use super::{Directory, Lease, Leased, Placed};
+  use super::{Directory, Lease, Leased, Placed, Serving};
   use crate::keys;
   use crate::testing::Redis;
 
@@ -467,5 +495,19 @@ mod tests {
       SHARD.close(&mut db, on(1, 1), Epoch(1)).await.is_err(),
     ];
     assert_eq!(refusals, [true; 3]);
+  }
+
+  #[tokio::test]
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  async fn a_layer_is_served_once_its_writer_holds_the_epoch_of_the_keeper() {
+    let (_redis, mut db) = shard(2).await;
+    let serving = async |db: &mut MultiplexedConnection| SHARD.serving(db, on(1, 1)).await;
+    assert_eq!(serving(&mut db).await.expect("a read"), None);
+    assert_eq!(place(&mut db, 1, 1).await, Placed::Wait);
+    assert_eq!(SHARD.claim(&mut db, "w1:4433").await.expect("a claim"), Some(on(1, 1)));
+    assert_eq!(serving(&mut db).await.expect("a read"), None, "the epoch is 0 until the keeper");
+    count(&mut db, on(1, 1), 3, 0).await;
+    let served = Serving { address: "w".to_owned(), epoch: Epoch(3) };
+    assert_eq!(serving(&mut db).await.expect("a read"), Some(served));
   }
 }

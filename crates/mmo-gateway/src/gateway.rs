@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mmo_protocol::{AccountId, CharacterId, Layer, ShardId, Token, ZoneId};
-use mmo_store::keys;
+use mmo_store::{Directory, Serving, keys};
 use quinn::{Connection, Endpoint};
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::{AsyncCommands, PushInfo, RedisError};
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time;
 
 use crate::link::Fault;
-use crate::writer::{self, Entry, Writer};
+use crate::writer::{self, Writer};
 
 /// The time after which the gateway reads the directory again, when no message on its channel
 /// came before.
@@ -148,12 +148,8 @@ impl Gateway {
 
   /// The lease of `layer` of `shard` in the directory, or `None` when no writer holds the layer,
   /// or when its writer waits for the epoch of the keeper and does not serve it yet.
-  async fn entry(&self, shard: ShardId, layer: Layer) -> Result<Option<Entry>, RedisError> {
-    let fields = [keys::ADDRESS, keys::EPOCH];
-    let found: (Option<String>, Option<i64>) =
-      self.redis.clone().hmget(keys::writer(shard, layer), &fields).await?;
-    let found = found.0.zip(found.1.filter(|epoch| *epoch > 0));
-    Ok(found.map(|(address, epoch)| Entry { address, epoch }))
+  async fn entry(&self, shard: ShardId, layer: Layer) -> Result<Option<Serving>, RedisError> {
+    Directory { shard }.serving(&mut self.redis.clone(), layer).await
   }
 }
 
