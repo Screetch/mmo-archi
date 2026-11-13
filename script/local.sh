@@ -8,6 +8,12 @@
 #                               and waits for the first snapshot of the zone, with the headless binary mmo-check.
 #   sh script/local.sh status   says which processes of the stack run.
 #   sh script/local.sh stop     ends the processes of the stack, and no other process.
+#   sh script/local.sh fault <gateway|keeper|writer> [seconds]
+#                               ends one process with KILL, as a crash does, waits that many seconds (0 by default),
+#                               then starts it again as the process manager does. `writer` ends the writer of the layer
+#                               1 of the zone 1 of the shard 1, which an idle writer of its pool takes over.
+#   sh script/local.sh versions prints the id and the version of the save of each character of the shard 1.
+#   sh script/local.sh players  prints the count of the players that the layers of the zone 1 of the shard 1 hold.
 #
 # The stack lives in one folder, `$TMPDIR/mmo-local` (`MMO_LOCAL_DIR` replaces it): the data of PostgreSQL, the TLS
 # material, and for each process its log and the file of its pid. `stop` reads those pids and ends them alone, as
@@ -191,6 +197,25 @@ EOF
   chmod 600 "$tls/ca.key" "$tls/leaf.key"
 }
 
+launch_keeper() {
+  launch keeper env KEEPER_ADDRESS="127.0.0.1:$keeper_port" DATABASE_URL="$database" \
+    KEEPER_CERTIFICATE="$tls/leaf.pem" KEEPER_KEY="$tls/leaf.key" KEEPER_AUTHORITY="$tls/ca.pem" "$bin/mmo-keeper"
+}
+
+launch_gateway() {
+  launch gateway env GATEWAY_ADDRESS="127.0.0.1:$gateway_port" GATEWAY_CERTIFICATE="$tls/leaf.pem" \
+    GATEWAY_KEY="$tls/leaf.key" GATEWAY_LINK_CERTIFICATE="$tls/leaf.pem" GATEWAY_LINK_KEY="$tls/leaf.key" \
+    GATEWAY_AUTHORITY="$tls/ca.pem" REDIS_URL="$redis" "$bin/mmo-gateway"
+}
+
+# The layer writer of the pool at the place $1, counted from 0: its shard and its port come from that place.
+launch_writer() {
+  port=$((zone_port + $1))
+  launch "zone$(($1 + 1))" env ZONE_SHARD=$(($1 / pool + 1)) ZONE_ADDRESS="127.0.0.1:$port" \
+    ZONE_PUBLIC="localhost:$port" DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
+    ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
+}
+
 start() {
   need initdb postgres pg_isready psql redis-server redis-cli openssl nc
   for port in "$pg_port" "$redis_port"; do
@@ -218,8 +243,7 @@ start() {
   wait_for "PostgreSQL and Redis" 40 stores_up
   game_made
 
-  launch keeper env KEEPER_ADDRESS="127.0.0.1:$keeper_port" DATABASE_URL="$database" \
-    KEEPER_CERTIFICATE="$tls/leaf.pem" KEEPER_KEY="$tls/leaf.key" KEEPER_AUTHORITY="$tls/ca.pem" "$bin/mmo-keeper"
+  launch_keeper
   wait_for "the migrations of the keeper" 60 zone_made
 
   number=0
@@ -231,18 +255,12 @@ start() {
       "$bin/mmo-login"
   done
   # Each writer of the pool starts idle, and takes a layer that a placement opens.
-  port=$zone_port
   number=0
   for name in $(writers); do
-    launch "$name" env ZONE_SHARD=$((number / pool + 1)) ZONE_ADDRESS="127.0.0.1:$port" ZONE_PUBLIC="localhost:$port" \
-      DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
-      ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
-    port=$((port + 1))
+    launch_writer "$number"
     number=$((number + 1))
   done
-  launch gateway env GATEWAY_ADDRESS="127.0.0.1:$gateway_port" GATEWAY_CERTIFICATE="$tls/leaf.pem" \
-    GATEWAY_KEY="$tls/leaf.key" GATEWAY_LINK_CERTIFICATE="$tls/leaf.pem" GATEWAY_LINK_KEY="$tls/leaf.key" \
-    GATEWAY_AUTHORITY="$tls/ca.pem" REDIS_URL="$redis" "$bin/mmo-gateway"
+  launch_gateway
 
   sleep 1
   for name in postgres redis keeper gateway $(logins) $(writers); do
@@ -314,6 +332,41 @@ halt() {
   rm -f "$state/$name.pid"
 }
 
+# Ends one process of the stack with KILL, waits $2 seconds, and starts it again.
+fault() {
+  case ${1:-} in
+    gateway | keeper) name=$1 ;;
+    writer)
+      held=$(redis-cli -p "$redis_port" hget writer:1:1:1 address)
+      [ -n "$held" ] || die "no writer holds the layer 1 of the zone 1 of the shard 1"
+      name=zone$((${held##*:} - zone_port + 1))
+      ;;
+    *) die "fault is gateway, keeper or writer" ;;
+  esac
+  alive "$name" || die "$name does not run: run sh script/local.sh start first"
+  halt "$name" KILL
+  say "ended $name, which the fault $1 asks"
+  sleep "${2:-0}"
+  case $name in
+    gateway) launch_gateway ;;
+    keeper) launch_keeper ;;
+    *) launch_writer $((${name#zone} - 1)) ;;
+  esac
+  sleep 1
+  alive "$name" || die "$name stopped just after its start"
+  say "started $name again"
+}
+
+# The players that the layers of the zone 1 of the shard 1 hold, as the directory counts them.
+players() {
+  redis-cli -p "$redis_port" hvals layers:1 | awk '{ n += $1 } END { print n + 0 }'
+}
+
+versions() {
+  psql -q -h 127.0.0.1 -p "$pg_port" -U postgres -d "$game" -AtF ' ' -c \
+    "SELECT id, version FROM characters WHERE shard_id = 1 ORDER BY id"
+}
+
 stop() {
   halt gateway TERM
   for name in $(writers held); do
@@ -348,5 +401,8 @@ case ${1:-} in
   bots) bots "${2:-}" ;;
   stop) stop ;;
   status) status ;;
-  *) echo "usage: sh script/local.sh start|check|bots <count>|status|stop" >&2; exit 2 ;;
+  fault) fault "${2:-}" "${3:-0}" ;;
+  versions) versions ;;
+  players) players ;;
+  *) echo "usage: sh script/local.sh start|check|bots <count>|fault <what> [seconds]|versions|players|status|stop" >&2; exit 2 ;;
 esac

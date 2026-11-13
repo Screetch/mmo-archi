@@ -97,10 +97,12 @@ mod tests {
       redis: String::new(),
       zone: ZoneId(3),
       bots,
+      waiting: 0,
       town,
       ramp: 1,
       join: Duration::ZERO,
       play: Duration::ZERO,
+      recover: Duration::ZERO,
       run: "abc".to_owned(),
       seed: 4,
     }

@@ -19,10 +19,15 @@ pub(crate) struct Config {
   pub(crate) redis: String,
   pub(crate) zone: ZoneId,
   pub(crate) bots: u32,
+  /// The bots that the queue must hold when the measure ends.
+  pub(crate) waiting: u32,
   pub(crate) town: u32,
   pub(crate) ramp: u32,
   pub(crate) join: Duration,
   pub(crate) play: Duration,
+  /// The longest time without a snapshot that a bot that lost its link may take to play again. A
+  /// bot attaches again with its token only when it is not zero.
+  pub(crate) recover: Duration,
   pub(crate) run: String,
   pub(crate) seed: u64,
 }
@@ -91,10 +96,12 @@ impl Config {
       redis: text(var, "REDIS_URL")?,
       zone: ZoneId(number(var, "MMO_BOTS_ZONE", None)?),
       bots: number(var, "MMO_BOTS_COUNT", None)?,
+      waiting: number(var, "MMO_BOTS_WAITING", Some(0))?,
       town: number(var, "MMO_BOTS_TOWN", Some(0))?,
       ramp: number(var, "MMO_BOTS_RAMP", Some(50))?,
       join: seconds("MMO_BOTS_JOIN_SECONDS", 60)?,
       play: seconds("MMO_BOTS_PLAY_SECONDS", 30)?,
+      recover: seconds("MMO_BOTS_RECOVER_SECONDS", 0)?,
       run,
       seed: number(var, "MMO_BOTS_SEED", Some(1))?,
     };
@@ -139,9 +146,12 @@ mod tests {
       (config.zone.0, config.bots, config.town, config.ramp, config.seed, config.run.len()),
       (1, 500, 0, 50, 1, 6)
     );
+    assert_eq!((config.waiting, config.recover), (0, Duration::ZERO));
     assert_eq!((config.join, config.play), (Duration::from_secs(60), Duration::from_secs(30)));
     let all = [
       ("MMO_BOTS_TOWN", "250"),
+      ("MMO_BOTS_WAITING", "100"),
+      ("MMO_BOTS_RECOVER_SECONDS", "10"),
       ("MMO_BOTS_RAMP", "10"),
       ("MMO_BOTS_JOIN_SECONDS", "5"),
       ("MMO_BOTS_PLAY_SECONDS", "6"),
@@ -150,6 +160,7 @@ mod tests {
     ];
     let config = read(&all, "").expect("a config");
     assert_eq!((config.town, config.ramp, config.seed, config.run.as_str()), (250, 10, 9, "abc"));
+    assert_eq!((config.waiting, config.recover), (100, Duration::from_secs(10)));
     assert_eq!((config.join, config.play), (Duration::from_secs(5), Duration::from_secs(6)));
   }
 
@@ -182,6 +193,8 @@ mod tests {
       Some("the variable MMO_BOTS_COUNT is not a number: invalid digit found in string")
     );
     for name in [
+      "MMO_BOTS_WAITING",
+      "MMO_BOTS_RECOVER_SECONDS",
       "MMO_BOTS_TOWN",
       "MMO_BOTS_RAMP",
       "MMO_BOTS_JOIN_SECONDS",
