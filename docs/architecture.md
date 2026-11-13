@@ -158,13 +158,12 @@ presence again.
 | Key | Type | Writer | Life | Content |
 | --- | --- | --- | --- | --- |
 | `session:{token}` | hash | login service | 24 h, or until logout | account, character, shard, zone, layer |
-| `presence:{account}` | hash | layer writer | 30 s, renewed each 10 s | character, shard, zone, layer, epoch, party |
+| `presence:{account}` | hash | layer writer | 30 s, renewed each 10 s | character, shard, zone, layer, epoch |
 | `shard:{s}` | hash | login service | none | `name`, `cap` and `layer_cap`: the name of the shard, its cap of admitted players and the cap of each of its layers |
 | `layers:{s}` | hash | the script `place` adds a layer, the script `close` removes it, and its writer writes its count | none | each layer of the shard, as the field `{z}:{l}`, with its count of players |
 | `draining:{s}` | set | the scripts `drain` and `close` | none | the layers of the shard that drain, as `{z}:{l}` |
 | `placed:{s}:{z}:{l}` | sorted set | the script `place` adds a place, and the script `lease` removes it | 60 s for each place | the accounts that a placement gave the layer and whose players its writer did not take yet |
 | `writer:{s}:{z}:{l}` | hash | layer writer | 3 s, renewed each 1 s | address, epoch |
-| `party:{s}:{p}` | set | the script `party` | until the party has fewer than 2 members | the accounts of the party |
 | `ticks:{s}:{z}:{l}` | hash | layer writer | 10 minutes, renewed each 1 s | the count of the ticks of the writer in each bucket of 250 µs, from 0 to 99.75 ms, which the load test reads |
 | `directory` | channel | the scripts of section 6 and the layer writer | none | the shard, the zone and the layer of each layer that opened, closed, started to drain or changed its writer |
 | `shard:{s}:queue` | sorted set | login service | none | the queued accounts, by the time that each entered |
@@ -178,8 +177,7 @@ presence again.
 | `created:{address}` | string | login service | 1 h | the count of the accounts that an address made in the last hour |
 | `chat:{s}:{channel}` | stream and channel | layer writer | the last 1000 lines | the chat of a channel of the shard |
 
-`{s}` is the id of a shard, `{z}` the id of a zone, `{l}` the number of a layer and `{p}` the id of a party, each in
-decimal. A token goes in a key as 64 hex digits in lower case. An address goes in a key as its address of IPv4, or as
+`{s}` is the id of a shard, `{z}` the id of a zone and `{l}` the number of a layer, each in decimal. A token goes in a key as 64 hex digits in lower case. An address goes in a key as its address of IPv4, or as
 its network of /64 for IPv6, since one host commonly holds the whole network. The module `keys` of `mmo-store` makes
 each key, so no other crate writes the name of a key.
 
@@ -334,16 +332,16 @@ Redis keys the layer `l` of the zone `z` of the shard `s` as `{s}:{z}:{l}`. The 
 
 A layer is open when it stands in `layers:{s}`, has a writer, and does not drain.
 
-The cap of a layer is the `layer_cap` of its shard, 500 at the start, and 5 at least, so a party always fits in an
-empty layer. The writer of a layer reads the cap when it claims the layer, and keeps it for the life of the layer. The
-writer is the one authority of the count of its layer: it refuses an attach, a hand-off or a move into its layer when
-the layer holds its cap. It writes its count in `layers:{s}` at each change and each second. The scripts below read
-that count. When a script races a change of a count and gives a full layer, the writer of that layer refuses the
-player, and the caller runs the script again after 1 s.
+The cap of a layer is the `layer_cap` of its shard, 500 at the start, and 5 at least. The writer of a layer reads the
+cap when it claims the layer, and keeps it for the life of the layer. The writer is the one authority of the count of
+its layer: it refuses an attach, a hand-off or a move into its layer when the layer holds its cap. It writes its count
+in `layers:{s}` at each change and each second. The scripts below read that count. When a script races a change of a
+count and gives a full layer, the writer of that layer refuses the player, and the caller runs the script again after
+1 s.
 
 ### The scripts of the directory
 
-Six Lua scripts of `mmo-store`, which its `Directory` runs, change the directory. Redis runs each one as one atomic
+Five Lua scripts of `mmo-store`, which its `Directory` runs, change the directory. Redis runs each one as one atomic
 step, so two callers never take one decision twice. Each script but `lease` sends the shard, the zone and the layer that it changed on the channel `directory`.
 
 | Script | Who runs it | What it does |
@@ -353,22 +351,18 @@ step, so two callers never take one decision twice. Each script but `lease` send
 | `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, writes its count, and ends the place of each player that it took, unless the lease holds a newer epoch |
 | `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players |
 | `close` | the writer of a layer | removes the layer when it holds no player and its lease holds the epoch of the writer |
-| `party` | the layer writer | adds a player to a party, or removes it |
 
 ### The placement
 
 `place` gets the shard, the zone and the account, and the layer that the player leaves when it crosses from another
-zone or moves out of a draining layer. It counts `n`, the members of the party of the player that are online in the
-shard, or 1 when the player has no party. A layer has room for `n` when its count and `n` together do not pass its
-cap. Then `place` gives the first of these:
+zone or moves out of a draining layer. A layer has room when its count is under its cap. Then `place` gives the first
+of these:
 
-1. When a member of the party is on a layer of the zone other than the layer that the player leaves: that layer when
-   it is open and has room for the player, and else wait. So the members of a party in one zone are on one layer.
-2. When the player crosses from the layer `l` of another zone: the layer `l` of the zone when it is open and has room
-   for `n`, so the player meets the players that it saw across the border.
-3. The open layer of the zone with the most players that has room for `n`, and of these the lowest number. So a full
-   layer stays full, and the layer with the fewest players empties.
-4. Else wait. When no layer of the zone stands with no writer, `place` also opens a layer: it adds the least free
+1. When the player crosses from the layer `l` of another zone: the layer `l` of the zone when it is open and has room,
+   so the player meets the players that it saw across the border.
+2. The open layer of the zone with the most players that has room, and of these the lowest number. So a full layer
+   stays full, and the layer with the fewest players empties.
+3. Else wait. When no layer of the zone stands with no writer, `place` also opens a layer: it adds the least free
    number of the zone to `layers:{s}` with a count of 0, for a writer to claim.
 
 The layer that `place` gives holds the place of the player in `placed:{s}:{z}:{l}` for 60 s, until its writer takes
@@ -377,14 +371,6 @@ its places, so placements that come faster than the writer writes its count neve
 
 A caller that gets wait keeps the player where it is and runs `place` again after 1 s: the login service keeps the
 slot of the account, and the source writer keeps the player at the border.
-
-### The party
-
-A party is a group of 2 to 5 players of one shard who play together. The set `party:{s}:{p}` holds its accounts, and
-the presence of each member holds the id `p` of its party. A layer writer runs `party` when a player of its layer
-accepts an invite, leaves its party or logs out. `party` adds a player only when no member of the party is in the zone
-of the player, or when a member is on the layer of the player. So a party never stands on two layers of one zone, and
-a player never changes layer to join a party. A party with one member left ends.
 
 ### The pool of writers
 
@@ -404,8 +390,7 @@ nothing. A draining layer takes no new player. Its writer moves each player out 
 the move below.
 
 The writer moves a player only at a safe point: a tick at which the player sent no order and took no hit for the last
-5 s, and holds no open trade, so a move never cuts an act. It moves the members of a party at one tick, the first that
-is a safe point of each of them, and runs `place` once for the party.
+5 s, and holds no open trade, so a move never cuts an act.
 
 The writer of a layer that held no player for 30 s, the time that it keeps the player of a closed link, runs `close`.
 `close` removes the layer from `layers:{s}` and from `draining:{s}`, and deletes its lease, when its count is still 0
@@ -504,7 +489,7 @@ A shard starts with 8 zones, about 625 players in each, so each zone runs 2 laye
 | --- | --- | --- | --- |
 | Data down | 5.0 KB/s mean, 18.8 KB/s worst | 25 MB/s mean, 94 MB/s worst | 3 gateways (estimate) |
 | Data up | 1.8 KB/s | 9 MB/s | the same gateways |
-| Layer writers | | 16 layers, and more when parties and crossings open them | a pool of 20 writers: 8 for the zones, 10 for the cap and 2 for the recovery, on 2 hosts of 8 cores (estimate) |
+| Layer writers | | 16 layers, and more when crossings open them | a pool of 20 writers: 8 for the zones, 10 for the cap and 2 for the recovery, on 2 hosts of 8 cores (estimate) |
 | Login checks | 9.8 ms once | 49 core-seconds | 2 login services of 4 cores |
 | Saves in PostgreSQL | one row each 10 s | 500 rows/s, 16 batches each 10 s | 1 keeper, 1 primary and 1 replica for all the shards |
 | Redis | 0.1 operations/s | about 1000 operations/s | 1 primary and 1 replica for all the shards |
@@ -716,7 +701,7 @@ the hosts of the servers.
 | --- | ---: | --- | --- | --- |
 | 1 | 200 | 1 shard of cap 200, layers of cap 20, 1 zone | the path from login to play, and the opening of layers | each bot plays, no message fails to decode, and the zone runs 10 layers, none with more than 20 players |
 | 2 | 500, half in a town | 1 shard of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
-| 3 | 500, with crossings, and 40 parties of 5 | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the parties | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, the members of a party in one zone are on one layer at each tick, and a bot that crosses enters the layer with the same number when that layer has room |
+| 3 | 500, with crossings | 2 shards of cap 250, layers of cap 20, 2 zones | the shards and the placement | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and a bot that crosses enters the layer with the same number when that layer has room |
 | 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
 | 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, each bot left plays, and each move fell on a safe point of its bot |
 | 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 2 zones | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |

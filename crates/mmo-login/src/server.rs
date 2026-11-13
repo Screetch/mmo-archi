@@ -126,11 +126,14 @@ impl Config {
   }
 }
 
-/// The cap of a layer that `text` gives, which a party always fits in.
+/// The least cap of a layer.
+const LEAST_LAYER_CAP: u32 = 5;
+
+/// The cap of a layer that `text` gives, [`LEAST_LAYER_CAP`] at least.
 fn layer_cap(text: &str) -> Result<u32, Fault> {
   let cap = parsed("MMO_LAYER_CAP", text)?;
-  if cap < mmo_store::PARTY {
-    let why = format!("a layer holds a party of {} players", mmo_store::PARTY);
+  if cap < LEAST_LAYER_CAP {
+    let why = format!("the cap of a layer is {LEAST_LAYER_CAP} at least");
     return Err(Fault::Invalid { name: "MMO_LAYER_CAP", why });
   }
   Ok(cap)
@@ -157,7 +160,7 @@ fn parsed<T: FromStr<Err: Display>>(name: &'static str, text: &str) -> Result<T,
 ///   certificate of TLS and of its key.
 /// - `DATABASE_URL` and `REDIS_URL`: the stores of the game. The keeper migrates the database.
 /// - `MMO_WORLD` and `MMO_WORLD_CAP`: the id of the world and the most accounts that it admits.
-/// - `MMO_LAYER_CAP`: the most players of each layer of the world, 5 at least, so a party fits.
+/// - `MMO_LAYER_CAP`: the most players of each layer of the world, 5 at least.
 /// - `MMO_START_ZONE` and `MMO_START_POSITION`: the zone, and the point of the zone as `x,y,z` in
 ///   centimetres, where each new character starts.
 ///
@@ -594,8 +597,8 @@ mod tests {
       refusals,
       [
         "the variable DATABASE_URL is not set",
-        "the variable MMO_LAYER_CAP holds no valid value: a layer holds a party of 5 players",
         "the variable MMO_LAYER_CAP holds no valid value: invalid digit found in string",
+        "the variable MMO_LAYER_CAP holds no valid value: the cap of a layer is 5 at least",
         "the variable MMO_LAYER_CAP is not set",
         "the variable MMO_LOGIN_ADDRESS holds no valid value: invalid socket address syntax",
         "the variable MMO_LOGIN_ADDRESS is not set",

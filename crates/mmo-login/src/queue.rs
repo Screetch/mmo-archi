@@ -36,8 +36,7 @@ pub struct World {
   pub id: u32,
   /// The most accounts that hold a slot in the world at one time.
   pub cap: u32,
-  /// The most players of each layer of the world, which a party of
-  /// [`PARTY`](mmo_store::PARTY) players always fits in.
+  /// The most players of each layer of the world, 5 at least.
   pub layer_cap: u32,
 }
 
