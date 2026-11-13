@@ -25,7 +25,6 @@ const SAY: u64 = 400;
 /// What the bots of one run share.
 pub(crate) struct Shared {
   pub(crate) trust: Trust,
-  pub(crate) login: String,
   pub(crate) gateway: String,
   pub(crate) zone: ZoneId,
   pub(crate) seed: u64,
@@ -43,6 +42,8 @@ pub(crate) struct Outcome {
   /// The time from the start of the login to the first snapshot that shows the player.
   pub(crate) entered: Option<Duration>,
   pub(crate) joined: Option<Instant>,
+  /// The shard that the bot plays in.
+  pub(crate) shard: u32,
   /// The time from the first snapshot that shows the player to the end.
   pub(crate) played: Duration,
   /// The bytes of the datagrams up and down, with no header of IP, UDP or QUIC.
@@ -135,7 +136,7 @@ async fn play(
     out.place.get_or_insert(place);
   };
   let token = tokio::select! {
-    session = enter(&shared.trust, &shared.login, &bot.account, queued) => session?.token,
+    session = enter(&shared.trust, &bot.login, &bot.account, queued) => session?.token,
     _ = stop.changed() => return Err(Error::Queued),
   };
   out.waited = Some(started.elapsed());
@@ -184,7 +185,7 @@ async fn play(
 /// outcome holds it. A bot leaves as a player who closes the game does: it closes its link, and the
 /// zone writer keeps its player for 30 s.
 pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>) -> Outcome {
-  let mut out = Outcome::default();
+  let mut out = Outcome { shard: bot.shard, ..Outcome::default() };
   let ended = play(shared, bot, stop, &mut out).await;
   out.fault = ended.err().map(|error| error.to_string());
   out.played = out.joined.map(|at| at.elapsed()).unwrap_or_default();
@@ -214,21 +215,20 @@ mod tests {
   use crate::rng::Rng;
   use crate::seed::Bot;
 
-  fn bot() -> Bot {
+  fn bot(login: &Fake) -> Bot {
     let account = Account {
       name: "ada".to_owned(),
       password: Password("a long password".to_owned()),
       character: "Brom".to_owned(),
       create: false,
     };
-    Bot { index: 0, account, character: CharacterId(42) }
+    Bot { index: 0, shard: 1, login: login.address.clone(), account, character: CharacterId(42) }
   }
 
   fn shared_by(login: &Fake, gateway: &Fake) -> Shared {
     let (_folder, path) = authority(&[login, gateway]);
     Shared {
       trust: Trust::from_pem(&path).expect("a trust"),
-      login: login.address.clone(),
       gateway: gateway.address.clone(),
       zone: ZoneId(1),
       seed: 1,
@@ -280,7 +280,7 @@ mod tests {
       finished.await.expect("a line of chat");
       stop.send_replace(true);
     };
-    let walker = bot();
+    let walker = bot(&login);
     let (out, ()) = tokio::join!(run(&shared, &walker, stopped), stopping);
     let sizes: Vec<usize> = sent().iter().map(|one| encode(one).len()).collect();
     assert_eq!(out.fault, None);
@@ -307,7 +307,7 @@ mod tests {
     let idle = Fake::start(hold);
     let shared = shared_by(&login, &idle);
     let (_stop, stopped) = watch::channel(false);
-    let out = run(&shared, &bot(), stopped).await;
+    let out = run(&shared, &bot(&login), stopped).await;
     let refused = (out.fault.as_deref(), out.place, out.joined.is_none());
     assert_eq!(refused, (Some("the login service refuses: Password"), None, true));
     assert_eq!(shared.ready.load(Ordering::Relaxed), 1);
@@ -327,7 +327,7 @@ mod tests {
       });
       let shared = shared_by(&login, &gateway);
       let (_stop, stopped) = watch::channel(false);
-      let out = run(&shared, &bot(), stopped).await;
+      let out = run(&shared, &bot(&login), stopped).await;
       assert!(out.fault.is_some_and(|fault| fault.starts_with(expected)));
       assert_eq!((out.joined.is_none(), shared.ready.load(Ordering::Relaxed)), (true, 1));
       gateway.end().await;
@@ -372,7 +372,7 @@ mod tests {
     let mut shared = shared_by(&login, &idle);
     shared.gateway = "127.0.0.1:0".to_owned();
     let (_stop, stopped) = watch::channel(false);
-    let out = run(&shared, &bot(), stopped).await;
+    let out = run(&shared, &bot(&login), stopped).await;
     assert!(out.fault.is_some_and(|fault| fault.starts_with("the client cannot connect")));
     assert_eq!((out.waited.is_some(), out.joined.is_none()), (true, true));
     login.end().await;
@@ -396,7 +396,7 @@ mod tests {
       wait.await.expect("a place");
       stop.send_replace(true);
     };
-    let walker = bot();
+    let walker = bot(&login);
     let (out, ()) = tokio::join!(run(&shared, &walker, stopped), stopping);
     let fault = "the measure ended while the bot waited in the queue";
     assert_eq!(

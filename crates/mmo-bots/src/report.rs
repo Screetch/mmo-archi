@@ -7,6 +7,7 @@ use std::time::Duration;
 use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 
 use crate::bot::Outcome;
+use crate::layers::Seen;
 use crate::ticks::Counts;
 
 /// The target of the tick of a zone writer at the 99th percentile, and its hard limit.
@@ -107,13 +108,31 @@ pub(crate) struct Report {
   snapshots: u64,
   gaps: u64,
   ticks: Ticks,
+  layers: Seen,
+  /// The bots that played, by their shard.
+  shards: BTreeMap<u32, usize>,
   window: Duration,
 }
 
+/// The least count of layers that hold `players` players, `cap` in each.
+fn needed(players: usize, cap: u32) -> usize {
+  match (players, cap) {
+    (0, _) => 0,
+    (_, 0) => usize::MAX,
+    _ => players.div_ceil(cap as usize),
+  }
+}
+
 impl Report {
-  /// The report of the `outcomes` of `bots` bots, and the `ticks` of the writers during `window`. A
-  /// bot that gave no outcome failed.
-  pub(crate) fn new(bots: usize, outcomes: &[Outcome], ticks: &Counts, window: Duration) -> Self {
+  /// The report of the `outcomes` of `bots` bots, the `ticks` of the writers during `window`, and
+  /// the `layers` that the directory showed. A bot that gave no outcome failed.
+  pub(crate) fn new(
+    bots: usize,
+    outcomes: &[Outcome],
+    ticks: &Counts,
+    layers: Seen,
+    window: Duration,
+  ) -> Self {
     let seconds = Duration::as_secs_f64;
     let rate = |bytes: fn(&Outcome) -> usize| {
       let rates = outcomes.iter().filter(|out| !out.played.is_zero());
@@ -122,6 +141,10 @@ impl Report {
     let mut faults = BTreeMap::new();
     for fault in outcomes.iter().filter_map(|out| out.fault.clone()) {
       *faults.entry(fault).or_default() += 1;
+    }
+    let mut shards = BTreeMap::new();
+    for out in outcomes.iter().filter(|out| out.joined.is_some()) {
+      *shards.entry(out.shard).or_default() += 1;
     }
     Self {
       bots,
@@ -142,6 +165,8 @@ impl Report {
       snapshots: outcomes.iter().map(|out| out.snapshots).sum(),
       gaps: outcomes.iter().map(|out| out.gaps).sum(),
       ticks: Ticks::new(ticks),
+      layers,
+      shards,
       window,
     }
   }
@@ -190,6 +215,21 @@ impl fmt::Display for Report {
       millis(*p99),
       millis(*max),
     ));
+    for (id, shard) in &self.layers {
+      let players: Vec<String> = shard.layers.values().map(|layer| layer.now.to_string()).collect();
+      lines.push(format!(
+        "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer: {}",
+        shard.layers.len(),
+        shard.cap,
+        self.shards.get(id).copied().unwrap_or_default(),
+        players.join(" ")
+      ));
+    }
+    let capped =
+      self.layers.values().all(|shard| shard.layers.values().all(|l| l.most <= shard.cap));
+    let opened = self.layers.iter().all(|(id, shard)| {
+      shard.layers.len() >= needed(self.shards.get(id).copied().unwrap_or_default(), shard.cap)
+    });
     let budget = [
       ("tick p99 at most 25 ms", *total > 0 && *p99 <= BUDGET),
       ("no tick of 50 ms or more", *total > 0 && *late == 0),
@@ -198,6 +238,8 @@ impl fmt::Display for Report {
       ("data up, mean at most 2000 B/s", self.up.mean <= UP_MEAN),
       ("no datagram over 1100 bytes", self.largest <= DATAGRAM),
       ("each bot played", self.played == self.bots),
+      ("no layer over its cap", capped),
+      ("each shard opened the layers that its players need", opened),
     ];
     lines.extend(budget.map(|(label, holds)| format!("budget {label}: {}", verdict(holds))));
     writeln!(f, "{}", lines.join("\n"))
@@ -214,6 +256,7 @@ mod tests {
 
   use super::{Report, Stats, Ticks};
   use crate::bot::Outcome;
+  use crate::layers::{Players, Seen, Shard};
 
   fn played(wait: u64, enter: u64, up: usize, down: usize, largest: usize) -> Outcome {
     Outcome {
@@ -221,6 +264,7 @@ mod tests {
       waited: Some(Duration::from_secs(wait)),
       entered: Some(Duration::from_secs(enter)),
       joined: Some(Instant::now()),
+      shard: 1,
       played: Duration::from_secs(10),
       up,
       down,
@@ -229,6 +273,12 @@ mod tests {
       largest,
       ..Outcome::default()
     }
+  }
+
+  /// A shard of cap `cap`, with the layers `(number, players now, most players)`.
+  fn shard(cap: u32, layers: &[(u32, u32, u32)]) -> Shard {
+    let layers = layers.iter().map(|&(number, now, most)| (number, Players { now, most }));
+    Shard { cap, layers: layers.collect() }
   }
 
   fn failed(fault: &str) -> Outcome {
@@ -277,7 +327,8 @@ mod tests {
       failed("the link fails"),
     ];
     let counts = BTreeMap::from([(10, 90), (60, 9), (120, 1)]);
-    let report = Report::new(3, &outcomes, &counts, Duration::from_secs(30));
+    let seen = Seen::from([(1, shard(1, &[(1, 1, 1), (2, 1, 2)]))]);
+    let report = Report::new(3, &outcomes, &counts, seen, Duration::from_secs(30));
     let lines = [
       "load test: 3 bots, 2 played, 1 failed",
       "  1 bots: the link fails",
@@ -288,6 +339,7 @@ mod tests {
       "data up for one client (B/s, 2 bots): mean 1500.0, p50 1000.0, p99 2000.0, max 2000.0",
       "snapshots 200, refused by the world 2, largest 900 bytes",
       "ticks of the writers in 30 s: 100, p50 2.75 ms, p99 15.25 ms, max 30.25 ms, 1 over 25 ms, 0 over 50 ms",
+      "shard 1: 2 layers of cap 1 opened, 2 bots played, players on each layer: 1 1",
       "budget tick p99 at most 25 ms: ok",
       "budget no tick of 50 ms or more: ok",
       "budget data down, mean at most 5000 B/s: ok",
@@ -295,13 +347,34 @@ mod tests {
       "budget data up, mean at most 2000 B/s: ok",
       "budget no datagram over 1100 bytes: ok",
       "budget each bot played: over",
+      "budget no layer over its cap: over",
+      "budget each shard opened the layers that its players need: ok",
     ];
     assert_eq!(report.to_string(), lines.join("\n") + "\n");
-    let empty = Report::new(0, &[], &BTreeMap::new(), Duration::from_secs(1));
+    let empty = Report::new(0, &[], &BTreeMap::new(), Seen::new(), Duration::from_secs(1));
     let text = empty.to_string();
     assert!(text.starts_with("load test: 0 bots, 0 played, 0 failed\n"), "{text}");
     assert!(
       text.contains("budget tick p99 at most 25 ms: over\nbudget no tick of 50 ms or more: over\n")
     );
+  }
+
+  #[test]
+  fn the_report_fails_a_layer_over_its_cap_and_a_shard_that_opens_too_few_layers() {
+    let outcomes = [played(1, 2, 1, 1, 1), played(1, 2, 1, 1, 1)];
+    let text = |shard| {
+      let seen = Seen::from([(1, shard)]);
+      Report::new(2, &outcomes, &BTreeMap::new(), seen, Duration::from_secs(1)).to_string()
+    };
+    let capped = "budget no layer over its cap: ";
+    let opened = "budget each shard opened the layers that its players need: ";
+    let fits = text(shard(2, &[(1, 2, 2)]));
+    assert!(fits.contains(&format!("{capped}ok\n{opened}ok")), "{fits}");
+    let few = text(shard(1, &[(1, 1, 1)]));
+    assert!(few.contains(&format!("{capped}ok\n{opened}over")), "{few}");
+    let none = text(Shard::default());
+    assert!(none.contains(&format!("{capped}ok\n{opened}over")), "{none}");
+    let over = text(shard(1, &[(1, 1, 1), (2, 2, 2)]));
+    assert!(over.contains(&format!("{capped}over\n{opened}ok")), "{over}");
   }
 }

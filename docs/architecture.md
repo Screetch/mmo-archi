@@ -719,16 +719,20 @@ of 500 bots or fewer opens many layers and more than one shard, and stage 2 prov
 runs.
 
 Each layer writer reports the time of each tick in `ticks:{s}:{z}:{l}` (section 3), and each bot reports its bytes up
-and down, its shard and each layer that it entered. The test keeps each report with the commit that it ran.
+and down and its shard. The bots go round the shards, each through the login service of its shard. Each second of the
+play, the program of the bots reads `shard:{s}` and `layers:{s}` of each shard, so its report gives, for each shard, the
+count of layers that opened with the cap of a layer, and the players on each layer. Two lines of the budget of the
+report read them: no layer held more players than its cap, and each shard opened at least as many layers as its players
+need at that cap. The test keeps each report with the commit that it ran.
 
 The job `the bots` of the gates, in `.github/workflows/gates.yml`, runs stage 1 on Linux, in the dev profile. It runs
 `sh script/local.sh start` with `MMO_LOCAL_SHARD_CAP=200` and `MMO_LOCAL_LAYER_CAP=20`, so that no bot waits in the
 queue and the zone opens 10 layers. Then it runs `sh script/local.sh bots 200` with `MMO_BOTS_JOIN_SECONDS=30` and
 `MMO_BOTS_PLAY_SECONDS=20`, under a timeout of 120 s, and last `sh script/local.sh stop`. The program of the bots exits
-with 0 when a bot fails, so the job reads its report: it fails when a bot did not play, when a bot ended with a fault,
-as a message that fails to decode, and when the zone ran fewer than 10 layers or a layer held more than 20 players. It
-checks no tick time and no byte budget, which stage 2 proves. The report and the logs of the stack stay as the
-artifact `bots`.
+with 0 when a bot fails, so the job reads its report with `sh script/report.sh`: it fails when a bot did not play, when
+a bot ended with a fault, as a message that fails to decode, and when the zone ran fewer than 10 layers or a layer held
+more than 20 players. It checks no tick time and no byte budget, which stage 2 proves. The report and the logs of the
+stack stay as the artifact `bots`.
 
 ### How to run it
 
@@ -737,13 +741,16 @@ bots make their accounts in PostgreSQL, since the login service makes 5 new acco
 bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this
 document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for the cap of each shard,
 `MMO_LOCAL_LAYER_CAP` for the cap of a layer, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
-`MMO_BOTS_TOWN` for the bots that start in one square of 128 m. The stack runs the pool of writers of section 6 for
-each shard. A layer writer keeps the player of a closed link for 30 s, so wait 35 s between two runs. Run no stage
-with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
+`MMO_BOTS_TOWN` for the bots that start in one square of 128 m. The stack runs the login service and the pool of writers
+of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small, 100 for a
+shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed link for 30 s,
+so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
 
 The workflow `load` (`.github/workflows/load.yml`) runs the stages 2 and 3 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the
-pull request, then of the change, on the same runner, and fails when a bot of the change cannot play. Its summary gives
+pull request, then of the change, on the same runner. It fails when a bot of the change cannot play, when a layer of the
+change passes its cap, and when a shard of the change opens fewer layers than its players need, as
+`sh script/report.sh` reads them from the report of the bots. Its summary gives
 the report of the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the
 hottest functions of each, from `perf`.
 

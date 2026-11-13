@@ -23,6 +23,9 @@ const HIT_POINTS: i32 = 100;
 /// A player of the load test: its account, and the character that the account holds.
 pub(crate) struct Bot {
   pub(crate) index: u32,
+  /// The shard that the bot plays in, and the address of the login service of that shard.
+  pub(crate) shard: u32,
+  pub(crate) login: String,
   pub(crate) account: Account,
   pub(crate) character: CharacterId,
 }
@@ -56,7 +59,9 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
   let id = store.create_account(&name, Password(PASSWORD.to_owned())).await?;
   let saved = store.create_character(id, &character, config.zone, start(config, index)).await?;
   let password = Password(PASSWORD.to_owned());
-  Ok(Bot { index, account: Account { name, password, character, create: false }, character: saved })
+  let (shard, login) = config.shard(index);
+  let account = Account { name, password, character, create: false };
+  Ok(Bot { index, shard, login: login.to_owned(), account, character: saved })
 }
 
 /// Makes the account and the character of each bot, `SEEDERS` at once.
@@ -83,7 +88,7 @@ mod tests {
   fn config(bots: u32, town: u32) -> Config {
     Config {
       authority: "ca.pem".into(),
-      login: String::new(),
+      login: "a:1,b:2".to_owned(),
       gateway: String::new(),
       database: String::new(),
       redis: String::new(),
@@ -109,6 +114,8 @@ mod tests {
     assert_eq!(names.first(), Some(&(0, "botabc0")));
     assert_eq!(names.last(), Some(&(9, "botabc9")));
     assert_eq!(bots[1].account.character, "Babcbaaa");
+    let shards: Vec<_> = bots.iter().take(3).map(|bot| (bot.shard, bot.login.as_str())).collect();
+    assert_eq!(shards, [(1, "a:1"), (2, "b:2"), (1, "a:1")]);
     let ids: Vec<_> = bots.iter().map(|bot| bot.character).collect();
     let saved = store.load(&ids).await.expect("the characters");
     let at = |index: usize| {

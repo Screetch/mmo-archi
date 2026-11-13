@@ -8,16 +8,21 @@
 //! accounts and the characters in PostgreSQL, with `mmo-store` as the login service does, and then
 //! each bot logs in through the login service. The tick times come from the hash that the writer
 //! of each layer of the zone keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads them before
-//! and after the measure and takes the difference. The bots play in shard 1, the shard of
-//! `script/local.sh`. The bytes are the sizes of the datagrams, with no header of
-//! IP, UDP or QUIC, which add about 60 bytes to each datagram.
+//! and after the measure and takes the difference. The bots go round the shards: the bot
+//! with the index `i` plays in the shard `i % n + 1`, through the login service of that shard. Each
+//! second of the measure, [`run`] reads the directory of each shard, `mmo_store::keys::layers`, and
+//! the report tells the layers that opened in each shard and the players on each, and fails when a
+//! layer passes its cap or a shard opens fewer layers than its players need. The bytes are the
+//! sizes of the datagrams, with no header of IP, UDP or QUIC, which add about 60 bytes to each
+//! datagram.
 //!
 //! [`run`] reads these variables of its environment:
 //!
 //! - `MMO_BOTS_AUTHORITY`: the PEM file of the certificates that sign the login service and the
 //!   gateway.
 //! - `MMO_BOTS_LOGIN` and `MMO_BOTS_GATEWAY`: their addresses, as `host:port`. Each host is the
-//!   name that its certificate must hold.
+//!   name that its certificate must hold. `MMO_BOTS_LOGIN` holds the address of the login service
+//!   of each shard, with commas between them, so the bots play in as many shards as it names.
 //! - `DATABASE_URL` and `REDIS_URL`: the database and the Redis of the game.
 //! - `MMO_BOTS_ZONE` and `MMO_BOTS_COUNT`: the zone where the characters stand, which the table
 //!   `zones` holds, and the count of bots, which is at most 500, since no test runs more.
@@ -35,6 +40,7 @@ mod bot;
 mod config;
 #[cfg(test)]
 mod fixture;
+mod layers;
 mod report;
 mod rng;
 mod seed;
@@ -45,8 +51,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use mmo_client::Trust;
-use mmo_protocol::ShardId;
 use mmo_store::Store;
+use redis::aio::MultiplexedConnection;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -54,13 +60,11 @@ use tokio::time::{Instant, sleep};
 
 use bot::{Outcome, Shared};
 use config::Config;
+use layers::Seen;
 use report::Report;
 use seed::SEEDERS;
 
 pub use config::Error as ConfigError;
-
-/// The shard of the bots.
-const SHARD: ShardId = ShardId(1);
 
 /// Why the load test does not end.
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +110,23 @@ async fn settle(shared: &Shared, bots: usize, limit: Duration) {
   }
 }
 
+/// Looks at the directory of the layers each second until the measure ends, and once at its end.
+async fn look_during(
+  redis: &mut MultiplexedConnection,
+  config: &Config,
+  seen: &mut Seen,
+) -> redis::RedisResult<()> {
+  let end = Instant::now() + config.play;
+  loop {
+    layers::look(redis, config.shards(), config.zone, seen).await?;
+    let left = end.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+      return Ok(());
+    }
+    sleep(left.min(Duration::from_secs(1))).await;
+  }
+}
+
 async fn measure(config: &Config) -> Result<Report, Failure> {
   let trust = Trust::from_pem(&config.authority)?;
   let pool = PgPoolOptions::new()
@@ -118,9 +139,9 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let bots = seed::seed(&store, config).await?;
   let client = redis::Client::open(config.redis.as_str())?;
   let mut redis = client.get_multiplexed_async_connection().await?;
-  let (login, gateway) = (config.login.clone(), config.gateway.clone());
+  let gateway = config.gateway.clone();
   let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
-  let shared = Arc::new(Shared { trust, login, gateway, zone, seed, ready });
+  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready });
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
   for bot in bots {
@@ -132,9 +153,10 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
     });
   }
   settle(&shared, tasks.len(), config.join).await;
-  let before = ticks::read(&mut redis, SHARD, config.zone).await;
-  sleep(config.play).await;
-  let after = ticks::read(&mut redis, SHARD, config.zone).await;
+  let before = ticks::read(&mut redis, config.shards(), config.zone).await;
+  let mut opened = Seen::new();
+  let looked = look_during(&mut redis, config, &mut opened).await;
+  let after = ticks::read(&mut redis, config.shards(), config.zone).await;
   stop.send_replace(true);
   let mut outcomes: Vec<Outcome> = Vec::new();
   while let Some(done) = tasks.join_next().await {
@@ -142,10 +164,12 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
     outcomes.extend(done);
   }
   let counts = before.and_then(|before| after.map(|after| ticks::since(&before, &after)))?;
+  looked?;
   Ok(Report::new(
     usize::try_from(config.bots).unwrap_or(usize::MAX),
     &outcomes,
     &counts,
+    opened,
     config.play,
   ))
 }
@@ -214,8 +238,11 @@ mod tests {
       peer
     });
     let (_folder, path) = authority(&[&login, &gateway]);
-    let addresses =
-      [("MMO_BOTS_LOGIN", login.address.as_str()), ("MMO_BOTS_GATEWAY", gateway.address.as_str())];
+    let addresses = [
+      ("MMO_BOTS_LOGIN", login.address.as_str()),
+      ("MMO_BOTS_GATEWAY", gateway.address.as_str()),
+      ("MMO_BOTS_PLAY_SECONDS", "1"),
+    ];
     let one = vars(&path, url.as_str(), &redis.url(), 1, &addresses);
     let read = |name: &str| one.iter().rev().find(|(key, _)| *key == name).map(|(_, v)| v.clone());
     let report = measure(&Config::read(&read).expect("a config")).await.expect("a report");
@@ -267,13 +294,16 @@ mod tests {
     faults.push(run_with(&refused(&[], 1)).await);
     faults.push(run_with(&refused(&[("REDIS_URL", "nope")], 0)).await);
     faults.push(run_with(&refused(&[("REDIS_URL", "redis://127.0.0.1:1")], 0)).await);
-    let blind = user(&redis, "blind", &["-hkeys"]).await;
+    let blind = user(&redis, "blind", &["-hgetall"]).await;
     faults.push(run_with(&refused(&[("REDIS_URL", blind.as_str())], 0)).await);
+    let capless = user(&redis, "capless", &["-hget"]).await;
+    faults.push(run_with(&refused(&[("REDIS_URL", capless.as_str())], 0)).await);
     let starts = [
       "the certificate cannot be read",
       "PostgreSQL refuses the bots",
       "the store refuses the bots: the database lacks the migration",
       "the store refuses the bots: the name botxyz0 is taken",
+      "Redis refuses the bots",
       "Redis refuses the bots",
       "Redis refuses the bots",
       "Redis refuses the bots",

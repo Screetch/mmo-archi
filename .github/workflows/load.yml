@@ -6,7 +6,9 @@ name: load
 # below it as its base, so each layer shows what it changes. A runner of Linux has 4 cores, which
 # the bots, the gateway and the layer writers share, so a number of this job compares with the other column of the
 # same run, and not with a run on another machine. It runs stage 2, 500 bots with half in a town on one layer of cap
-# 500, since no test runs more than 500 bots.
+# 500, and the shards and the layers of stage 3, 500 bots in 2 shards of cap 250 with layers of cap 20, since no test
+# runs more than 500 bots. The bots make no crossing and no party, so this run of stage 3 proves the shards and the
+# layers alone.
 on:
   workflow_dispatch:
   pull_request:
@@ -18,6 +20,7 @@ on:
       - crates/mmo-protocol/**
       - crates/mmo-zone/**
       - script/local.sh
+      - script/report.sh
       - .github/workflows/load.yml
 
 concurrency:
@@ -52,8 +55,6 @@ jobs:
       - name: the stages
         env:
           MMO_LOCAL_PROFILE: release
-          MMO_LOCAL_WORLD_CAP: "500"
-          MMO_LOCAL_LAYER_CAP: "500"
           MMO_BOTS_PLAY_SECONDS: "30"
         run: |
           set -eu
@@ -74,11 +75,11 @@ jobs:
             tail -n 23 "$1" | head -n 21 | awk -v hz="$(getconf CLK_TCK)" \
               'NR == 1 { t = $1; c = $2 } END { printf "%.2f", ($2 - c) / hz / ($1 - t) }'
           }
-          # stage <tree> <name> <bots> <town>
+          # stage <tree> <name> <bots> <town> <shards> <cap of a shard> <cap of a layer>
           stage() {
-            dir=$out/$2-$3-$4
+            dir=$out/$2-$3-$4-$5
             mkdir -p "$dir"
-            export MMO_LOCAL_DIR=$dir/stack
+            export MMO_LOCAL_DIR=$dir/stack MMO_LOCAL_SHARDS=$5 MMO_LOCAL_SHARD_CAP=$6 MMO_LOCAL_LAYER_CAP=$7
             (cd "$1" && sh script/local.sh start) >"$dir/start.log"
             # The pool of layer writers: an idle writer takes no CPU, so their sum is the cores of the layers.
             writers=
@@ -99,6 +100,10 @@ jobs:
             if ! (cd "$1" && MMO_BOTS_TOWN=$4 timeout 600 sh script/local.sh bots "$3") >"$dir/bots.log" 2>&1; then
               echo "::warning::the bots of $2 failed in the stage of $3 bots"
               [ "$2" = base ] || failed="$failed $3"
+            fi
+            # The head fails too when its report shows a layer over its cap, or a shard with too few layers.
+            if [ "$2" != base ] && ! sh "$GITHUB_WORKSPACE/script/report.sh" "$dir/bots.log" "$3" "$5"; then
+              failed="$failed $3"
             fi
             total=0
             for file in "$dir"/zone*.cpu; do
@@ -122,7 +127,7 @@ jobs:
                 name="$name" "$dir/$name.syms" >>"$dir/bots.log"
             done
             {
-              echo "### $2: $3 bots, $4 in town"
+              echo "### $2: $3 bots, $4 in town, $5 shards of cap $6, layers of cap $7"
               echo '```'
               tail -n 30 "$dir/bots.log"
               echo '```'
@@ -135,9 +140,9 @@ jobs:
           # The first start of each tree builds it in release, which takes minutes.
           failed=
           for tree in "$RUNNER_TEMP/base:base" "$GITHUB_WORKSPACE:head"; do
-            for bots in "500 250"; do
+            for bots in "500 250 1 500 500" "500 0 2 250 20"; do
               echo "$(date +%T) ${tree##*:}: $bots"
-              # shellcheck disable=SC2086 # the count of bots and the count in town
+              # shellcheck disable=SC2086 # the count of bots, the count in town, the shards and their caps
               stage "${tree%%:*}" "${tree##*:}" $bots
             done
           done
