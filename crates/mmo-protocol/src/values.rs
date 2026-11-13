@@ -17,6 +17,22 @@ pub struct Tick(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct ZoneId(pub i32);
 
+/// The id of a shard: one independent world, with its own zones, layers, queue and players. A
+/// player of one shard never meets a player of another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShardId(pub u32);
+
+/// A layer: one full copy of a zone in a shard, with its own state, its own players and its own
+/// writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layer {
+  /// The zone that the layer copies.
+  pub zone: ZoneId,
+  /// The number of the layer in its zone: the least number from 1 up that the zone did not use
+  /// in its shard when the layer opened.
+  pub number: u32,
+}
+
 /// The epoch of a zone: the count of the writers that claimed it, as the table `zones` of
 /// PostgreSQL holds it.
 ///

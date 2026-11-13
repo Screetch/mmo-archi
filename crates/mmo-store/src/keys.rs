@@ -10,20 +10,34 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, Token, ZoneId};
+use mmo_protocol::{AccountId, Layer, ShardId, Token, ZoneId};
 
-/// The channel on which a zone writer names each zone that changed its writer.
+/// The channel of the directory of the layers. Each script of
+/// [`Directory`](crate::Directory) names on it each layer that it opened, closed, put in drain or
+/// gave a writer, as [`layer`] names it.
 pub const DIRECTORY: &str = "directory";
 
-/// The fields of [`zone`], which a zone writer writes and a gateway reads: the address that the
-/// gateways dial, the epoch of the writer, and the count of its players.
+/// The fields of [`shard`], which the login service writes: the name of the shard, the most
+/// accounts that it admits, and the most players of each of its layers. The scripts of the
+/// directory read [`LAYER_CAP`] by this name.
+pub const NAME: &str = "name";
+pub const CAP: &str = "cap";
+pub const LAYER_CAP: &str = "layer_cap";
+
+/// The fields of [`zone`] and of [`writer`], which a writer writes and a gateway reads: the
+/// address that the gateways dial, the epoch of the writer, and the count of its players. The
+/// scripts of the directory write [`ADDRESS`] and [`EPOCH`] by these names.
 pub const ADDRESS: &str = "address";
 pub const EPOCH: &str = "epoch";
 pub const PLAYERS: &str = "players";
 
-/// The fields of [`presence`], besides [`EPOCH`]: the character and the zone of the account.
+/// The fields of [`presence`], besides [`EPOCH`]: the character of the account, its shard, its
+/// zone and its layer, and its party. The scripts of the directory read them by these names.
 pub const CHARACTER: &str = "character";
+pub const SHARD: &str = "shard";
 pub const ZONE: &str = "zone";
+pub const LAYER: &str = "layer";
+pub const PARTY: &str = "party";
 
 /// The prefix of [`presence`].
 pub const PRESENCE: &str = "presence:";
@@ -42,6 +56,47 @@ pub fn session(token: &Token) -> String {
 /// The presence of `account`, a hash of the character, the zone and the epoch of its writer.
 pub fn presence(account: AccountId) -> String {
   format!("{PRESENCE}{}", account.0)
+}
+
+/// The caps of `shard`, a hash of its [`NAME`], its [`CAP`] and its [`LAYER_CAP`].
+pub fn shard(shard: ShardId) -> String {
+  format!("shard:{}", shard.0)
+}
+
+/// The layers of `shard`, a hash from the [`field`] of each layer to its count of players.
+pub fn layers(shard: ShardId) -> String {
+  format!("layers:{}", shard.0)
+}
+
+/// The layers of `shard` that drain, a set of the [`field`] of each.
+pub fn draining(shard: ShardId) -> String {
+  format!("draining:{}", shard.0)
+}
+
+/// The field of `layer` in [`layers`] and [`draining`]: its zone and its number.
+pub fn field(layer: Layer) -> String {
+  format!("{}:{}", layer.zone.0, layer.number)
+}
+
+/// The name of `layer` of `shard` in the keys of a layer and on the channel [`DIRECTORY`].
+pub fn layer(shard: ShardId, layer: Layer) -> String {
+  format!("{}:{}", shard.0, field(layer))
+}
+
+/// The prefix of the [`writer`] of each layer of `shard`, before the [`field`] of the layer.
+pub fn writers(shard: ShardId) -> String {
+  format!("writer:{}:", shard.0)
+}
+
+/// The lease of the writer of `layer` of `shard`, a hash of its [`ADDRESS`] and its [`EPOCH`].
+/// A layer whose lease ended has no writer.
+pub fn writer(shard: ShardId, layer: Layer) -> String {
+  format!("{}{}", writers(shard), field(layer))
+}
+
+/// The prefix of each party of `shard`, before the id of the party.
+pub fn parties(shard: ShardId) -> String {
+  format!("party:{}:", shard.0)
 }
 
 /// The entry of `zone` in the directory of zones, a hash of the address, the epoch and the count
@@ -146,11 +201,12 @@ mod tests {
   use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
   use std::time::Duration;
 
-  use mmo_protocol::{AccountId, Token, ZoneId};
+  use mmo_protocol::{AccountId, Layer, ShardId, Token, ZoneId};
 
   use super::{
-    DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, failed, guessed, presence,
-    queue, queued, resume, session, tick_bucket, ticks, zone,
+    DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, draining, failed, field,
+    guessed, layer, layers, parties, presence, queue, queued, resume, session, shard, tick_bucket,
+    ticks, writer, writers, zone,
   };
 
   #[test]
@@ -201,6 +257,33 @@ mod tests {
         "created:2001:db8:1:2::/64".to_owned(),
         "chat:trade".to_owned(),
         "directory".to_owned(),
+      ]
+    );
+  }
+
+  #[test]
+  fn each_key_of_the_directory_of_a_shard_has_the_name_that_section_3_gives() {
+    let far = Layer { zone: ZoneId(-3), number: u32::MAX };
+    assert_eq!(
+      [
+        shard(ShardId(2)),
+        layers(ShardId(2)),
+        draining(ShardId(2)),
+        field(far),
+        layer(ShardId(2), far),
+        writers(ShardId(2)),
+        writer(ShardId(u32::MAX), far),
+        parties(ShardId(2)),
+      ],
+      [
+        "shard:2",
+        "layers:2",
+        "draining:2",
+        "-3:4294967295",
+        "2:-3:4294967295",
+        "writer:2:",
+        "writer:4294967295:-3:4294967295",
+        "party:2:",
       ]
     );
   }

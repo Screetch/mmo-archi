@@ -1786,7 +1786,9 @@ name = "mmo-store"
 version = "0.2.0"
 dependencies = [
  "argon2",
+ "futures-util",
  "mmo-protocol",
+ "redis",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
