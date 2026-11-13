@@ -337,13 +337,14 @@ player, and the caller runs the script again after 1 s.
 
 ### The scripts of the directory
 
-Five Lua scripts of `mmo-store` change the directory. Redis runs each one as one atomic step, so two callers never take
-one decision twice. Each script sends the shard, the zone and the layer that it changed on the channel `directory`.
+Six Lua scripts of `mmo-store`, which its `Directory` runs, change the directory. Redis runs each one as one atomic
+step, so two callers never take one decision twice. Each script but `lease` sends the shard, the zone and the layer that it changed on the channel `directory`.
 
 | Script | Who runs it | What it does |
 | --- | --- | --- |
 | `place` | the login service and the layer writer | gives the layer that a player enters in a zone, or answers to wait and opens a layer |
-| `claim` | an idle layer writer, each second | gives the writer the layer of its shard with no writer that has the lowest zone, then the lowest number, or nothing |
+| `claim` | an idle layer writer, each second | gives the writer the layer of its shard with no writer that has the lowest zone, then the lowest number, or nothing, and writes the lease of that layer with the epoch 0, so no other writer takes it |
+| `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, and writes its count, unless the lease holds a newer epoch |
 | `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players |
 | `close` | the writer of a layer | removes the layer when it holds no player and its lease holds the epoch of the writer |
 | `party` | the layer writer | adds a player to a party, or removes it |
@@ -397,8 +398,8 @@ The writer moves a player only at a safe point: a tick at which the player sent 
 is a safe point of each of them, and runs `place` once for the party.
 
 The writer of a layer that held no player for 30 s, the time that it keeps the player of a closed link, runs `close`.
-`close` removes the layer from `layers:{s}` and from `draining:{s}` when its count is still 0 and its lease holds the
-epoch of the writer. The writer then deletes its lease and is idle again, and the number of the layer is free for the
+`close` removes the layer from `layers:{s}` and from `draining:{s}`, and deletes its lease, when its count is still 0
+and its lease holds the epoch of the writer. The writer is then idle again, and the number of the layer is free for the
 next layer of the zone.
 
 ### The move between two layers

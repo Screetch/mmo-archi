@@ -8,14 +8,17 @@
 //! - The login service: [`Store::create_account`], [`Store::sign_in`],
 //!   [`Store::create_character`] and [`Store::characters`].
 //! - A zone writer: [`Store::load`], when it takes a zone or a player.
+//! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
+//!   Redis, with its scripts.
 //! - The keeper: [`Store::add_zone`], [`Store::claim`], which gives a writer the next
 //!   [`Epoch`](mmo_protocol::Epoch) of its zone, and [`Store::save`], which writes the
 //!   [`Batch`](mmo_protocol::Batch) of a writer.
 
 mod accounts;
 mod characters;
+mod directory;
 pub mod keys;
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod zones;
 
@@ -24,6 +27,7 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 pub use characters::Saved;
+pub use directory::{Directory, LEASE, PARTY, PartyId, Placed};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 

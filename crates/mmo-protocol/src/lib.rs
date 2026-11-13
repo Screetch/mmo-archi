@@ -30,8 +30,8 @@ pub use messages::{
   ToNeighbour, ToZone,
 };
 pub use values::{
-  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, TICKS_PER_SECOND, Tick,
-  Token, Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, ShardId,
+  TICKS_PER_SECOND, Tick, Token, Velocity, ZoneId,
 };
 
 /// The version of the protocol, which each [`Hello`] carries.
