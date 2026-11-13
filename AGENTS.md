@@ -8,12 +8,14 @@ The shape of the game is fixed, and each crate serves it:
 
 - The server is the one authority of the state of the world. A client sends the intents of its player, and the server
   decides. A client can predict a result and correct it when the server answers, but it never decides.
-- The world is cut into zones, and each zone has one process, its writer, which alone writes the state of the zone.
-- The gateway keeps no state: it ends the connection of a client, checks its session, finds the zone of the player in
-  the directory of zones, and sends each message to that zone. So any gateway serves any client, and a gateway that
-  stops loses nothing.
-- Redis holds the short shared state: the sessions, the presence, the directory of zones and the chat. PostgreSQL
-  holds the durable data, as the accounts, the characters and the items.
+- A shard is one independent world, and more shards hold more players. The world of a shard is cut into zones, and a
+  zone runs one or more layers, each a full copy of the zone with its own cap of players. Each layer has exactly one
+  writer, a process that alone writes the state of the layer.
+- The gateway keeps no state: it ends the connection of a client, checks its session, finds the writer of the layer of
+  the player in the directory, and sends each message to that writer. So any gateway serves any client of any shard,
+  and a gateway that stops loses nothing.
+- Redis holds the short shared state: the sessions, the presence, the directory of the layers and the chat.
+  PostgreSQL holds the durable data, as the accounts, the characters and the items.
 - The client opens its window with winit and draws with wgpu.
 - The collisions run on parry3d, in a deterministic crate that the server and the client share, so a prediction of the
   client and the decision of the server come from the same code.
@@ -50,15 +52,19 @@ The files beside the crates:
 The owner is the source of truth of what a word means, and a name serves its meaning strictly. When a name of the code
 does not serve its meaning, the name is wrong, and the name changes.
 
-- The authority of a state is the one process that decides it. The authority of the state of a zone is its writer. A
+- The authority of a state is the one process that decides it. The authority of the state of a layer is its writer. A
   client is never an authority.
 - An intent is what a client asks for its player, as a move or the use of an item. The server checks it and decides
   what it changes. An intent is never a fact of the world.
-- A zone is a part of the world with one writer. Two processes never write the state of one zone.
+- A zone is a part of the map of a world. It holds no state of its own: its layers hold it.
+- A layer is one full copy of a zone in a shard, with its own state, its own players and its own cap of players. Each
+  layer has exactly one writer, and two processes never write the state of one layer.
+- A shard is one independent world, with its own zones and layers, its own directory, its own queue and its own
+  players. A player of one shard never meets a player of another, and more shards hold more players.
 - The gateway is stateless: all that it reads, it reads from Redis or from the message. A state that a gateway keeps
   is a defect.
-- A session proves that a client signed in. The presence says which player is online, and where. The directory of
-  zones says which process writes each zone. Redis holds all three, and the chat.
+- A session proves that a client signed in. The presence says which player is online, and where. The directory says
+  which layers each zone runs in each shard, and which process writes each layer. Redis holds all three, and the chat.
 - Durable data outlives each process and each restart, and PostgreSQL holds it. Short state lives in Redis, and the
   game can lose it and make it again.
 - Deterministic means that the same state and the same inputs give the same result on the server and on each client.
@@ -177,7 +183,7 @@ fix what your change broke, and report what was broken before.
   Redis of their own for each test, with the program that `REDIS_SERVER` names, or else `redis-server` of the `PATH`,
   which `brew install redis` gives.
 - `sh script/local.sh start`: build the servers and start the whole stack on this machine: PostgreSQL, Redis, the keeper,
-  the login service, one zone writer and one gateway, each with the variables that its `config.rs` reads. It makes the TLS
+  the login service, one layer writer and one gateway, each with the variables that its `config.rs` reads. It makes the TLS
   material for local work (an authority and one certificate for `localhost`, valid 30 days), and prints the addresses that
   a client uses. It runs no `docker compose`: it starts `postgres` and `redis-server` of the machine on the ports 55432
   and 56379, in `$TMPDIR/mmo-local`, so a store that already runs on 5432 or 6379 keeps its data. It needs initdb,

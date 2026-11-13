@@ -29,7 +29,7 @@ design touches before you derive the design.
 
 This is step 2 of the ladder of `ponytail` in mmo-archi. Before you write code, find the mechanism of mmo-archi that
 does the nearest thing: a crate of `crates/`, the shape of the game that `AGENTS.md` fixes (the authority of the
-server, the one writer of each zone, the stateless gateway, the stores of Redis and PostgreSQL, and the shared
+server, the one writer of each layer, the stateless gateway, the stores of Redis and PostgreSQL, and the shared
 deterministic crate of the collisions), a script of `script/`, or a skill. Read it, and name it in your design note or
 your pull request. When no mechanism fits, say why.
 
