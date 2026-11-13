@@ -42,7 +42,7 @@ Put each item in queue as a dict, in the order of the work, the hard work first:
 4. A worker that ends gives its report whole in the next notice. A worker that ends with no PR is a decision, and its notice wakes you.
 5. A PR of the round is an open PR whose label w:key names an item that the round holds. A red or conflicting one counts as handled only while a worker that knows of its head acts: its live maker, which the round tells at once, once for each head and problem, to fix it before any other step, else a fixer that the round sent for that head, at most 2 for a head, then a notice. A fixer runs at the model of the fixer on a fork of the chain of the worker that made the PR, when the round holds that worker, so it starts with what that worker read and did. A head that such a worker has not moved in UNMOVED seconds is one notice, with the worker and its last act. handler() holds that rule for the sweep.
 6. While the newest run of the gates on main failed, the round sends no order and no fixer for a red PR, and tells you once. A red PR whose failed checks all fail on main too gets no fixer either, and the round says so in one line.
-7. A green PR merges by the auto-merge of GitHub, which the round turns on for each PR of the round, else by a plain merge, else by gh stack merge for a layer of a stack, behind a ruleset of main that requires the check GATE. With no such ruleset, the round turns on no auto-merge and tells you once. A draft, an open box of its checklist, or the label hold, hold:owner-review or owner-merge keeps a PR from the merge, and the label paused takes it out of the round.
+7. The round merges a green PR itself, and GitHub merges none: the round turns off the auto-merge of each PR that it tends, since GitHub would merge a head that stands on an old main. The ruleset of main requires the checks GATE and the title and no up-to-date branch, so the round holds that rule in its own merge. It merges a PR only when its head holds the current tip of its base and the newest run of its gates passed on that head: in one command it reads how far the head is behind its base, and merges with gh pr merge --squash --match-head-commit only at 0, else with gh stack merge for a layer of a stack. A green PR that is behind its base is not merged: the round updates its branch with gh pr update-branch, one PR for each sweep, only while no other PR of the round stands on the current tip with its gates still running, so the gates run again on the head and the next sweep reads them. Each merge changes main, so the PRs that wait are behind it, and each one meets the same rule in its turn. With no ruleset of main that requires the check GATE, the round merges no PR and tells you once. A draft, an open box of its checklist, or the label hold, hold:owner-review or owner-merge keeps a PR from the merge, and the label paused takes it out of the round.
 8. At ALIGN_EVERY merged PRs since the last audit of each target of AUDITS, the round queues the next free audit of that target, alignN, of kind audit, on limits["models"]["astra"] when N is odd, else on the model of audit. alignN checks main against the words of the owner. Each row of its register becomes an item, queued in the order of the register after the items of queue, unless the coordinator asks for the rows before the items that no worker holds yet.
 9. Each message of the owner that no ask of owner_asks names is one line, and so is each ask that is not done or a decision while no item in queue, at work or on an open PR of the round carries it. asked() gives the new lines in one notice, and no new notice while its last one stands open: no word of the owner drops between his message and main. A worker that ends with a line Left: <ids> queues one follow-up for each ask that no other item carries, and a follow-up that leaves it again is a decision.
 10. Each new comment of the owner on a PR of the round goes to the worker on it, else to a fixer on a fork of the chain of its maker, and the label hold comes on the PR until its worker pushes the fix and takes hold off.
@@ -88,6 +88,7 @@ landed: list[int] = globals().setdefault("landed", [])
 align_state: dict[str, dict] = globals().setdefault("align_state", {})
 comments: set[str] = globals().setdefault("comments", set())
 progress: dict[str, tuple[int, float]] = globals().setdefault("progress", {})
+updated: set[str] = globals().setdefault("updated", set())
 
 
 def asks_kept() -> dict[str, dict]:
@@ -538,6 +539,33 @@ def mend(pr: dict, problem: str) -> Generator[set[str], object, None]:
   assigned[n] = {"sha": sha, "problem": problem, "who": who, "at": clock(), "fixer": True, "tries": tries + 1}
 
 
+def behind_by(pr: dict) -> str:
+  return "gh api " + shq("repos/{owner}/{repo}/compare/" + pr["base"] + "..." + pr["sha"]) + " --jq .behind_by"
+
+
+def land(ready: list[dict], flips: list[str]) -> Generator[set[str], object, None]:
+  behind: dict[int, int] = {}
+  if ready:
+    got = yield from shell("".join(f"echo {pr['n']} $({behind_by(pr)}); " for pr in ready), timeout=300)
+    for line in got.stdout.lines:
+      bits = line.split()
+      if len(bits) == 2 and bits[0].isdigit() and bits[1].isdigit():
+        behind[int(bits[0])] = int(bits[1])
+  steps = list(flips)
+  fresh = [pr for pr in ready if behind.get(pr["n"]) == 0]
+  for pr in fresh:
+    if pr["state"] == "green":
+      n, sha = pr["n"], pr["sha"]
+      steps.append(f'[ "$({behind_by(pr)})" = 0 ] && {{ gh pr merge {n} --squash --match-head-commit {sha} || gh stack merge {n} --yes --squash; }}')
+  if not any(pr["state"] == "running" for pr in fresh):
+    stale = [pr for pr in ready if behind.get(pr["n"], 0) > 0 and f"{pr['n']} {pr['sha']}" not in updated]
+    if stale:
+      updated.add(f"{stale[0]['n']} {stale[0]['sha']}")
+      steps.append(f"gh pr update-branch {stale[0]['n']}")
+  if steps:
+    yield from shell("".join(f"{{ {x}; }} >/dev/null 2>&1; " for x in steps), timeout=300)
+
+
 def sweep() -> Generator[set[str], object, None]:
   got = yield from shell(PRS, timeout=300)
   bits = re.split(r"\n--- (\d+)\n", "\n" + got.stdout.content)
@@ -560,10 +588,11 @@ def sweep() -> Generator[set[str], object, None]:
   if red:
     notice(f"red {main['sha']}", f"main is red at {str(main['sha'])[:7]}: find its cause first. The round sends no order and no fixer for a red PR until the gates of main pass.")
   if not gated:
-    notice("ruleset", f"main has no ruleset that requires the check {GATE}, so the round turns on no auto-merge and merges no PR.")
+    notice("ruleset", f"main has no ruleset that requires the check {GATE}, so the round merges no PR.")
   for gone in [k for k in assigned if k not in prs]:
     assigned.pop(gone)
-  flips = []
+  flips: list[str] = []
+  ready: list[dict] = []
   for n in sorted(prs):
     pr = prs[n]
     if not ours(pr) or "paused" in pr["labels"]:
@@ -572,16 +601,17 @@ def sweep() -> Generator[set[str], object, None]:
     failing = {name for name, end in zip(pr["names"], pr["checks"]) if end in FAILS}
     labelled = bool(set(HOLDS) & set(pr["labels"]))
     want = gated and not (labelled or pr["draft"] or pr["open"]) and now != "conflicting"
-    if want != pr["auto"]:
-      flips.append(f"gh pr merge {n} --auto --squash || gh pr merge {n} --squash || gh stack merge {n} --yes --squash" if want else f"gh pr merge {n} --disable-auto")
+    if pr["auto"]:
+      flips.append(f"gh pr merge {n} --disable-auto")
+    if want and now in ("green", "running"):
+      ready.append(pr)
     if now == "red" and red:
       once(f"main waits {n} {pr['sha']}", f"#{n} is red at {pr['sha'][:7]} while main is red, so it waits for main.")
     elif now == "red" and failing and not pr["open"] and not failing - broke:
       once(f"main fails {n} {pr['sha']}", f"#{n} is red at {pr['sha'][:7]} only on {', '.join(sorted(failing))}, which main fails too, so the round hires no fixer for it.")
     elif (problem := trouble(pr)) and not labelled:
       yield from mend(pr, problem)
-  if flips:
-    yield from shell("".join(f"{{ {x}; }} >/dev/null 2>&1; " for x in flips), timeout=300)
+  yield from land(ready, flips)
 
 
 def review() -> Generator[set[str], object, None]:

@@ -271,13 +271,17 @@ Every pull request and every push to `main` runs the gates in `.github/workflows
 - `the bots` runs the short stage 1 of the load test on Linux: `sh script/local.sh start`, then
   `sh script/local.sh bots 200` with layers of cap 20, and it fails when a bot does not play or ends with a fault, when
   a layer passes its cap, or when the layers do not open as the stage says. It keeps the report as an artifact.
-- `the gates` stands for all the jobs, and a job that the scope skips passes there, so a ruleset of `main` requires
-  this check alone, with `the title` and `the contract`.
+- `the gates` stands for all the jobs, and a job that the scope skips passes there. The ruleset of `main` requires two
+  checks: `the gates` and `the title`. It does not require `the contract`, and it does not require a branch that is up
+  to date with `main`, so GitHub accepts a green pull request even when `main` moved after its checks ran. The
+  conductor holds that rule in its own merge: it merges a pull request only when its head holds the tip of `main` and
+  `the gates` passed on that head, and it updates a branch that is behind before it merges. Do the same for a merge by
+  hand: update the branch and read its checks first.
 
 `.github/workflows/titles.yml` runs `script/title.py` on the title of each pull request, at each change of the pull
 request and at each edit of its title. `.github/workflows/contract.yml` runs `script/contract.sh` on each pull request
 against the last tag and its base, at each change and at each edit of its title, so a break of a public item needs a
-`!` in the title.
+`!` in the title. The ruleset does not require this check, so read its result before a merge by hand.
 
 A release is one version of the workspace. `.github/workflows/release.yml` keeps the pull request of the next release
 open on `main`, with `CHANGELOG.md` and the version in `Cargo.toml` and `Cargo.lock`, and
