@@ -105,4 +105,11 @@ mod tests {
     let message = fault.into_panic().downcast::<String>().expect("a formatted message");
     assert!(message.starts_with("Redis did not start in 2 attempts."), "{message}");
   }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_started_redis_gives_its_port_in_its_url() {
+    let redis = Redis::start().await;
+    assert_eq!(redis.url(), format!("redis://127.0.0.1:{}", redis.port()));
+  }
 }
