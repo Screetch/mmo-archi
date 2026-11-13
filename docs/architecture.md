@@ -741,7 +741,7 @@ the hosts of the servers.
 | --- | ---: | --- | --- | --- |
 | 1 | 200 | 1 shard of cap 200, layers of cap 20, 1 zone | the path from login to play, and the opening of layers | each bot plays, no message fails to decode, and the zone runs 10 layers, none with more than 20 players |
 | 2 | 500, half in a town | 1 shard of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
-| 3 | 500, of which 50 cross a border | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the hand-over | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and each crosser enters the next zone |
+| 3 | 500, of which 40 cross a border | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the hand-over | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and each crosser enters the layer with its own number in the next zone |
 | 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
 | 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, each bot left plays, and each move fell on a safe point of its bot |
 | 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
@@ -749,6 +749,26 @@ the hosts of the servers.
 No test runs more than 500 bots, on a machine or in CI. The stages prove the rules of scale with small caps, so a run
 of 500 bots or fewer opens many layers and more than one shard, and stage 2 proves the cap of a layer that the game
 runs.
+
+Each stage runs in one place or in none, and a place checks the rules that `sh script/report.sh` reads from the report,
+which section 12 gives below:
+
+| Stage | Where it runs | What fails there |
+| --- | --- | --- |
+| 1 | the job `the bots` of the gates, in the dev profile | a bot that does not play, a fault of a bot, a layer over its cap, fewer than 10 layers |
+| 2 | the workflow `load`, in the release profile, on the base and on the head of a pull request | on the head: a bot that does not play, a fault, a layer over its cap, a shard with too few layers. The tick and the data of the row stand in the report and the summary, and no check fails on them |
+| 3 | the workflow `load`, as stage 2, on 2 zones | as stage 2, and a bot that saw a bot of the other shard, a crosser that did not enter the next zone, and a crossing into the next zone that did not keep the number of its layer |
+| 4 | the workflow `load`, as stage 2 | the rules of the queue below |
+| 5 | nowhere | no check runs it, since the drain and the move wait |
+| 6 | the workflow `load`, on the head alone | the rules of the recovery below |
+
+Stage 3 makes the bots that cross the first 40 of its run, 20 for each shard, and each other bot logs in after each of
+them played. So the crossers of a shard stand on its layer 1, which holds 20 players, and no other bot stands there.
+The next zone has no layer, and the first crossing makes the directory open its layer 1: each crosser enters the layer 1
+of the next zone, as the placement of section 6 says, and the report counts the crossings that kept the number of
+their layer. The stage proves that rule for the layer 1 alone. The test of `Directory::place` in `mmo-store` proves it
+for each number. Each bot checks each entity that a snapshot gives it against the shard of each character of the run,
+and the report counts the bots of another shard that a bot saw, which must be none.
 
 Each layer writer reports the time of each tick in `ticks:{s}:{z}:{l}` (section 3), and each bot reports its bytes up
 and down and its shard. The bots go round the shards, each through the login service of its shard. Each second of the
@@ -774,19 +794,21 @@ bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=
 document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for the cap of each shard,
 `MMO_LOCAL_LAYER_CAP` for the cap of a layer, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of one
 row of the map, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
-`MMO_BOTS_TOWN` for the bots that start in one square of 128 m, and `MMO_BOTS_CROSSERS` for the bots that walk east from
-near the east border of the zone. The stack runs the login service and the pool of writers
-of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small, 100 for a
-shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed link for 30 s,
-so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
+`MMO_BOTS_TOWN` for the bots that start in one square of 128 m, and `MMO_BOTS_CROSSERS` for the first bots, which log in
+before the others and walk east from near the east border of the zone. The stack runs the login service and the pool of
+writers of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small,
+100 for a shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed
+link for 30 s, so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger
+count.
 
 The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4 and 6 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the
 pull request, then of the change, on the same runner. It fails when a bot of the change cannot play, when a layer of the
-change passes its cap, when a shard of the change opens fewer layers than its players need, and when a crosser of stage 3 does not enter the next zone, as
-`sh script/report.sh` reads them from the report of the bots. Its summary gives
-the report of the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the
-hottest functions of each, from `perf`.
+change passes its cap, when a shard of the change opens fewer layers than its players need, and, in stage 3, when a bot
+sees a bot of the other shard, when a crosser does not enter the next zone and when a crossing into it does not keep the
+number of its layer, as `sh script/report.sh` reads them from the report of the bots. Its summary gives the report of
+the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the hottest functions of
+each, from `perf`.
 
 Stage 4 runs 300 bots on a shard of cap 200. `MMO_BOTS_WAITING=100` tells the bots that the queue must hold 100 of them
 when the measure ends, so the measure starts when the other 200 play. The report then prints a `queue:` line and 4

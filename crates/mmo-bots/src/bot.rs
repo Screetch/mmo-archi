@@ -1,5 +1,6 @@
 //! One bot: it logs in, waits in the queue, attaches to a gateway, and walks as a player does.
 
+use std::collections::{HashMap, HashSet};
 use std::iter;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -35,6 +36,10 @@ pub(crate) struct Shared {
   pub(crate) ready: AtomicUsize,
   /// A bot that loses its link after it played attaches again with its token, as a client does.
   pub(crate) reconnect: bool,
+  /// The count of the bots that cross a border. Each other bot logs in after each of them played.
+  pub(crate) crossers: usize,
+  /// The shard of each character of the bots, by its id.
+  pub(crate) shards: HashMap<i64, u32>,
 }
 
 /// What one bot measured.
@@ -66,6 +71,8 @@ pub(crate) struct Outcome {
   /// Each move of the bot to another layer, which the gateway tells it, from the layer that it
   /// left to the layer that it entered.
   pub(crate) crossings: Vec<(Layer, Layer)>,
+  /// The characters of another shard that a snapshot gave to the bot.
+  pub(crate) strangers: HashSet<i64>,
   /// The time from the first snapshot that shows the player to the end.
   pub(crate) played: Duration,
   /// The bytes of the datagrams up and down, with no header of IP, UDP or QUIC.
@@ -85,6 +92,16 @@ enum Error {
   Fault(#[from] Fault),
   #[error("the gateway sends {0:?}")]
   Message(ToClient),
+}
+
+impl Outcome {
+  /// Notes each entity of the `snapshot` that is the character of a bot of another shard: a shard
+  /// is a world of its own, so no snapshot may show one.
+  fn note_strangers(&mut self, shards: &HashMap<i64, u32>, snapshot: &Snapshot) {
+    let others = snapshot.entered.iter().map(|entity| entity.id.0);
+    let others = others.filter(|id| shards.get(id).is_some_and(|shard| *shard != self.shard));
+    self.strangers.extend(others);
+  }
 }
 
 /// The body of the player, and what it knows of the world.
@@ -138,6 +155,7 @@ impl Walk {
     let size = encode(snapshot).len();
     (out.snapshots, out.down, out.largest) =
       (out.snapshots + 1, out.down + size, out.largest.max(size));
+    out.note_strangers(&shared.shards, snapshot);
     match self.hear(snapshot) {
       Ok(true) => {
         if out.joined.is_none() {
@@ -246,6 +264,14 @@ async fn play(
   mut stop: watch::Receiver<bool>,
   out: &mut Outcome,
 ) -> Result<bool, Error> {
+  // The crossers log in first: they fill the first layer of their shard, so a crosser enters the
+  // layer with its number in the next zone, which the first crossing opens.
+  while !bot.crosser && shared.ready.load(Ordering::Relaxed) < shared.crossers {
+    tokio::select! {
+      () = sleep(RETRY) => {}
+      _ = stop.changed() => return Ok(false),
+    }
+  }
   let started = Instant::now();
   let queued = &mut |place| {
     out.place.get_or_insert(place);
@@ -313,6 +339,7 @@ pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>)
 
 #[cfg(test)]
 mod tests {
+  use std::collections::HashMap;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Duration;
 
@@ -357,6 +384,8 @@ mod tests {
       seed: 1,
       ready: AtomicUsize::new(0),
       reconnect: false,
+      crossers: 0,
+      shards: HashMap::new(),
     }
   }
 
@@ -602,6 +631,38 @@ mod tests {
     let mut fresh = Walk { layer: Layer { zone: ZoneId(1), number: 0 }, ..walk() };
     fresh.moved(Layer { zone: ZoneId(1), number: 2 }, &mut out);
     assert_eq!((out.crossings.len(), fresh.layer.number), (1, 2));
+  }
+
+  #[test]
+  fn an_outcome_notes_each_character_of_another_shard_that_a_snapshot_gives() {
+    let shards = HashMap::from([(42, 1), (43, 2), (44, 2)]);
+    let mut out = Outcome { shard: 1, ..Outcome::default() };
+    let seen = snapshot(10, None, vec![entity(42), entity(43), entity(45)]);
+    out.note_strangers(&shards, &seen);
+    out.note_strangers(&shards, &snapshot(11, None, vec![entity(43), entity(44)]));
+    assert_eq!(out.strangers.len(), 2);
+    assert!(out.strangers.contains(&43) && out.strangers.contains(&44));
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_bot_that_does_not_cross_waits_for_the_crossers_and_ends_when_it_is_stopped() {
+    let login = login_service("Brom", 42);
+    let idle = Fake::start(hold);
+    let mut shared = shared_by(&login, &idle);
+    shared.crossers = 1;
+    let (stop, stopped) = watch::channel(false);
+    let stopping = async {
+      sleep(Duration::from_millis(300)).await;
+      stop.send_replace(true);
+    };
+    let walker = bot(&login);
+    let ended = timeout(Duration::from_secs(10), async {
+      tokio::join!(run(&shared, &walker, stopped), stopping)
+    });
+    let (out, ()) = ended.await.expect("a bot that waits for the crossers ends when it is stopped");
+    assert_eq!((out.fault, out.queued, out.waited, out.joined), (None, false, None, None));
+    assert_eq!(shared.ready.load(Ordering::Relaxed), 1);
   }
 
   #[test]

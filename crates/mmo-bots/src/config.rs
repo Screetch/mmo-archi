@@ -21,7 +21,7 @@ pub(crate) struct Config {
   pub(crate) bots: u32,
   /// The bots that the queue must hold when the measure ends.
   pub(crate) waiting: u32,
-  /// The bots that start near the east border of the zone and walk east, which cross it.
+  /// The first bots, which start near the east border of the zone and walk east, which cross it.
   pub(crate) crossers: u32,
   pub(crate) town: u32,
   pub(crate) ramp: u32,

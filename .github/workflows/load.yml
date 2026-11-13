@@ -7,8 +7,10 @@ name: load
 # the bots, the gateway and the layer writers share, so a number of this job compares with the other column of the
 # same run, and not with a run on another machine. It runs stage 2, 500 bots with half in a town on one layer of cap
 # 500, and the shards and the layers of stage 3, 500 bots in 2 shards of cap 250 with layers of cap 20, since no test
-# runs more than 500 bots. In stage 3, 50 bots start near the east border of their zone and walk east, so this run
-# proves the hand-over to the next zone too. It runs stage 4 too, 300 bots on a shard of cap 200, of which 100 wait in the queue. Last it runs stage 6 on the head
+# runs more than 500 bots. In stage 3, 40 bots start near the east border of their zone and walk east, so this run
+# proves the hand-over to the next zone too: they log in first, so each shard holds them on its first layer, and the report
+# fails when a bot saw a bot of the other shard, or when a crosser did not enter the layer with its number in the next zone.
+# It runs stage 4 too, 300 bots on a shard of cap 200, of which 100 wait in the queue. Last it runs stage 6 on the head
 # alone, with 200 bots and one fault for each run: the stop of the layer writer of their layer, of the gateway and of
 # the keeper, as `script/faults.sh` says. Stage 5 waits for the drain and the move, which main does not hold yet.
 on:
@@ -108,7 +110,7 @@ jobs:
               echo "::warning::the bots of $2 failed in the stage of $3 bots"
               [ "$2" = base ] || failed="$failed $3"
             fi
-            # The head fails too when its report shows a layer over its cap, a shard with too few layers, or a crosser that stayed.
+            # The head fails too when its report shows a layer over its cap, a shard with too few layers, a bot that saw another shard, or a crosser that stayed or changed its layer number.
             if [ "$2" != base ] && ! sh "$GITHUB_WORKSPACE/script/report.sh" "$dir/bots.log" "$3" "$5" "${8:-0}" 0 "${9:-0}"; then
               failed="$failed $3"
             fi
@@ -147,7 +149,7 @@ jobs:
           # The first start of each tree builds it in release, which takes minutes.
           failed=
           for tree in "$RUNNER_TEMP/base:base" "$GITHUB_WORKSPACE:head"; do
-            for bots in "500 250 1 500 500" "500 0 2 250 20 0 50" "300 0 1 200 20 100"; do
+            for bots in "500 250 1 500 500" "500 0 2 250 20 0 40" "300 0 1 200 20 100"; do
               echo "$(date +%T) ${tree##*:}: $bots"
               # shellcheck disable=SC2086 # the count of bots, the count in town, the shards and their caps
               stage "${tree%%:*}" "${tree##*:}" $bots
