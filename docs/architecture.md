@@ -416,8 +416,13 @@ the ids gives a neighbour. A player past two borders at once crosses the border 
 target then hands it on across the border on z.
 
 Each writer sends the quantized state of its entities within 48 m of a border, each tick, to the writer of the layer
-with the same number in the next zone, when that layer stands. The next writer shows them as entities that it does not
-own, so a player near a border sees across it.
+with the same number in the zone across that border, when that layer stands. It sends `Edge { zone, entities }` on a
+stream of that link, with the entities in the coordinates of the receiver, which puts them outside its square, and the
+receiver answers `Seen`. A writer with no entity near a border sends one empty list after its last entity left, and
+then nothing. The receiver shows the entities as entities that it does not own, so a player near a border sees across
+it. Each message of a zone replaces the entities of the last message of that zone, and the receiver drops them after 1 s
+with no message. It never shows an entity with the id of one of its own players. The view reaches across each of the
+four borders, and not to a zone that touches only at a corner.
 
 When a player walks past a border, the writer of the layer that the player leaves, the source, does these steps:
 

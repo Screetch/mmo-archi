@@ -19,6 +19,16 @@ const KEPT: u32 = 30 * TICKS_PER_SECOND;
 /// The zone takes an input whose tick is at most this many ticks after its present tick.
 const REACH: u32 = 4;
 
+/// How far from a border a player is seen across it: 48 m.
+const EDGE_CM: i32 = 4800;
+
+/// The most entities that a layer sends across one border, so a message holds less than a frame.
+const EDGE_MAX: usize = 1500;
+
+/// The ticks that the zone keeps the entities that a layer across a border sent: 1 s. A layer that
+/// sends no more takes its entities away after that time.
+const EDGE_KEPT: u32 = TICKS_PER_SECOND;
+
 /// The number that the layer writer gives to the link of a gateway, which relays the links of its
 /// clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,6 +70,9 @@ pub(crate) struct Zone {
   layer: Layer,
   /// The zone across each border of the zone, as the map of the world holds them.
   neighbours: Neighbours,
+  /// The entities that the layer with the same number in each zone across a border sent last, with
+  /// the tick of the message, which this zone shows as entities that it does not own.
+  edge: BTreeMap<i32, (Tick, Vec<Entity>)>,
   /// The most players of the layer, which the writer read from its shard when it claimed it.
   cap: usize,
   terrain: Terrain,
@@ -99,6 +112,7 @@ impl Zone {
     Self {
       layer,
       neighbours: Neighbours::default(),
+      edge: BTreeMap::new(),
       cap,
       terrain: ground(),
       tick: Tick(0),
@@ -114,6 +128,49 @@ impl Zone {
   pub(crate) fn beside(mut self, neighbours: Neighbours) -> Self {
     self.neighbours = neighbours;
     self
+  }
+
+  /// The zone of the layer.
+  pub(crate) fn zone(&self) -> ZoneId {
+    self.layer.zone
+  }
+
+  /// The entities of the players within 48 m of each border that has a zone across it, for the
+  /// layer with the same number in that zone. The entities are in the coordinates of that zone,
+  /// which puts them outside its square. A border with no player near it gives an empty list.
+  pub(crate) fn edges(&self) -> Vec<(Layer, Vec<Entity>)> {
+    let Neighbours { west, east, south, north } = self.neighbours;
+    let mut found = Vec::new();
+    for (across, axis, high) in
+      [(west, 0, false), (east, 0, true), (south, 1, false), (north, 1, true)]
+    {
+      let Some(zone) = across else { continue };
+      let shift = if high { -SIDE_CM } else { SIDE_CM };
+      let along = |entity: &Entity| [entity.position.x, entity.position.z][axis];
+      let near = |entity: &Entity| {
+        if high { along(entity) > SIDE_CM - EDGE_CM } else { along(entity) < EDGE_CM }
+      };
+      let entities = self.players.iter().map(|(id, player)| player.entity(CharacterId(*id)));
+      let entities = entities.filter(near).take(EDGE_MAX).map(|mut entity| {
+        if axis == 0 {
+          entity.position.x += shift;
+        } else {
+          entity.position.z += shift;
+        }
+        entity
+      });
+      found.push((Layer { zone, number: self.layer.number }, entities.collect()));
+    }
+    found
+  }
+
+  /// Takes the entities that the layer of `zone` sent from its border, which replace the last ones
+  /// of that zone. A zone that is not across a border of this zone is none of its business.
+  pub(crate) fn seen(&mut self, zone: ZoneId, entities: Vec<Entity>) {
+    let Neighbours { west, east, south, north } = self.neighbours;
+    if [west, east, south, north].contains(&Some(zone)) {
+      self.edge.insert(zone.0, (self.tick, entities));
+    }
   }
 
   /// The count of the players that the zone holds, linked or not.
@@ -267,12 +324,18 @@ impl Zone {
     for player in self.players.values_mut().filter(|player| !player.crossing) {
       player.step(&self.terrain, now);
     }
-    let entities = self.players.iter().map(|(id, player)| player.entity(CharacterId(*id)));
-    self.history.push(now, entities.collect());
+    self.edge.retain(|_, (at, _)| now.0 - at.0 < EDGE_KEPT);
+    let ghosts = self.edge.values().flat_map(|(_, found)| found).copied();
+    let players = self.players.iter().map(|(id, player)| player.entity(CharacterId(*id)));
+    let mut entities: Vec<Entity> = players.chain(ghosts).collect();
+    entities.sort_by_key(|entity| entity.id.0);
+    entities.dedup_by_key(|entity| entity.id.0);
+    self.history.push(now, entities);
     let entities = self.history.entities();
     let grid = Grid::new(entities);
     let mut snapshots = Vec::new();
-    for (player, entity) in self.players.values_mut().zip(entities) {
+    for (id, player) in &mut self.players {
+      let entity = &entities[entities.partition_point(|one| one.id.0 < *id)];
       if let Attachment::Linked { gateway, link, ack, sent } = &mut player.attachment {
         let message = sent.snapshot(&self.history, *ack, &grid.visible(entity));
         snapshots.push((*gateway, Relayed { link: *link, message }));
@@ -744,6 +807,100 @@ mod tests {
       zone.intents(GATE, Link(1), &walking);
       zone.tick();
     }
+  }
+
+  fn standing(id: i64, x: i32, z: i32) -> Entity {
+    Entity { position: Position { x, y: 0, z }, ..entity(id, x, 0, Angle(0)) }
+  }
+
+  /// A layer of the meadow with the zones `AROUND` it, and a player on the link 1 at each place.
+  fn crowded(places: &[(i32, i32)]) -> Zone {
+    let mut zone = Zone::new(LAYER, CAP).beside(AROUND);
+    for (id, (x, z)) in (1_i64..).zip(places) {
+      assert_eq!(
+        zone.join(GATE, Link(id.unsigned_abs()), AccountId(id), &placed(id, *x, *z)),
+        Ok(())
+      );
+    }
+    zone
+  }
+
+  #[test]
+  fn a_layer_gives_the_players_within_48_m_of_a_border_to_the_layer_across_it() {
+    let mut zone = crowded(&[
+      (4_799, 10_000),
+      (4_800, 10_000),
+      (SIDE_CM - 4_800, 10_000),
+      (SIDE_CM - 4_799, 10_000),
+      (10_000, 30),
+      (10_000, SIDE_CM - 30),
+      (50_000, 50_000),
+    ]);
+    let layer = |zone| Layer { zone: ZoneId(zone), number: 1 };
+    let expected = vec![
+      (layer(11), vec![standing(1, 4_799 + SIDE_CM, 10_000)]),
+      (layer(12), vec![standing(4, -4_799, 10_000)]),
+      (layer(13), vec![standing(5, 10_000, 30 + SIDE_CM)]),
+      (layer(14), vec![standing(6, 10_000, -30)]),
+    ];
+    assert_eq!(zone.edges(), expected);
+    zone.layer.number = 4;
+    assert_eq!(zone.edges().iter().map(|(layer, _)| layer.number).collect::<Vec<_>>(), [4; 4]);
+  }
+
+  #[test]
+  fn a_layer_gives_nothing_across_a_border_that_has_no_zone_beyond_it() {
+    let places = [(30, 10_000), (SIDE_CM - 30, 10_000)];
+    let mut zone = Zone::new(LAYER, CAP);
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &placed(1, places[0].0, places[0].1)), Ok(()));
+    assert_eq!(zone.edges(), []);
+    let only_east = Neighbours { east: Some(ZoneId(12)), ..Neighbours::default() };
+    let zone = zone.beside(only_east);
+    assert_eq!(zone.edges(), [(Layer { zone: ZoneId(12), number: 1 }, vec![])]);
+  }
+
+  /// The ids and the places on x of the entities that the one linked player sees at the next tick.
+  fn sees(zone: &mut Zone) -> Vec<(i64, i32)> {
+    let [(_, told)] = zone.tick().try_into().expect("one snapshot");
+    told.message.entered.iter().map(|one| (one.id.0, one.position.x)).collect()
+  }
+
+  #[test]
+  fn a_player_sees_the_entities_that_the_layers_across_its_borders_tell_for_1_s() {
+    let mut zone = crowded(&[(30, 10_000)]);
+    zone.seen(ZoneId(11), vec![standing(90, -1_000, 10_000)]);
+    assert_eq!(sees(&mut zone), [(1, 30), (90, -1_000)]);
+    drop(run(&mut zone, TICKS_PER_SECOND - 3));
+    assert_eq!(sees(&mut zone), [(1, 30), (90, -1_000)]);
+    assert_eq!(sees(&mut zone), [(1, 30)]);
+  }
+
+  #[test]
+  fn a_new_list_of_a_layer_replaces_its_last_one_and_an_empty_list_takes_its_entities_away() {
+    let mut zone = crowded(&[(30, 10_000)]);
+    zone.seen(ZoneId(11), vec![standing(90, -1_000, 10_000)]);
+    zone.seen(ZoneId(12), vec![standing(91, -2_000, 10_000)]);
+    assert_eq!(sees(&mut zone), [(1, 30), (90, -1_000), (91, -2_000)]);
+    zone.seen(ZoneId(11), vec![standing(92, -500, 10_000)]);
+    assert_eq!(sees(&mut zone), [(1, 30), (92, -500), (91, -2_000)]);
+    zone.seen(ZoneId(11), vec![]);
+    assert_eq!(sees(&mut zone), [(1, 30), (91, -2_000)]);
+  }
+
+  #[test]
+  fn a_zone_takes_the_entities_of_a_zone_across_one_of_its_borders_alone() {
+    let mut zone = crowded(&[(30, 10_000)]);
+    zone.seen(ZoneId(99), vec![standing(90, -1_000, 10_000)]);
+    assert_eq!(sees(&mut zone), [(1, 30)]);
+  }
+
+  #[test]
+  fn a_player_of_the_zone_hides_an_entity_across_a_border_with_its_id() {
+    let mut zone = crowded(&[(30, 10_000)]);
+    let twice =
+      [standing(1, -500, 10_000), standing(90, -1_000, 10_000), standing(90, -900, 10_000)];
+    zone.seen(ZoneId(11), twice.to_vec());
+    assert_eq!(sees(&mut zone), [(1, 30), (90, -1_000)]);
   }
 
   #[test]
