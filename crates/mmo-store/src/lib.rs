@@ -7,10 +7,12 @@
 //!
 //! - The login service: [`Store::create_account`], [`Store::sign_in`], and
 //!   [`Store::create_character`] and [`Store::characters`], each in the shard of the service.
-//! - A layer writer: [`Store::load`], when it takes a layer or a player.
+//! - A layer writer: [`Store::load`], when it takes a layer or a player, and
+//!   [`Store::neighbours`], the zones across the borders of its zone.
 //! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
 //!   Redis, with its scripts.
-//! - The keeper: [`Store::add_zone`], [`Store::claim`], which gives a writer the next
+//! - The operator: [`Store::add_zone`], and [`Store::place_zone`], which puts a zone on the map.
+//! - The keeper: [`Store::claim`], which gives a writer the next
 //!   [`Epoch`](mmo_protocol::Epoch) of its layer, and [`Store::save`], which writes the
 //!   [`Batch`](mmo_protocol::Batch) of a writer.
 
@@ -28,7 +30,7 @@ use sqlx::migrate::Migrator;
 
 pub use characters::{NewCharacter, Saved};
 pub use directory::{Directory, LEASE, Lease, Leased, Placed};
-pub use zones::Written;
+pub use zones::{Neighbours, Square, Written};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 
@@ -161,7 +163,7 @@ mod tests {
   };
   use sqlx::PgPool;
 
-  use super::{Error, NewCharacter, Store};
+  use super::{Error, NewCharacter, Square, Store};
 
   #[sqlx::test(migrations = false)]
   async fn a_process_opens_only_a_database_that_the_keeper_migrated(
@@ -202,11 +204,13 @@ mod tests {
       store.characters(AccountId(1), ShardId(1)).await.err(),
       store.load(&[CharacterId(1)]).await.err(),
       store.add_zone(ZoneId(1), "meadow").await.err(),
+      store.place_zone(ZoneId(1), Square { column: 0, row: 0 }).await.err(),
+      store.neighbours(ZoneId(1)).await.err(),
       store.claim(ShardId(1), layer).await.err(),
       store.save(&batch).await.err(),
     ];
     let closed = "attempted to acquire a connection on a closed pool";
-    let mut expected = vec![Some(closed.to_owned()); 10];
+    let mut expected = vec![Some(closed.to_owned()); 12];
     expected[0] = Some(format!("while executing migrations: {closed}"));
     let unavailable =
       refusals.iter().flatten().all(|refused| refused.refusal() == KeeperRefusal::Unavailable);

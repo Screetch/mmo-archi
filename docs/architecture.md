@@ -297,6 +297,10 @@ client takes the state of the server at the acknowledged tick and applies its la
 ## 6. The zones, the layers and the shards
 
 The map of a world is cut into zones. A zone is a square of 1024 m. It holds no state of its own: its layers hold it.
+Each zone stands on one square of the map, which the table `zones` holds: its column grows toward the east, along x,
+and its row toward the north, along z. Each zone has its own coordinates, from 0 to 1024 m on x and on z. Two zones on
+next squares share a border, and each is the next zone of the other across it. A zone that stands on no square has no
+next zone, and a player stays at its edge.
 
 ### The shard
 
@@ -608,6 +612,15 @@ CREATE TABLE layers (
 );
 ```
 
+A migration puts each zone on a square of the map (section 6). A zone of an older migration stands on no square until
+the operator gives it one, and two zones never stand on one square:
+
+```sql
+ALTER TABLE zones ADD COLUMN map_column integer, ADD COLUMN map_row integer;
+
+ALTER TABLE zones ADD CONSTRAINT zones_square UNIQUE (map_column, map_row);
+```
+
 The id of a shard is the number that the operator gives it in the config of the login service. The first shard is 1,
 so each character that stood before the shards belongs to it. The column `epoch` of `zones` stays until no deployed
 process reads it, as the rule of the migrations below says.
@@ -732,7 +745,8 @@ stack stay as the artifact `bots`.
 bots make their accounts in PostgreSQL, since the login service makes 5 new accounts an hour for one address. Then each
 bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this
 document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for the cap of each shard,
-`MMO_LOCAL_LAYER_CAP` for the cap of a layer, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
+`MMO_LOCAL_LAYER_CAP` for the cap of a layer, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of one
+row of the map, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
 `MMO_BOTS_TOWN` for the bots that start in one square of 128 m. The stack runs the login service and the pool of writers
 of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small, 100 for a
 shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed link for 30 s,

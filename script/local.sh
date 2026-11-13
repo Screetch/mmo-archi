@@ -24,8 +24,11 @@
 # `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT` and `MMO_LOCAL_GATEWAY_PORT` change a port:
 # the layer writers take the ports from `MMO_LOCAL_ZONE_PORT` up, and the login service of the shard n the port of
 # `MMO_LOCAL_LOGIN_PORT` plus 100 (n - 1). `MMO_LOCAL_SHARDS` sets the count of shards, `MMO_LOCAL_SHARD_CAP` the cap of
-# each shard and `MMO_LOCAL_LAYER_CAP` the cap of a layer, which are small, so that a few bots open many layers. The pool
-# of each shard holds one writer for the zone, one for each layer that the cap of the shard fills, and 2 more.
+# each shard and `MMO_LOCAL_LAYER_CAP` the cap of a layer, which are small, so that a few bots open many layers.
+# `MMO_LOCAL_ZONES` sets the count of zones, 1 by default: the zone n stands in the column n - 1 of the first row of the
+# map, so each zone shares a border with the zone before it and the zone after it. The zone 1 is the meadow, where the
+# new characters start. The pool of each shard holds one writer for each zone, one for each layer that the cap of the
+# shard fills, and 2 more.
 # The stores need initdb, postgres, pg_isready, psql, redis-server and redis-cli: `MMO_LOCAL_PG_BIN` names the folder
 # of the programs of PostgreSQL when it is not in the PATH. The TLS material needs openssl.
 set -eu
@@ -43,9 +46,10 @@ gateway_port=${MMO_LOCAL_GATEWAY_PORT:-54436}
 shards=${MMO_LOCAL_SHARDS:-1}
 shard_cap=${MMO_LOCAL_SHARD_CAP:-100}
 layer_cap=${MMO_LOCAL_LAYER_CAP:-20}
-# The pool of the layer writers of each shard, as section 6 of docs/architecture.md says: one for the zone, one for each
-# layer that the cap of the shard fills, and 2 for the recovery.
-pool=$((1 + (shard_cap + layer_cap - 1) / layer_cap + 2))
+zones=${MMO_LOCAL_ZONES:-1}
+# The pool of the layer writers of each shard, as section 6 of docs/architecture.md says: one for each zone, one for
+# each layer that the cap of the shard fills, and 2 for the recovery.
+pool=$((zones + (shard_cap + layer_cap - 1) / layer_cap + 2))
 # debug or release: the numbers of docs/architecture.md come from release builds.
 profile=${MMO_LOCAL_PROFILE:-debug}
 bin=${CARGO_TARGET_DIR:-$root/target}/$profile
@@ -128,12 +132,14 @@ game_made() {
     grep -q 1 || psql -q -h 127.0.0.1 -p "$pg_port" -U postgres -d postgres -c "CREATE DATABASE $game" >/dev/null
 }
 
-# The keeper migrates the database. The zone `meadow` is the zone of the new characters, which the migrations do not
-# make, so the script adds it once the table exists.
-zone_made() {
+# The keeper migrates the database. The migrations make no zone, so the script adds the zones once the table exists,
+# each on its square of the map, and puts a zone of an older run on its square.
+zones_made() {
   alive keeper || die "the keeper stopped"
   psql -q -h 127.0.0.1 -p "$pg_port" -U postgres -d "$game" -c \
-    "INSERT INTO zones (id, name) VALUES (1, 'meadow') ON CONFLICT DO NOTHING" >/dev/null 2>&1
+    "INSERT INTO zones (id, name, map_column, map_row)
+     SELECT n, CASE WHEN n = 1 THEN 'meadow' ELSE 'zone' || n END, n - 1, 0 FROM generate_series(1, $zones) AS n
+     ON CONFLICT (id) DO UPDATE SET map_column = excluded.map_column, map_row = excluded.map_row" >/dev/null 2>&1
 }
 
 # The names of the processes of one kind, `prefix1` up to `prefix<count>`, or those of the pid files of a stack that runs.
@@ -244,7 +250,7 @@ start() {
   game_made
 
   launch_keeper
-  wait_for "the migrations of the keeper" 60 zone_made
+  wait_for "the migrations of the keeper" 60 zones_made
 
   number=0
   for name in $(logins); do
@@ -269,7 +275,7 @@ start() {
   say "the stack runs. A client uses these addresses, all on QUIC over UDP except the two stores:"
   number=1
   while [ "$number" -le "$shards" ]; do
-    echo "  login      localhost:$(login_at "$number")  (shard $number, cap $shard_cap, layers of cap $layer_cap)"
+    echo "  login      localhost:$(login_at "$number")  (shard $number, cap $shard_cap, layers of cap $layer_cap, $zones zones)"
     number=$((number + 1))
   done
   echo "  gateway    localhost:$gateway_port"
@@ -393,6 +399,9 @@ status() {
 
 case $shards in
   '' | *[!0-9]* | 0) die "MMO_LOCAL_SHARDS is a count of 1 or more" ;;
+esac
+case $zones in
+  '' | *[!0-9]* | 0) die "MMO_LOCAL_ZONES is a count of 1 or more" ;;
 esac
 
 case ${1:-} in

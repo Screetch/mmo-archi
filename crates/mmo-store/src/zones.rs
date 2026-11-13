@@ -29,6 +29,41 @@ pub struct Written {
   pub strangers: Vec<CharacterId>,
 }
 
+/// The zone that shares each side of the square of a zone on the map, as `Neighbours` holds them.
+const NEIGHBOURS: &str = "SELECT \
+  (SELECT id FROM zones WHERE map_column = z.map_column - 1 AND map_row = z.map_row), \
+  (SELECT id FROM zones WHERE map_column = z.map_column + 1 AND map_row = z.map_row), \
+  (SELECT id FROM zones WHERE map_column = z.map_column AND map_row = z.map_row - 1), \
+  (SELECT id FROM zones WHERE map_column = z.map_column AND map_row = z.map_row + 1) \
+  FROM zones AS z WHERE z.id = $1";
+
+/// The zone toward the west, the east, the south and the north, as `NEIGHBOURS` gives them.
+type Sides = (Option<i32>, Option<i32>, Option<i32>, Option<i32>);
+
+/// The place of a zone on the map of the world, in squares of 1024 m: its column grows toward the
+/// east, along x, and its row toward the north, along z.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Square {
+  /// The column of the zone.
+  pub column: i32,
+  /// The row of the zone.
+  pub row: i32,
+}
+
+/// The zone across each border of a zone: the zone in the next square of the map on that side, or
+/// `None` when no zone stands there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Neighbours {
+  /// The zone toward x below 0.
+  pub west: Option<ZoneId>,
+  /// The zone toward x past the side of the zone.
+  pub east: Option<ZoneId>,
+  /// The zone toward z below 0.
+  pub south: Option<ZoneId>,
+  /// The zone toward z past the side of the zone.
+  pub north: Option<ZoneId>,
+}
+
 /// The next epoch of a layer, which its first claim makes at 1.
 const CLAIM: &str = "INSERT INTO layers (shard_id, zone_id, number, epoch) VALUES ($1, $2, $3, 1) \
   ON CONFLICT (shard_id, zone_id, number) DO UPDATE SET epoch = layers.epoch + 1 RETURNING epoch";
@@ -42,6 +77,31 @@ impl Store {
       .execute(&self.pool)
       .await?;
     Ok(())
+  }
+
+  /// Puts `zone` on `square` of the map, so it shares a border with the zone of each next square.
+  /// A zone that the map does not hold has no neighbour, and the table refuses a second zone on
+  /// one square.
+  pub async fn place_zone(&self, zone: ZoneId, square: Square) -> Result<(), Error> {
+    let placed = sqlx::query("UPDATE zones SET map_column = $2, map_row = $3 WHERE id = $1")
+      .bind(zone.0)
+      .bind(square.column)
+      .bind(square.row)
+      .execute(&self.pool)
+      .await?;
+    if placed.rows_affected() == 0 {
+      return Err(Error::NoZone { zone });
+    }
+    Ok(())
+  }
+
+  /// The zone across each border of `zone` on the map.
+  pub async fn neighbours(&self, zone: ZoneId) -> Result<Neighbours, Error> {
+    let found: Option<Sides> =
+      sqlx::query_as(NEIGHBOURS).bind(zone.0).fetch_optional(&self.pool).await?;
+    let (west, east, south, north) = found.ok_or(Error::NoZone { zone })?;
+    let id = |found: Option<i32>| found.map(ZoneId);
+    Ok(Neighbours { west: id(west), east: id(east), south: id(south), north: id(north) })
   }
 
   /// Gives the next epoch of `layer` of `shard` to the writer that claims it, so the keeper
@@ -105,7 +165,7 @@ mod tests {
   };
   use sqlx::PgPool;
 
-  use super::Written;
+  use super::{Neighbours, Square, Written};
   use crate::{Error, NewCharacter, Saved, Store};
 
   const START: State =
@@ -151,6 +211,50 @@ mod tests {
     assert_eq!(epochs, [Epoch(1), Epoch(2), Epoch(1), Epoch(1)]);
     let refused = store.claim(SHARD, on(9, 1)).await.err().map(|error| error.to_string());
     assert_eq!(refused.as_deref(), Some("no zone has the id 9"));
+    Ok(())
+  }
+
+  /// The map holds 4 zones in a square of 2 by 2, and a cave that it does not hold.
+  #[sqlx::test(migrations = false)]
+  async fn each_zone_shares_a_border_with_the_zone_of_each_next_square_of_the_map(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let store = Store::migrate(pool).await?;
+    let squares = [(1, "meadow", 0, 0), (2, "forest", 1, 0), (3, "hills", 0, 1), (4, "lake", 1, 1)];
+    for (id, name, column, row) in squares {
+      store.add_zone(ZoneId(id), name).await?;
+      store.place_zone(ZoneId(id), Square { column, row }).await?;
+    }
+    store.add_zone(ZoneId(5), "cave").await?;
+    let mut found = Vec::new();
+    for id in 1..=5 {
+      found.push(store.neighbours(ZoneId(id)).await?);
+    }
+    let zone = |id| Some(ZoneId(id));
+    assert_eq!(
+      found,
+      [
+        Neighbours { east: zone(2), north: zone(3), ..Neighbours::default() },
+        Neighbours { west: zone(1), north: zone(4), ..Neighbours::default() },
+        Neighbours { east: zone(4), south: zone(1), ..Neighbours::default() },
+        Neighbours { west: zone(3), south: zone(2), ..Neighbours::default() },
+        Neighbours::default(),
+      ]
+    );
+    let taken = store.place_zone(ZoneId(5), Square { column: 1, row: 1 }).await;
+    let taken = taken.expect_err("one square holds one zone");
+    assert!(
+      matches!(taken, Error::Database(sqlx::Error::Database(ref found)) if found.is_unique_violation()),
+      "{taken:?}"
+    );
+    let refused = [
+      store.place_zone(ZoneId(9), Square { column: 5, row: 5 }).await.err(),
+      store.neighbours(ZoneId(9)).await.err(),
+    ];
+    assert_eq!(
+      refused.map(|error| error.map(|error| error.to_string())),
+      [Some("no zone has the id 9".to_owned()), Some("no zone has the id 9".to_owned())]
+    );
     Ok(())
   }
 
