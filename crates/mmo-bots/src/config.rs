@@ -69,25 +69,25 @@ impl Config {
     if !(1..=6).contains(&run.len()) || !run.bytes().all(|byte| byte.is_ascii_lowercase()) {
       return Err(Error::Run(run));
     }
-    let bots = number(var, "MMO_BOTS_COUNT", None)?;
-    if bots > MAX_BOTS {
-      return Err(Error::Count(bots));
-    }
-    Ok(Self {
+    let config = Self {
       authority: text(var, "MMO_BOTS_AUTHORITY")?.into(),
       login: text(var, "MMO_BOTS_LOGIN")?,
       gateway: text(var, "MMO_BOTS_GATEWAY")?,
       database: text(var, "DATABASE_URL")?,
       redis: text(var, "REDIS_URL")?,
       zone: ZoneId(number(var, "MMO_BOTS_ZONE", None)?),
-      bots,
+      bots: number(var, "MMO_BOTS_COUNT", None)?,
       town: number(var, "MMO_BOTS_TOWN", Some(0))?,
       ramp: number(var, "MMO_BOTS_RAMP", Some(50))?,
       join: seconds("MMO_BOTS_JOIN_SECONDS", 60)?,
       play: seconds("MMO_BOTS_PLAY_SECONDS", 30)?,
       run,
       seed: number(var, "MMO_BOTS_SEED", Some(1))?,
-    })
+    };
+    if config.bots > MAX_BOTS {
+      return Err(Error::Count(config.bots));
+    }
+    Ok(config)
   }
 }
 
