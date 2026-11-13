@@ -41,6 +41,8 @@ pub(crate) enum Refusal {
   Elsewhere { zone: ZoneId },
   #[error("the layer holds {cap} players, its cap")]
   Full { cap: usize },
+  #[error("the layer drains, and takes no new player")]
+  Draining,
 }
 
 /// A player that left the zone, and the save that its last state needs. The writer keeps the
@@ -52,8 +54,9 @@ pub(crate) struct Leaver {
   pub(crate) save: Option<Save>,
 }
 
-/// A player that walked past a border of the zone, for its writer to hand over to the next zone.
-/// The zone holds the player until [`Zone::depart`]: it takes no input of it, and saves it no more.
+/// A player that walked past a border of the zone, for its writer to hand over to the next zone, or
+/// that moves out of a layer that drains, to another layer of its zone. The zone holds the player
+/// until [`Zone::depart`] or [`Zone::stay`]: it takes no input of it, and saves it no more.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Crossing {
   /// The zone that the player enters.
@@ -75,6 +78,8 @@ pub(crate) struct Zone {
   edge: BTreeMap<i32, (Tick, Vec<Entity>)>,
   /// The most players of the layer, which the writer read from its shard when it claimed it.
   cap: usize,
+  /// True once the directory put the layer in drain.
+  draining: bool,
   terrain: Terrain,
   tick: Tick,
   players: BTreeMap<i64, Player>,
@@ -114,6 +119,7 @@ impl Zone {
       neighbours: Neighbours::default(),
       edge: BTreeMap::new(),
       cap,
+      draining: false,
       terrain: ground(),
       tick: Tick(0),
       players: BTreeMap::new(),
@@ -178,6 +184,18 @@ impl Zone {
     self.players.len()
   }
 
+  /// True when the layer does not drain and holds at most a quarter of its cap, the count under
+  /// which its writer asks the directory to drain it.
+  pub(crate) fn low(&self) -> bool {
+    !self.draining && self.players.len() * 4 <= self.cap
+  }
+
+  /// Puts the layer in drain, as the directory did: it takes no new player, and gives each of its
+  /// players to [`Zone::moves`].
+  pub(crate) fn drain(&mut self) {
+    self.draining = true;
+  }
+
   /// The account and the character of each player that has a link.
   pub(crate) fn present(&self) -> Vec<(AccountId, CharacterId)> {
     let linked = |player: &&Player| matches!(player.attachment, Attachment::Linked { .. });
@@ -223,16 +241,16 @@ impl Zone {
       return Err(Refusal::Elsewhere { zone: saved.zone });
     }
     let attachment = Attachment::Linked { gateway, link, ack: None, sent: Sent::default() };
-    let full = self.players.len() >= self.cap;
-    match self.players.get_mut(&saved.character.0) {
-      Some(player) => {
+    let refusal = self.refusal();
+    match (self.players.get_mut(&saved.character.0), refusal) {
+      (Some(player), _) => {
         if let Attachment::Linked { link: old, .. } = player.attachment {
           self.links.remove(&old.0);
         }
         player.attachment = attachment;
       }
-      None if full => return Err(Refusal::Full { cap: self.cap }),
-      None => {
+      (None, Some(why)) => return Err(why),
+      (None, None) => {
         self.players.insert(saved.character.0, Player::new(account, saved, attachment));
       }
     }
@@ -362,16 +380,27 @@ impl Zone {
       } else {
         continue;
       };
-      let linked = matches!(player.attachment, Attachment::Linked { .. });
-      let Some(zone) = to.filter(|_| linked && !player.crossing) else { continue };
-      player.crossing = true;
-      player.velocity = Velocity { x: 0, y: 0, z: 0 };
-      let mut state = player.entity(CharacterId(*id));
-      state.position.x += shift[0];
-      state.position.z += shift[1];
-      found.push(Crossing { zone, account: player.account, state, version: player.version });
+      let Some(zone) = to.filter(|_| player.walks()) else { continue };
+      found.push(player.cross(zone, CharacterId(*id), shift));
     }
     found
+  }
+
+  /// Stops each player of a link that walks in a layer that drains, for its writer to move it to
+  /// another layer of the zone. A move cuts no act of a player, since the game has no order, no
+  /// hit and no trade yet, so each tick is a safe point.
+  pub(crate) fn moves(&mut self) -> Vec<Crossing> {
+    let (zone, draining) = (self.layer.zone, self.draining);
+    let walking = self.players.iter_mut().filter(|(_, player)| draining && player.walks());
+    walking.map(|(id, player)| player.cross(zone, CharacterId(*id), [0, 0])).collect()
+  }
+
+  /// The player of `character` stays in the layer, since no other layer took it: it walks again,
+  /// and its writer moves it at a later tick.
+  pub(crate) fn stay(&mut self, character: CharacterId) {
+    if let Some(player) = self.players.get_mut(&character.0) {
+      player.crossing = false;
+    }
   }
 
   /// Drops the player of `character`, which the writer of the next zone holds now, and gives the
@@ -406,14 +435,23 @@ impl Zone {
     if let Some(player) = self.players.get_mut(&id) {
       return Ok(player.unsaved(id));
     }
-    if self.players.len() >= self.cap {
-      return Err(Refusal::Full { cap: self.cap });
+    if let Some(why) = self.refusal() {
+      return Err(why);
     }
     let mut player =
       Player::arrived(account, entity, version, Attachment::Away { since: self.tick });
     let save = player.unsaved(id);
     self.players.insert(id, player);
     Ok(save)
+  }
+
+  /// Why the layer takes no new player now, or `None` when it takes one.
+  fn refusal(&self) -> Option<Refusal> {
+    if self.draining {
+      Some(Refusal::Draining)
+    } else {
+      (self.players.len() >= self.cap).then_some(Refusal::Full { cap: self.cap })
+    }
   }
 
   /// Takes no more messages of `link`, when it is the link of a player on `gateway`, and gives
@@ -462,6 +500,22 @@ impl Player {
       attachment,
       crossing: false,
     }
+  }
+
+  /// True when the player has a link, and leaves the layer by no border and no move.
+  fn walks(&self) -> bool {
+    matches!(self.attachment, Attachment::Linked { .. }) && !self.crossing
+  }
+
+  /// Stops the player for its hand-over to `zone`, and gives its state there, `shift` centimetres
+  /// along x and z from its place here.
+  fn cross(&mut self, zone: ZoneId, id: CharacterId, shift: [i32; 2]) -> Crossing {
+    self.crossing = true;
+    self.velocity = Velocity { x: 0, y: 0, z: 0 };
+    let mut state = self.entity(id);
+    state.position.x += shift[0];
+    state.position.z += shift[1];
+    Crossing { zone, account: self.account, state, version: self.version }
   }
 
   /// Moves the body for the tick `now`, with the input of that tick, or with none when none came.
@@ -957,6 +1011,40 @@ mod tests {
       enters: (10_000, 0),
     },
   ];
+
+  #[test]
+  fn a_layer_that_drains_takes_no_new_player_and_stops_each_player_of_a_link_for_a_move() {
+    let mut zone = Zone::new(LAYER, 8);
+    assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
+    assert_eq!(zone.join(GATE, Link(2), AccountId(4), &saved(8, 10_100)), Ok(()));
+    assert!(zone.low(), "2 players are a quarter of a cap of 8");
+    assert_eq!(zone.join(GATE, Link(3), AccountId(5), &saved(9, 10_200)), Ok(()));
+    assert!(!zone.low());
+    zone.leave(GATE, Link(3));
+    zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
+    zone.tick();
+    assert_eq!(zone.moves(), [], "a layer that does not drain moves no player");
+    zone.drain();
+    assert!(!zone.low(), "a layer that drains asks no more");
+    let moving = |account, state| Crossing { zone: MEADOW, account, state, version: 0 };
+    let brom = moving(ACCOUNT, entity(7, 10_030, 0, NORTH));
+    let cael = moving(AccountId(4), entity(8, 10_100, 0, Angle(0)));
+    assert_eq!(zone.moves(), [brom, cael]);
+    assert_eq!(zone.moves(), []);
+    zone.intents(GATE, Link(1), &intents(None, [2, 3, 4], EAST));
+    let [(_, held), _] = zone.tick().try_into().expect("two snapshots");
+    assert!(held.message.entered.contains(&brom.state), "a player that moves stands");
+    assert_eq!(zone.dirty(), []);
+    zone.stay(CharacterId(8));
+    zone.stay(CharacterId(99));
+    assert_eq!(zone.moves(), [cael]);
+    assert_eq!(zone.join(GATE, Link(4), AccountId(5), &saved(9, 0)), Ok(()), "9 is in the layer");
+    let refused = zone.join(GATE, Link(5), AccountId(6), &saved(10, 0));
+    assert_eq!(refused, Err(Refusal::Draining));
+    let arrived = zone.receive(AccountId(6), &entity(10, 0, 0, NORTH), 0);
+    assert_eq!(arrived, Err(Refusal::Draining));
+    assert_eq!(Refusal::Draining.to_string(), "the layer drains, and takes no new player");
+  }
 
   #[test]
   fn a_player_that_walks_past_each_border_enters_the_opposite_edge_of_the_zone_across_it() {

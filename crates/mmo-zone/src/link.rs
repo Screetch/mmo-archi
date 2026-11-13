@@ -40,6 +40,10 @@ const SAVE_EVERY: u32 = 10 * TICKS_PER_SECOND;
 /// player of a closed link.
 const EMPTY_FOR: u32 = 30 * TICKS_PER_SECOND;
 
+/// The ticks after which a layer that held at most a quarter of its cap asks the directory to drain
+/// it: 60 s. It asks again each second until it drains or holds more players.
+const LOW_FOR: u32 = 60 * TICKS_PER_SECOND;
+
 /// The build in the hello of the layer writer: the version of the workspace, as 1002003 for 1.2.3.
 pub(crate) const BUILD: u32 = {
   let parts = [
@@ -113,6 +117,11 @@ enum Event {
     character: CharacterId,
     to: Layer,
   },
+  /// No other layer of its zone took the player of `character`, which moves out of this layer
+  /// that drains: it walks again until the next try.
+  Stayed {
+    character: CharacterId,
+  },
   /// The next zone does not take the player of `character` yet, which waits at the border. Each
   /// retry sends it again.
   Held {
@@ -135,6 +144,8 @@ enum Event {
   Closed(Gateway),
   /// The answer of the close of the layer: whether it closed.
   Released(Result<bool, claim::Error>),
+  /// The answer of the drain of the layer: whether it drains.
+  Drained(Result<bool, claim::Error>),
 }
 
 /// What a layer writer holds once it claimed its layer: the state of the layer, the store that it
@@ -205,6 +216,8 @@ struct Writer {
   /// The task that tells the layer across each border, by its zone, which entities of this layer
   /// stand near that border.
   edges: BTreeMap<i32, Edge>,
+  /// The ticks for which the layer held at most a quarter of its cap, and did not drain.
+  low: u32,
 }
 
 /// The task that tells the layer across a border what stands near it.
@@ -222,7 +235,7 @@ impl Writer {
     tokio::spawn(deliver(keeper, sent, events.clone()));
     let (gateways, owed, pending) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
     let timing = BTreeMap::new();
-    let (ticks, empty) = (0, 0);
+    let (ticks, empty, low) = (0, 0, 0);
     let writer = Self {
       zone,
       store,
@@ -237,6 +250,7 @@ impl Writer {
       owed,
       empty,
       edges: BTreeMap::new(),
+      low,
     };
     // The first lease of the epoch of the writer opens the layer.
     writer.write(Entry::Layer { players: 0, taken: Vec::new() });
@@ -254,6 +268,13 @@ impl Writer {
           self.tell(gateway, link, ToClient::Moved { zone: to.zone, layer: to.number });
         }
       }
+      Event::Stayed { character } => self.zone.stay(character),
+      Event::Drained(Ok(drains)) => {
+        if drains {
+          self.zone.drain();
+        }
+      }
+      Event::Drained(Err(error)) => eprintln!("the layer writer cannot drain its layer: {error}"),
       Event::Held { character, zone } => {
         if let Some((gateway, link)) = self.zone.linked(character) {
           self.tell(gateway, link, ToClient::Full { zone });
@@ -285,13 +306,41 @@ impl Writer {
     None
   }
 
-  /// Closes the layer in a task, so the tick goes on.
-  fn release(&self) {
-    let claim = self.claim.clone();
+  /// Hears `work` once it ends, in a task, so the tick goes on.
+  fn later(&self, work: impl Future<Output = Event> + Send + 'static) {
     let events = self.events.clone();
     tokio::spawn(async move {
       // The send fails only when the layer writer stopped, and then no one needs the result.
-      drop(events.send(Event::Released(claim.close().await)));
+      drop(events.send(work.await));
+    });
+  }
+
+  /// Closes the layer, when it still holds no player and no place.
+  fn release(&self) {
+    let claim = self.claim.clone();
+    self.later(async move { Event::Released(claim.close().await) });
+  }
+
+  /// Asks the directory to drain the layer, when the other layers of its zone have room.
+  fn ask_drain(&self) {
+    let claim = self.claim.clone();
+    self.later(async move { Event::Drained(claim.drain().await) });
+  }
+
+  /// Moves the player of `moving` out of this layer that drains, to the layer of its zone that the
+  /// placement gives, with the steps of the hand-off. When no layer takes it, it stays.
+  fn move_out(&self, moving: Crossing) {
+    let (claim, dial) = (self.claim.clone(), self.dial.clone());
+    self.later(async move {
+      let character = moving.state.id;
+      match offer(&claim, &dial, &moving).await {
+        Ok(Some(to)) => Event::Crossed { character, to },
+        Ok(None) => Event::Stayed { character },
+        Err(error) => {
+          eprintln!("the layer writer cannot move the character {}: {error}", character.0);
+          Event::Stayed { character }
+        }
+      }
     });
   }
 
@@ -390,14 +439,12 @@ impl Writer {
     self.send_to(gateway, framed(&encode(message)));
   }
 
-  /// Loads the last save of `character` in a task, so the tick goes on.
+  /// Loads the last save of `character`.
   fn load(&self, gateway: Gateway, link: Link, account: AccountId, character: CharacterId) {
     let store = self.store.clone();
-    let events = self.events.clone();
-    tokio::spawn(async move {
+    self.later(async move {
       let found = store.load(&[character]).await;
-      // The send fails only when the layer writer stopped, and then no player waits for the load.
-      drop(events.send(Event::Loaded { gateway, link, account, found }));
+      Event::Loaded { gateway, link, account, found }
     });
   }
 
@@ -435,14 +482,10 @@ impl Writer {
     self.zone.close(gateway);
   }
 
-  /// Writes `entry` in Redis in a task, so the tick goes on.
+  /// Writes `entry` in Redis.
   fn write(&self, entry: Entry) {
     let claim = self.claim.clone();
-    let events = self.events.clone();
-    tokio::spawn(async move {
-      // The send fails only when the layer writer stopped, and then no one needs the result.
-      drop(events.send(Event::Entries(claim.write(entry).await)));
-    });
+    self.later(async move { Event::Entries(claim.write(entry).await) });
   }
 
   /// Sends `saves` to the keeper in batches of `SAVES` at most, so each batch fits in one frame.
@@ -514,10 +557,13 @@ impl Writer {
 
   /// Runs one tick, and sends each snapshot to the gateway of its player. A gateway that a
   /// snapshot cannot reach closes, so its players leave. Each second it renews the entry of the
-  /// zone and adds the times of its ticks to [`keys::ticks`], and each 10 s it saves.
+  /// zone and adds the times of its ticks to [`keys::ticks`], asks for the drain of a layer that
+  /// held at most a quarter of its cap for 60 s, and moves the players of a layer that drains.
+  /// Each 10 s it saves.
   fn tick(&mut self) {
     let started = Instant::now();
     let snapshots = self.zone.tick();
+    self.low = if self.zone.low() { self.low.saturating_add(1) } else { 0 };
     for crossing in self.zone.crossings() {
       self.hand_over(crossing);
     }
@@ -544,6 +590,12 @@ impl Writer {
       let timing = mem::take(&mut self.timing);
       self.write(Entry::Ticks(timing));
       self.write(Entry::Layer { players: self.zone.count(), taken: Vec::new() });
+      if self.low >= LOW_FOR {
+        self.ask_drain();
+      }
+      for moving in self.zone.moves() {
+        self.move_out(moving);
+      }
     }
     if self.ticks == 0 {
       self.keep();
@@ -721,7 +773,8 @@ mod tests {
   use tokio::time;
 
   use super::{
-    Claimed, EMPTY_FOR, Entry, Event, Gateway, Opened, SAVE_EVERY, Writer, claim, keeper, serve,
+    ANNOUNCE_EVERY, Claimed, EMPTY_FOR, Entry, Event, Gateway, LOW_FOR, Opened, SAVE_EVERY, Writer,
+    claim, keeper, serve,
   };
   use crate::claim::Taken;
   use crate::config::Config;
@@ -1281,8 +1334,13 @@ mod tests {
 
   /// Waits until the writer that holds `key` leases its layer with the epoch 1 of the keeper.
   async fn served(redis: &Redis, key: &str) {
+    holds(redis, key, "epoch", "1").await;
+  }
+
+  /// Waits until the hash `key` of `redis` holds `value` in `field`.
+  async fn holds(redis: &Redis, key: &str, field: &str, value: &str) {
     within(async {
-      while hash(redis, key).await.get("epoch").map(String::as_str) != Some("1") {
+      while hash(redis, key).await.get(field).map(String::as_str) != Some(value) {
         time::sleep(Duration::from_millis(20)).await;
       }
     })
@@ -1496,6 +1554,121 @@ mod tests {
     for writer in writers {
       writer.abort();
     }
+  }
+
+  /// The second layer of the meadow.
+  const SECOND: Layer = Layer { zone: MEADOW, number: 2 };
+
+  /// The cap of a layer in the tests of the drain: a layer of 1 player holds a quarter of it.
+  const SMALL: usize = 4;
+
+  /// Gives the layers of the shard the cap [`SMALL`], in the directory and in `claimed`, which
+  /// holds `layer`.
+  async fn small(meadow: &Meadow, claimed: &mut Claimed, layer: Layer) {
+    let mut admin = meadow.admin().await;
+    let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, SMALL).await.expect("a cap");
+    let across = meadow.store.neighbours(layer.zone).await.expect("the neighbours");
+    claimed.zone = Zone::new(layer, SMALL).beside(across);
+  }
+
+  /// A writer of the second layer of the meadow with the cap [`SMALL`], with Brom on a gateway.
+  async fn sparse(meadow: &Meadow) -> (Border, Endpoint) {
+    let (endpoint, mut second) = meadow.claimed_for(SECOND, dialable).await;
+    small(meadow, &mut second, SECOND).await;
+    let (events, heard) = unbounded_channel();
+    let mut writer = Writer::new(second, events);
+    let (peer, gateway, frames) = meadow.open(&mut writer, GATE).await;
+    meadow.join(&mut writer).await;
+    (Border { writer, heard, frames, _gateway: (peer, gateway) }, endpoint)
+  }
+
+  /// Runs `ticks` ticks of `writer`, in which no player sends an input.
+  fn idle(writer: &mut Writer, ticks: u32) {
+    for _ in 0..ticks {
+      writer.tick();
+    }
+  }
+
+  fn drained(_: &Writer, event: &Event) -> bool {
+    matches!(event, Event::Drained(_))
+  }
+
+  fn stayed(_: &Writer, event: &Event) -> bool {
+    matches!(event, Event::Stayed { .. })
+  }
+
+  async fn draining(meadow: &Meadow) -> Vec<String> {
+    meadow.admin().await.smembers(keys::draining(SHARD)).await.expect("a set")
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_layer_that_drains_moves_its_player_to_another_layer_of_its_zone_and_closes(
+    pool: PgPool,
+  ) {
+    let meadow = Meadow::new(pool).await;
+    let (endpoint, mut first) = meadow.claimed_for(LAYER, dialable).await;
+    small(&meadow, &mut first, LAYER).await;
+    let target = tokio::spawn(serve(endpoint, first));
+    served(&meadow.redis, "writer:1:1:1").await;
+    let (mut source, _endpoint) = sparse(&meadow).await;
+    let places = [(u64::MAX, 8), (u64::MAX, 9)];
+    let () = meadow.admin().await.zadd_multiple("placed:1:1:1", &places).await.expect("places");
+    idle(&mut source.writer, LOW_FOR);
+    assert_eq!(hear(&mut source.writer, &mut source.heard, drained).await, None);
+    assert_eq!(draining(&meadow).await, ["1:2"]);
+    assert!(!source.writer.zone.low());
+    idle(&mut source.writer, ANNOUNCE_EVERY);
+    let crossed = |_: &Writer, event: &Event| matches!(event, Event::Crossed { .. });
+    assert_eq!(hear(&mut source.writer, &mut source.heard, crossed).await, None);
+    let told = decode::<Relayed<ToClient>>(&payload(&mut source.frames).await);
+    let to = ToClient::Moved { zone: MEADOW, layer: 1 };
+    assert_eq!(told.expect("a message"), Relayed { link: Link(1), message: to });
+    assert_eq!(source.writer.zone.count(), 0);
+    holds(&meadow.redis, "layers:1", "1:1", "1").await;
+    let key = format!("presence:{}", meadow.account.0);
+    holds(&meadow.redis, &key, "layer", "1").await;
+    let kept = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
+    assert_eq!((kept.zone, kept.version, kept.state), (MEADOW, 1, START));
+    let held: Vec<String> =
+      meadow.admin().await.zrange("placed:1:1:1", 0, -1).await.expect("places");
+    assert_eq!(held, ["8", "9"], "layer 1 holds Brom and 2 places, 3 of its cap of 4");
+
+    idle(&mut source.writer, EMPTY_FOR);
+    let released = |_: &Writer, event: &Event| matches!(event, Event::Released(_));
+    let fault = hear(&mut source.writer, &mut source.heard, released).await;
+    assert_eq!(fault.as_deref(), Some("the layer closed, and its writer is idle again"));
+    let layers = hash(&meadow.redis, "layers:1").await;
+    assert_eq!(layers, BTreeMap::from([("1:1".to_owned(), "1".to_owned())]));
+    assert_eq!(draining(&meadow).await, Vec::<String>::new());
+    target.abort();
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_layer_drains_once_another_layer_has_room_and_a_player_that_no_layer_takes_stays(
+    pool: PgPool,
+  ) {
+    let meadow = Meadow::new(pool).await;
+    let (mut source, _endpoint) = sparse(&meadow).await;
+    idle(&mut source.writer, LOW_FOR);
+    assert_eq!(hear(&mut source.writer, &mut source.heard, drained).await, None);
+    assert!(source.writer.zone.low(), "no other layer has room for Brom");
+    let mut admin = meadow.admin().await;
+    let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), 0).await.expect("a layer");
+    let lease = [(keys::ADDRESS, "[::1]:4433"), (keys::EPOCH, "1")];
+    let () = admin.hset_multiple(keys::writer(SHARD, LAYER), &lease).await.expect("a lease");
+    idle(&mut source.writer, ANNOUNCE_EVERY);
+    assert_eq!(hear(&mut source.writer, &mut source.heard, drained).await, None);
+    assert_eq!(draining(&meadow).await, ["1:2"]);
+    idle(&mut source.writer, ANNOUNCE_EVERY);
+    assert_eq!(hear(&mut source.writer, &mut source.heard, stayed).await, None);
+    assert_eq!(source.writer.zone.count(), 1, "no address of the lease of layer 1 answers");
+    let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), SMALL).await.expect("a count");
+    idle(&mut source.writer, ANNOUNCE_EVERY);
+    assert_eq!(hear(&mut source.writer, &mut source.heard, stayed).await, None);
+    assert_eq!(source.writer.zone.count(), 1, "layer 1 is full");
+    assert_eq!(hash(&meadow.redis, "layers:1").await["1:3"], "0", "the placement opened a layer");
+    let refused = Event::Drained(Err(claim::Error::Closed(SECOND)));
+    assert!(source.writer.hear(refused).is_none());
   }
 
   #[sqlx::test(migrations = false)]

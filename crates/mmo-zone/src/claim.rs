@@ -113,9 +113,16 @@ impl Claim {
     Ok((Directory { shard }).close(&mut self.redis.clone(), layer, epoch).await?)
   }
 
+  /// Puts the layer in drain when the other open layers of its zone have room for its players, and
+  /// gives whether it drains.
+  pub(crate) async fn drain(&self) -> Result<bool, Error> {
+    let Held { shard, layer, .. } = self.held;
+    Ok((Directory { shard }).drain(&mut self.redis.clone(), layer).await?)
+  }
+
   /// The layer of `zone` that the player of `account` enters when it crosses a border out of this
-  /// layer, as the placement of section 6 gives it, and who serves that layer. It gives `None`
-  /// when the player waits.
+  /// layer, or moves out of it when it drains, as the placement of section 6 gives it, and who
+  /// serves that layer. It gives `None` when the player waits.
   pub(crate) async fn crossing(
     &self,
     account: AccountId,
@@ -415,6 +422,8 @@ mod tests {
     let refused = claim.write(Entry::Layer { players: 0, taken: Vec::new() }).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
     let refused = claim.close().await.err();
+    assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
+    let refused = claim.drain().await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
     let refused = claim.place(AccountId(5), ZoneId(2)).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");

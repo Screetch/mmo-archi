@@ -353,7 +353,7 @@ step, so two callers never take one decision twice. Each script but `lease` send
 | `place` | the login service and the layer writer | gives the layer that a player enters in a zone, or answers to wait and opens a layer |
 | `claim` | an idle layer writer, each second | gives the writer the layer of its shard with no writer that has the lowest zone, then the lowest number, or nothing, and writes the lease of that layer with the epoch 0, so no other writer takes it |
 | `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, writes its count, and ends the place of each player that it took, unless the lease holds a newer epoch |
-| `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players |
+| `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players, after the players of the layers of the zone that drain already |
 | `close` | the writer of a layer | removes the layer when it holds no player and its lease holds the epoch of the writer |
 
 ### The placement
@@ -388,13 +388,18 @@ the players that `place` sends to it.
 ### The drain and the close
 
 A layer drains when its players fit in the other layers of its zone, so that a zone runs no more layers than its
-players need. The writer of a layer that held at most a quarter of its cap for 60 s runs `drain`. `drain` adds the
-layer to `draining:{s}` when the other open layers of the zone have room for all its players together, and else does
-nothing. A draining layer takes no new player. Its writer moves each player out to the layer that `place` gives, with
-the move below.
+players need. The writer of a layer that held at most a quarter of its cap for 60 s runs `drain`, and runs it again
+each second until the layer drains or holds more players. `drain` adds the layer to `draining:{s}` when the other
+open layers of the zone have room for all its players together, after the players of the layers of the zone that drain
+already, and else does nothing. The count of a layer holds its places, as for `place`, so two layers that drain at the
+same time never send more players to the open layers than their room. A draining layer takes no new player: its
+writer refuses the attach of a player that it does not hold, and a hand-off. Each second, its writer moves each player
+of a link out to the layer that `place` gives, with the move below. A player whose link closed leaves the layer after
+30 s, as section 4 says.
 
 The writer moves a player only at a safe point: a tick at which the player sent no order and took no hit for the last
-5 s, and holds no open trade, so a move never cuts an act.
+5 s, and holds no open trade, so a move never cuts an act. The game has no order, no hit and no trade yet, so each
+tick is a safe point.
 
 The writer of a layer that held no player for 30 s, the time that it keeps the player of a closed link, runs `close`.
 `close` removes the layer from `layers:{s}` and from `draining:{s}`, and deletes its lease, when its count is still 0
@@ -404,7 +409,9 @@ next layer of the zone.
 ### The move between two layers
 
 A move takes a player from a draining layer to another layer of its zone, at the same position, with the steps 2 to 4
-of the hand-off below. The client gets `Moved { zone, layer }` with its own zone and the new layer.
+of the hand-off below. The writer stops the player while the move runs, as at a border, and runs `place` with the
+layer that the player leaves. When `place` answers wait, or the target answers `Full`, the player walks on, and the
+writer tries again a second later. The client gets `Moved { zone, layer }` with its own zone and the new layer.
 
 ### The hand-off between two zones
 
@@ -796,9 +803,9 @@ the gateway allows 5 s. For the stop of the keeper, which `fault` holds for 60 s
 after the keeper came back: the version of each character that played must have grown, so no save is lost. The stage
 runs one zone, since the recovery of a layer does not need a second one.
 
-Stage 5 runs nowhere. It needs the drain and the move of section 6, and nothing calls the drain on main yet. Its close
-half, a layer that holds no player for 30 s closes and its writer is idle again, is the test of `mmo-zone` that proves
-it, and a run of bots would add nothing to that proof. Stage 5 waits for the drain.
+Stage 5 runs nowhere yet, since no bot logs out during a run. The tests of `mmo-zone` prove the drain, the move and
+the close with a cap of 4: a layer of one player drains after 60 s, its writer moves the player to the other layer of
+the zone, which holds 3 players of its cap then, and the layer closes 30 s later.
 
 ### The first local results
 
