@@ -104,6 +104,7 @@ impl Config {
       world: World {
         id: parsed("MMO_WORLD", &text("MMO_WORLD")?)?,
         cap: parsed("MMO_WORLD_CAP", &text("MMO_WORLD_CAP")?)?,
+        layer_cap: layer_cap(&text("MMO_LAYER_CAP")?)?,
       },
       start: Start {
         zone: ZoneId(parsed("MMO_START_ZONE", &text("MMO_START_ZONE")?)?),
@@ -123,6 +124,16 @@ impl Config {
     let endpoint = Endpoint::server(tls, self.address)?;
     Ok((endpoint, Login::new(store, redis, self.world, self.start)))
   }
+}
+
+/// The cap of a layer that `text` gives, which a party always fits in.
+fn layer_cap(text: &str) -> Result<u32, Fault> {
+  let cap = parsed("MMO_LAYER_CAP", text)?;
+  if cap < mmo_store::PARTY {
+    let why = format!("a layer holds a party of {} players", mmo_store::PARTY);
+    return Err(Fault::Invalid { name: "MMO_LAYER_CAP", why });
+  }
+  Ok(cap)
 }
 
 /// The position that `text` gives as `x,y,z` in centimetres.
@@ -146,6 +157,7 @@ fn parsed<T: FromStr<Err: Display>>(name: &'static str, text: &str) -> Result<T,
 ///   certificate of TLS and of its key.
 /// - `DATABASE_URL` and `REDIS_URL`: the stores of the game. The keeper migrates the database.
 /// - `MMO_WORLD` and `MMO_WORLD_CAP`: the id of the world and the most accounts that it admits.
+/// - `MMO_LAYER_CAP`: the most players of each layer of the world, 5 at least, so a party fits.
 /// - `MMO_START_ZONE` and `MMO_START_POSITION`: the zone, and the point of the zone as `x,y,z` in
 ///   centimetres, where each new character starts.
 ///
@@ -402,6 +414,7 @@ mod tests {
     assert_eq!((position, length), (0, 1));
     let characters = vec![Character { id: brom, name: "Brom".to_owned() }];
     assert_eq!(peer.answer().await, FromLogin::Characters(characters));
+    game.layer(ZoneId(7)).await;
     let session = peer.ask(&ToLogin::Select { character: brom }).await;
     assert!(matches!(session, FromLogin::Session { .. }), "a session, and not {session:?}");
     peer.send.finish().expect("the stream ends");
@@ -525,6 +538,7 @@ mod tests {
       ("REDIS_URL", "redis://127.0.0.1:1".to_owned()),
       ("MMO_WORLD", "1".to_owned()),
       ("MMO_WORLD_CAP", "5000".to_owned()),
+      ("MMO_LAYER_CAP", "500".to_owned()),
       ("MMO_START_ZONE", "7".to_owned()),
       ("MMO_START_POSITION", "1200,-300,50".to_owned()),
     ]);
@@ -533,6 +547,18 @@ mod tests {
     }
     held
   }
+
+  /// A value of a variable that the configuration refuses.
+  const WRONGS: [(&str, &str); 8] = [
+    ("MMO_LOGIN_ADDRESS", "-1"),
+    ("MMO_WORLD", "-1"),
+    ("MMO_WORLD_CAP", "-1"),
+    ("MMO_LAYER_CAP", "4"),
+    ("MMO_LAYER_CAP", "-1"),
+    ("MMO_START_ZONE", "z"),
+    ("MMO_START_POSITION", "1,2"),
+    ("MMO_START_POSITION", "1,2,z"),
+  ];
 
   #[test]
   fn the_configuration_names_each_variable_that_it_lacks_or_refuses() {
@@ -547,7 +573,7 @@ mod tests {
         key: tls.folder.join("key.pem"),
         database: full["DATABASE_URL"].clone(),
         redis: "redis://127.0.0.1:1".to_owned(),
-        world: World { id: 1, cap: 5000 },
+        world: World { id: 1, cap: 5000, layer_cap: 500 },
         start: MEADOW,
       })
     );
@@ -556,15 +582,7 @@ mod tests {
       let read = Config::read(&|wanted| (wanted != *name).then(|| full[wanted].clone()));
       refusals.push(read.err().map(|fault| fault.to_string()));
     }
-    let wrongs = [
-      ("MMO_LOGIN_ADDRESS", "-1"),
-      ("MMO_WORLD", "-1"),
-      ("MMO_WORLD_CAP", "-1"),
-      ("MMO_START_ZONE", "z"),
-      ("MMO_START_POSITION", "1,2"),
-      ("MMO_START_POSITION", "1,2,z"),
-    ];
-    for (name, value) in wrongs {
+    for (name, value) in WRONGS {
       let wrong = variables(&tls, &[(name, value)]);
       refusals.push(
         Config::read(&|wanted| wrong.get(wanted).cloned()).err().map(|fault| fault.to_string()),
@@ -575,6 +593,9 @@ mod tests {
       refusals,
       [
         "the variable DATABASE_URL is not set",
+        "the variable MMO_LAYER_CAP holds no valid value: a layer holds a party of 5 players",
+        "the variable MMO_LAYER_CAP holds no valid value: invalid digit found in string",
+        "the variable MMO_LAYER_CAP is not set",
         "the variable MMO_LOGIN_ADDRESS holds no valid value: invalid socket address syntax",
         "the variable MMO_LOGIN_ADDRESS is not set",
         "the variable MMO_LOGIN_CERTIFICATE is not set",

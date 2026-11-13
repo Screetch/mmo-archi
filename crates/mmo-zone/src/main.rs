@@ -1,26 +1,27 @@
-//! The zone writer of mmo-archi: the one authority of the state of one zone.
+//! The layer writer of mmo-archi: the one authority of the state of one layer of a zone.
 //!
-//! It runs the zone on a fixed tick of 50 ms. It takes the links of the gateways on QUIC: each
-//! [`ToZone::Join`](mmo_protocol::ToZone) reads the last save of a character from PostgreSQL with
-//! `mmo-store`, and the zone takes the player when the save is in this zone and the zone holds
-//! fewer than 2500 players. At each tick it takes at most one input of each player, moves each
-//! body with the step of `mmo-collide`, and sends to each player a
-//! [`Snapshot`](mmo_protocol::Snapshot) of the 64 nearest entities in the 9 cells of 32 m around
+//! It starts idle, and runs the claim of the directory of its shard each second, until it takes a
+//! layer that a placement opened. Then it runs the layer on a fixed tick of 50 ms. It takes the
+//! links of the gateways on QUIC: each [`ToZone::Join`](mmo_protocol::ToZone) reads the last save
+//! of a character from PostgreSQL with `mmo-store`, and the layer takes the player when the save
+//! is in its zone and the layer holds fewer players than the cap of a layer of its shard. At each
+//! tick it takes at most one input of each player, moves each body with the step of
+//! `mmo-collide`, and sends to each player a [`Snapshot`](mmo_protocol::Snapshot) of the 64
+//! nearest entities in the 9 cells of 32 m around
 //! it, as a delta against the last snapshot that its client acknowledged.
 //!
-//! The writer keeps its state as sections 2, 5 and 9 of `docs/architecture.md` say. When it
-//! starts it claims the layer 1 of its zone in its shard from the keeper, which gives it the next
-//! epoch of that layer, and it writes its
-//! entry in the directory of zones in Redis. It stops when a newer epoch holds the zone, in the
-//! directory or in a refusal of the keeper. Each second it renews its entry, and adds the time of
-//! each tick that it ran to the hash that `mmo_store::keys::ticks` names, for the load test.
+//! The writer keeps its state as sections 2, 5, 6 and 9 of `docs/architecture.md` say. When it
+//! takes a layer, it claims the layer from the keeper, which gives it the next epoch of that
+//! layer, and it renews the lease of the layer in the directory with that epoch. It stops when a
+//! newer epoch holds the layer, in the directory or in a refusal of the keeper. Each second it
+//! renews its lease with its count of players, and adds the time of each tick that it ran to the
+//! hash that `mmo_store::keys::ticks` names, for the load test.
 //! Each 10 s, and when a player logs out, it sends the players whose state changed to the keeper,
 //! each row with its version, and it keeps the presence of each player in Redis. While the keeper
 //! does not take a batch, the zone keeps the last state of each of those players, and sends it
 //! again at the next save. It reads these variables of its environment:
 //!
 //! - `ZONE_SHARD`: the id of the shard of the writer, as `1`.
-//! - `ZONE_ID`: the id of the zone in the table `zones`, as `1`.
 //! - `ZONE_ADDRESS`: the address and the UDP port of the links, as `0.0.0.0:4434`.
 //! - `ZONE_PUBLIC`: the address that the gateways dial, as `zone-1.internal:4434`.
 //! - `DATABASE_URL`: the database of the game, which the writer only reads, as
@@ -51,12 +52,11 @@ mod zone;
 use std::process::ExitCode;
 use std::{env, io};
 
-use mmo_protocol::Layer;
 use mmo_store::Store;
 use quinn::Endpoint;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::claim::{Claim, Held};
+use crate::claim::Taken;
 use crate::config::Config;
 use crate::keeper::Keeper;
 use crate::link::Claimed;
@@ -106,11 +106,11 @@ async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Claimed
   let endpoint = Endpoint::server(config.server, config.address)?;
   let ipv4 = config.address.is_ipv4();
   let mut keeper = Keeper::new(endpoint.clone(), config.client, config.keeper, ipv4);
-  let layer = Layer { zone: config.zone, number: 1 };
-  let epoch = keeper.claim(config.shard, layer).await?;
-  let held = Held { shard: config.shard, layer, epoch };
-  let claim = Claim::open(&config.redis, held, config.public).await?;
-  Ok((endpoint, Claimed { zone: Zone::new(config.zone), store, claim, keeper }))
+  let taken = Taken::wait(&config.redis, config.shard, config.public).await?;
+  let epoch = keeper.claim(taken.shard, taken.layer).await?;
+  let zone = Zone::new(taken.layer, taken.cap);
+  let claim = taken.hold(epoch);
+  Ok((endpoint, Claimed { zone, store, claim, keeper }))
 }
 
 #[cfg(test)]
@@ -122,10 +122,12 @@ mod tests {
 
   use mmo_protocol::{
     Angle, CharacterId, Entity, FromClient, Input, Intents, Link, Password, Position, Relayed,
-    Snapshot, State, Tick, ToZone, Velocity, ZoneId,
+    ShardId, Snapshot, State, Tick, ToZone, Velocity, ZoneId,
   };
-  use mmo_store::Store;
   use mmo_store::testing::Redis;
+  use mmo_store::{Directory, Placed, Store, keys};
+  use redis::AsyncCommands;
+  use redis::aio::MultiplexedConnection;
   use sqlx::ConnectOptions;
   use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
   use tokio::time;
@@ -164,6 +166,14 @@ mod tests {
     view
   }
 
+  /// The Redis of `redis`, with the cap of a layer of shard 1, as the login service writes it.
+  async fn opened(redis: &Redis) -> MultiplexedConnection {
+    let client = redis::Client::open(redis.url()).expect("a URL");
+    let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
+    let () = admin.hset(keys::shard(ShardId(1)), keys::LAYER_CAP, 20).await.expect("a cap");
+    admin
+  }
+
   fn free() -> String {
     let free = UdpSocket::bind("127.0.0.1:0").and_then(|free| free.local_addr());
     free.expect("a port").to_string()
@@ -199,6 +209,9 @@ mod tests {
     let world = World::new();
     let address = free();
     let redis = Redis::start().await;
+    let mut admin = opened(&redis).await;
+    let placed = Directory { shard: ShardId(1) }.place(&mut admin, account, ZoneId(1), None).await;
+    assert_eq!(placed.expect("a placement"), Placed::Wait);
     let keeper = Keeper::start(&world, store.clone());
     let mut vars = world.vars(&address, connect.to_url_lossy().as_str(), &redis.url());
     vars.insert(0, ("ZONE_KEEPER", keeper.address()));
@@ -223,7 +236,8 @@ mod tests {
             view: Angle(0),
           })
         };
-        let intents = |ack, heading| Intents { zone: ZoneId(1), ack, inputs: inputs(heading) };
+        let intents =
+          |ack, heading| Intents { zone: ZoneId(1), layer: 1, ack, inputs: inputs(heading) };
         peer.intents(&Relayed { link: Link(1), message: intents(None, Some(Angle(0))) });
         peer.intents(&Relayed { link: Link(2), message: intents(Some(snapshot.tick), None) });
         if view.get(&brom.0) == Some(&stopped) {
@@ -234,9 +248,11 @@ mod tests {
     let view = walk.await.expect("Brom reaches the block");
     assert_eq!(view, BTreeMap::from([(brom.0, stopped), (cael.0, at(cael, 48_000, 0))]));
 
-    let entry = hash(&redis, "zone:1").await;
+    let entry = hash(&redis, "writer:1:1:1").await;
     assert_eq!((&entry["epoch"], &entry["address"]), (&"1".to_owned(), &"zone-1:4433".to_owned()));
-    assert_eq!(hash(&redis, &format!("presence:{}", account.0)).await["zone"], "1");
+    assert_eq!(hash(&redis, "layers:1").await["1:1"], "2");
+    let presence = hash(&redis, &format!("presence:{}", account.0)).await;
+    assert_eq!([&presence["shard"], &presence["zone"], &presence["layer"]], ["1", "1", "1"]);
 
     let say = FromClient::Say { channel: "world".to_owned(), text: "hi".to_owned() };
     peer.tell(&ToZone::Client(Relayed { link: Link(2), message: say })).await;
@@ -287,19 +303,20 @@ mod tests {
       "{in_use}"
     );
     let keeper = Keeper::start(&world, store.clone());
-    let claim = async || {
-      let mut vars = world.vars(&free(), database.as_str(), "nope");
+    let redis = Redis::start().await;
+    let mut admin = opened(&redis).await;
+    let () = admin.hset(keys::layers(ShardId(1)), "1:1", 0).await.expect("a layer");
+    let claim = async |url: &str| {
+      let mut vars = world.vars(&free(), database.as_str(), url);
       vars.insert(0, ("ZONE_KEEPER", keeper.address()));
       write(var(vars)).await.to_string()
     };
-    let mut faults = vec![claim().await];
-    store.add_zone(ZoneId(1), "meadow").await?;
-    faults.push(claim().await);
+    let faults = [claim("nope").await, claim(&redis.url()).await];
     assert_eq!(
       faults,
       [
+        "Redis refuses the layer writer: Redis URL did not parse - InvalidClientConfig",
         "the keeper holds no zone of the id that the zone writer claims",
-        "Redis refuses the zone writer: Redis URL did not parse - InvalidClientConfig",
       ]
     );
     let unset = write(var(Vec::new())).await.to_string();

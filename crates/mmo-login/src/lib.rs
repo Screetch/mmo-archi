@@ -16,14 +16,16 @@ mod server;
 
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
+use std::time::Duration;
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, State, ToLogin, Token,
-  ZoneId,
+  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, ShardId, State, ToLogin,
+  Token, ZoneId,
 };
-use mmo_store::{Store, keys};
+use mmo_store::{Directory, Placed, Store, keys};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
+use tokio::time;
 
 use queue::Place;
 pub use queue::World;
@@ -66,6 +68,9 @@ const HIT_POINTS: i32 = 100;
 
 /// The life of a session, in seconds.
 const SESSION: i64 = 24 * 60 * 60;
+
+/// The time after which a selection runs the placement again, while it gives no layer.
+const PLACE_AGAIN: Duration = Duration::from_secs(1);
 
 /// The place where each new character of a world starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,28 +289,49 @@ impl Login {
     }
   }
 
-  /// Makes the session of `character`. The slot of the account gives one session at most, so two
-  /// clients of one account never hold two sessions.
+  /// Makes the session of `character`, in the layer of its zone that the placement of the
+  /// directory gives. While the placement gives none, it runs again each second, until the slot of
+  /// the account ends. The slot of the account gives one session at most, so two clients of one
+  /// account never hold two sessions.
   async fn select(&self, client: &mut Client, character: CharacterId) -> Result<FromLogin, Error> {
     let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
     };
     let (account, owned) = (*account, characters.contains(&character));
     let mut redis = self.redis.clone();
-    if redis.exists(keys::presence(account)).await? {
-      return Ok(FromLogin::Refused(Refusal::Online));
-    }
     let saved = if owned { self.store.load(&[character]).await? } else { Vec::new() };
     let Some(saved) = saved.first() else {
       return Ok(FromLogin::Refused(Refusal::Character));
+    };
+    let shard = ShardId(self.world.id);
+    let directory = Directory { shard };
+    let layer = loop {
+      let (online, slot): (bool, bool) = redis::pipe()
+        .exists(keys::presence(account))
+        .exists(keys::admit(account))
+        .query_async(&mut redis)
+        .await?;
+      if online {
+        return Ok(FromLogin::Refused(Refusal::Online));
+      }
+      match directory.place(&mut redis, account, saved.zone, None).await? {
+        Placed::On(layer) => break layer,
+        Placed::Wait if slot => time::sleep(PLACE_AGAIN).await,
+        Placed::Wait => return Ok(Self::expired(client)),
+      }
     };
     if !redis.del::<_, bool>(keys::admit(account)).await? {
       return Ok(Self::expired(client));
     }
     let token = token();
     let session = keys::session(&token);
-    let fields =
-      [("account", account.0), ("character", character.0), ("zone", saved.zone.0.into())];
+    let fields = [
+      (keys::ACCOUNT, account.0),
+      (keys::CHARACTER, character.0),
+      (keys::SHARD, shard.0.into()),
+      (keys::ZONE, layer.zone.0.into()),
+      (keys::LAYER, layer.number.into()),
+    ];
     redis::pipe()
       .atomic()
       .hset_multiple(&session, &fields)
@@ -731,6 +757,7 @@ mod tests {
     let bob = game.account("bob").await;
     let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
     let dara = game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
+    game.layer(ZoneId(7)).await;
     let copy = game.copy(1);
     let mut clients = game.enter(&copy, &["ada", "ada"]).await;
     copy.admit().await?;
@@ -762,7 +789,13 @@ mod tests {
     fields.sort();
     assert_eq!(
       fields,
-      [("account".to_owned(), ada.0), ("character".to_owned(), brom.0), ("zone".to_owned(), 7)]
+      [
+        ("account".to_owned(), ada.0),
+        ("character".to_owned(), brom.0),
+        ("layer".to_owned(), 1),
+        ("shard".to_owned(), 1),
+        ("zone".to_owned(), 7)
+      ]
     );
     let life: i64 = redis.ttl(&session).await?;
     assert!((86_390..=86_400).contains(&life), "the session ends in {life} s");
@@ -771,10 +804,50 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
+  async fn a_selection_waits_for_an_open_layer_of_its_zone_while_its_slot_stands(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let bob = game.account("bob").await;
+    let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
+    let dara = game.store.create_character(bob, "Dara", ZoneId(7), START).await?;
+    let copy = game.copy(2);
+    let mut clients = game.enter(&copy, &["ada", "bob"]).await;
+    copy.admit().await?;
+    for client in &mut clients {
+      assert!(copy.ready(&mut client.0).await?.is_some(), "a slot");
+    }
+    let [(first, _), (second, _)] = &mut clients[..] else {
+      panic!("two clients");
+    };
+    let later = std::time::Duration::from_millis(1500);
+    let opened = async {
+      tokio::time::sleep(later).await;
+      game.layer(ZoneId(7)).await;
+    };
+    let select = ToLogin::Select { character: brom };
+    let (made, ()) = tokio::join!(copy.answer(first, HOME, select), opened);
+    assert!(matches!(made?, FromLogin::Session { .. }), "a session once the layer opens");
+    let layer = mmo_protocol::Layer { zone: ZoneId(7), number: 1 };
+    let mut redis = game.redis.clone();
+    let () = redis.del(keys::writer(mmo_protocol::ShardId(1), layer)).await?;
+    let ended = async {
+      tokio::time::sleep(later).await;
+      let () = game.redis.clone().del(keys::admit(bob)).await.expect("the end of the slot");
+    };
+    let select = ToLogin::Select { character: dara };
+    let (refused, ()) = tokio::join!(copy.answer(second, HOME, select), ended);
+    assert_eq!(refused?, FromLogin::Refused(Refusal::Expired));
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
   async fn a_fault_of_a_store_ends_the_answer_with_its_error(pool: PgPool) -> Result<(), Error> {
     let game = Game::new(pool.clone()).await;
     let ada = game.account("ada").await;
     let brom = game.store.create_character(ada, "Brom", ZoneId(7), START).await?;
+    game.layer(ZoneId(7)).await;
     let copy = game.copy(1);
     let mut queued = Client::default();
     copy.answer(&mut queued, HOME, login("ada")).await?;
@@ -784,7 +857,8 @@ mod tests {
     let closed = PgPool::connect_with(pool.connect_options().as_ref().clone()).await;
     let closed = closed.map_err(mmo_store::Error::from)?;
     let store = Store::open(closed.clone()).await?;
-    let unreachable = Login::new(store, game.redis.clone(), World { id: 1, cap: 1 }, MEADOW);
+    let unreachable =
+      Login::new(store, game.redis.clone(), World { id: 1, cap: 1, layer_cap: 20 }, MEADOW);
     closed.close().await;
     let [no_get, no_set, no_script, no_exists, no_del, no_hmset] = [
       game.denied("-get").await,
@@ -810,6 +884,7 @@ mod tests {
       unreachable.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_exists.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
       unreachable.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
+      no_script.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_del.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_hmset.answer(&mut admitted.clone(), HOME, select).await.err(),
       no_set.answer(&mut Client::Out, HOME, new_account("eve")).await.err(),
@@ -839,10 +914,13 @@ mod tests {
         denied("get", "get"),
         closed.clone(),
         denied("exists", "exists"),
-        denied("exists", "exists"),
+        denied("exists", "exists").map(|text| {
+          format!("Pipeline failures: [(Index 0, error: {text}), (Index 1, error: {text})]")
+        }),
         closed.clone(),
         denied("exists", "exists"),
         closed.clone(),
+        denied("@scripting", "evalsha"),
         denied("del", "del"),
         aborted("hmset", "hmset"),
         aborted("set", "set"),

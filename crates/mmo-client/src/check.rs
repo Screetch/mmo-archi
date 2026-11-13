@@ -121,7 +121,7 @@ mod tests {
 
   async fn gateway(mut peer: Peer, what: Gateway) -> Peer {
     assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
-    peer.write(&ToClient::Moved { zone: ZoneId(1) }).await;
+    peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 1 }).await;
     match what {
       Gateway::Shows => {
         for shown in [vec![], vec![entity()]] {

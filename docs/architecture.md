@@ -162,6 +162,7 @@ presence again.
 | `shard:{s}` | hash | login service | none | `name`, `cap` and `layer_cap`: the name of the shard, its cap of admitted players and the cap of each of its layers |
 | `layers:{s}` | hash | the script `place` adds a layer, the script `close` removes it, and its writer writes its count | none | each layer of the shard, as the field `{z}:{l}`, with its count of players |
 | `draining:{s}` | set | the scripts `drain` and `close` | none | the layers of the shard that drain, as `{z}:{l}` |
+| `placed:{s}:{z}:{l}` | sorted set | the script `place` adds a place, and the script `lease` removes it | 60 s for each place | the accounts that a placement gave the layer and whose players its writer did not take yet |
 | `writer:{s}:{z}:{l}` | hash | layer writer | 3 s, renewed each 1 s | address, epoch |
 | `party:{s}:{p}` | set | the script `party` | until the party has fewer than 2 members | the accounts of the party |
 | `ticks:{s}:{z}:{l}` | hash | layer writer | 10 minutes, renewed each 1 s | the count of the ticks of the writer in each bucket of 250 µs, from 0 to 99.75 ms, which the load test reads |
@@ -344,7 +345,7 @@ step, so two callers never take one decision twice. Each script but `lease` send
 | --- | --- | --- |
 | `place` | the login service and the layer writer | gives the layer that a player enters in a zone, or answers to wait and opens a layer |
 | `claim` | an idle layer writer, each second | gives the writer the layer of its shard with no writer that has the lowest zone, then the lowest number, or nothing, and writes the lease of that layer with the epoch 0, so no other writer takes it |
-| `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, and writes its count, unless the lease holds a newer epoch |
+| `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, writes its count, and ends the place of each player that it took, unless the lease holds a newer epoch |
 | `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players |
 | `close` | the writer of a layer | removes the layer when it holds no player and its lease holds the epoch of the writer |
 | `party` | the layer writer | adds a player to a party, or removes it |
@@ -364,6 +365,10 @@ cap. Then `place` gives the first of these:
    layer stays full, and the layer with the fewest players empties.
 4. Else wait. When no layer of the zone stands with no writer, `place` also opens a layer: it adds the least free
    number of the zone to `layers:{s}` with a count of 0, for a writer to claim.
+
+The layer that `place` gives holds the place of the player in `placed:{s}:{z}:{l}` for 60 s, until its writer takes
+the player and ends the place with its next `lease`. The count of a layer for `place` is the count of its writer and
+its places, so placements that come faster than the writer writes its count never pass the cap.
 
 A caller that gets wait keeps the player where it is and runs `place` again after 1 s: the login service keeps the
 slot of the account, and the source writer keeps the player at the border.

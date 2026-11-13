@@ -10,7 +10,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, Layer, ShardId, Token, ZoneId};
+use mmo_protocol::{AccountId, Layer, ShardId, Token};
 
 /// The channel of the directory of the layers. Each script of
 /// [`Directory`](crate::Directory) names on it each layer that it opened, closed, put in drain or
@@ -24,12 +24,15 @@ pub const NAME: &str = "name";
 pub const CAP: &str = "cap";
 pub const LAYER_CAP: &str = "layer_cap";
 
-/// The fields of [`zone`] and of [`writer`], which a writer writes and a gateway reads: the
-/// address that the gateways dial, the epoch of the writer, and the count of its players. The
-/// scripts of the directory write [`ADDRESS`] and [`EPOCH`] by these names.
+/// The fields of [`writer`], which a writer writes and a gateway reads: the address that the
+/// gateways dial, and the epoch of the writer. The scripts of the directory write them by these
+/// names.
 pub const ADDRESS: &str = "address";
 pub const EPOCH: &str = "epoch";
-pub const PLAYERS: &str = "players";
+
+/// The field of [`session`] that holds the account, besides the fields of [`presence`] but
+/// [`EPOCH`] and [`PARTY`].
+pub const ACCOUNT: &str = "account";
 
 /// The fields of [`presence`], besides [`EPOCH`]: the character of the account, its shard, its
 /// zone and its layer, and its party. The scripts of the directory read them by these names.
@@ -48,7 +51,8 @@ pub const QUEUED: &str = "queued:";
 /// The prefix of [`admit`].
 pub const ADMIT: &str = "admit:";
 
-/// The session of `token`, a hash of the account, the character and the zone.
+/// The session of `token`, a hash of the account, the character, the shard, the zone and the
+/// layer.
 pub fn session(token: &Token) -> String {
   format!("session:{}", hex(token))
 }
@@ -94,23 +98,30 @@ pub fn writer(shard: ShardId, layer: Layer) -> String {
   format!("{}{}", writers(shard), field(layer))
 }
 
+/// The prefix of the [`placed`] of each layer of `shard`, before the [`field`] of the layer.
+pub fn places(shard: ShardId) -> String {
+  format!("placed:{}:", shard.0)
+}
+
+/// The places that placements gave in `layer` of `shard`, a sorted set of the accounts by the
+/// time in milliseconds when each place ends. The writer of the layer takes a place away when it
+/// takes its player.
+pub fn placed(shard: ShardId, layer: Layer) -> String {
+  format!("{}{}", places(shard), field(layer))
+}
+
 /// The prefix of each party of `shard`, before the id of the party.
 pub fn parties(shard: ShardId) -> String {
   format!("party:{}:", shard.0)
 }
 
-/// The entry of `zone` in the directory of zones, a hash of the address, the epoch and the count
-/// of players of its writer.
-pub fn zone(zone: ZoneId) -> String {
-  format!("zone:{}", zone.0)
-}
-
-/// The ticks of the writer of `zone`, a hash from the number of a bucket to the count of ticks in
-/// it. Bucket `n` holds each tick that took from `n` times [`TICK_BUCKET`] up to the next bucket,
-/// and the last bucket holds each longer tick. The writer adds to it and never resets it, so a
-/// reader that wants the ticks of a run reads the hash before and after, and takes the difference.
-pub fn ticks(zone: ZoneId) -> String {
-  format!("ticks:{}", zone.0)
+/// The ticks of the writer of `layer` of `shard`, a hash from the number of a bucket to the
+/// count of ticks in it. Bucket `n` holds each tick that took from `n` times [`TICK_BUCKET`] up to
+/// the next bucket, and the last bucket holds each longer tick. The writer adds to it and never
+/// resets it, so a reader that wants the ticks of a run reads the hash before and after, and takes
+/// the difference.
+pub fn ticks(shard: ShardId, layer: Layer) -> String {
+  format!("ticks:{}", self::layer(shard, layer))
 }
 
 /// The time that one bucket of [`ticks`] spans.
@@ -205,8 +216,8 @@ mod tests {
 
   use super::{
     DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, draining, failed, field,
-    guessed, layer, layers, parties, presence, queue, queued, resume, session, shard, tick_bucket,
-    ticks, writer, writers, zone,
+    guessed, layer, layers, parties, placed, places, presence, queue, queued, resume, session,
+    shard, tick_bucket, ticks, writer, writers,
   };
 
   #[test]
@@ -224,8 +235,6 @@ mod tests {
         presence(account),
         queued(account),
         admit(account),
-        zone(ZoneId(-3)),
-        ticks(ZoneId(3)),
         queue(1),
         admitted(1),
         admissions(u32::MAX),
@@ -244,8 +253,6 @@ mod tests {
         "presence:9223372036854775807".to_owned(),
         "queued:9223372036854775807".to_owned(),
         "admit:9223372036854775807".to_owned(),
-        "zone:-3".to_owned(),
-        "ticks:3".to_owned(),
         "world:1:queue".to_owned(),
         "world:1:admitted".to_owned(),
         "world:4294967295:admissions".to_owned(),
@@ -274,6 +281,9 @@ mod tests {
         writers(ShardId(2)),
         writer(ShardId(u32::MAX), far),
         parties(ShardId(2)),
+        ticks(ShardId(2), far),
+        places(ShardId(2)),
+        placed(ShardId(2), far),
       ],
       [
         "shard:2",
@@ -284,6 +294,9 @@ mod tests {
         "writer:2:",
         "writer:4294967295:-3:4294967295",
         "party:2:",
+        "ticks:2:-3:4294967295",
+        "placed:2:",
+        "placed:2:-3:4294967295",
       ]
     );
   }

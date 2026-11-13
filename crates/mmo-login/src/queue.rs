@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use mmo_protocol::{AccountId, Token};
+use mmo_protocol::{AccountId, ShardId, Token};
 use mmo_store::keys;
 use redis::Script;
 use redis::aio::ConnectionManager;
@@ -28,14 +28,17 @@ const MARK: u64 = 120;
 static ADMIT: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("admit.lua")));
 static PLACE: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("place.lua")));
 
-/// A world of the game: its id in the keys of Redis, and the most accounts that it admits at one
-/// time.
+/// A world of the game: its id in the keys of Redis, the most accounts that it admits at one
+/// time, and the most players of each of its layers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct World {
   /// The id of the world, as the keys of `mmo_store::keys` name it.
   pub id: u32,
   /// The most accounts that hold a slot in the world at one time.
   pub cap: u32,
+  /// The most players of each layer of the world, which a party of
+  /// [`PARTY`](mmo_store::PARTY) players always fits in.
+  pub layer_cap: u32,
 }
 
 /// Where an account stands in the queue of its world.
@@ -57,12 +60,14 @@ pub(crate) enum Place {
 }
 
 impl World {
-  /// Renews or ends each slot that ended, then admits the head of the queue into the free slots.
+  /// Writes the caps of the world, renews or ends each slot that ended, then admits the head of the
+  /// queue into the free slots.
   pub(crate) async fn admit(self, redis: &mut ConnectionManager) -> Result<u32, Error> {
     let admitted = ADMIT
       .key(keys::queue(self.id))
       .key(keys::admitted(self.id))
       .key(keys::admissions(self.id))
+      .key(keys::shard(ShardId(self.id)))
       .arg(self.cap)
       .arg(BURST)
       .arg(SLOT)
@@ -72,6 +77,7 @@ impl World {
       .arg(keys::PRESENCE)
       .arg(keys::QUEUED)
       .arg(keys::ADMIT)
+      .arg(self.layer_cap)
       .invoke_async(redis)
       .await?;
     Ok(admitted)

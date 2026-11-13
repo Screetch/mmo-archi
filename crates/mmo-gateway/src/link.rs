@@ -1,7 +1,7 @@
 //! What the links of the gateway share: the hello, the reader of the frames of a stream, and the
 //! faults that end a link.
 
-use mmo_protocol::{Frames, Hello, ZoneId, frame};
+use mmo_protocol::{Frames, Hello, Layer, frame};
 use quinn::{
   ConnectError, ConnectionError, ReadError, RecvStream, SendDatagramError, SendStream, VarInt,
   WriteError,
@@ -14,7 +14,7 @@ pub(crate) const FAULT: VarInt = VarInt::from_u32(1);
 /// The build in the hello of the gateway, for the logs of the operator.
 const BUILD: u32 = 0;
 
-/// Why the gateway ends the connection of a client or its link to a zone writer.
+/// Why the gateway ends the connection of a client or its link to a layer writer.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Fault {
   #[error("the link fails: {0}")]
@@ -33,20 +33,20 @@ pub(crate) enum Fault {
   Redis(#[from] redis::RedisError),
   #[error("no session has this token")]
   NoSession,
-  #[error("the directory names no writer of zone {}", .0.0)]
-  NoWriter(ZoneId),
-  #[error("the address {0} of a zone writer names no host that the gateway reaches")]
+  #[error("the directory names no writer of layer {}:{}", .0.zone.0, .0.number)]
+  NoWriter(Layer),
+  #[error("the address {0} of a layer writer names no host that the gateway reaches")]
   Unresolved(String),
-  #[error("the gateway cannot resolve the address of a zone writer: {0}")]
+  #[error("the gateway cannot resolve the address of a layer writer: {0}")]
   Resolve(#[source] std::io::Error),
-  #[error("the gateway cannot link to a zone writer: {0}")]
+  #[error("the gateway cannot link to a layer writer: {0}")]
   Connect(#[from] ConnectError),
-  #[error("the link to the writer of zone {} ends: {}", .zone.0, .why)]
-  Lost { zone: ZoneId, why: ConnectionError },
+  #[error("the link to the writer of layer {}:{} ends: {}", .layer.zone.0, .layer.number, .why)]
+  Lost { layer: Layer, why: ConnectionError },
 }
 
 /// Writes the hello of the gateway on the stream that `opened` gives, then reads the hello of the
-/// peer, which must speak this version of the protocol. A client and a zone writer each greet so.
+/// peer, which must speak this version of the protocol. A client and a layer writer each greet so.
 pub(crate) async fn greet(
   opened: Result<(SendStream, RecvStream), ConnectionError>,
 ) -> Result<(SendStream, Stream), Fault> {
@@ -78,7 +78,7 @@ impl Stream {
 }
 
 /// `payload` in its frame, for a payload that a frame holds: a hello, a message of a few integers,
-/// or a message that the gateway took out of a frame of a zone writer.
+/// or a message that the gateway took out of a frame of a layer writer.
 #[expect(clippy::expect_used, reason = "each caller gives a payload that a frame holds")]
 pub(crate) fn framed(payload: &[u8]) -> Vec<u8> {
   frame(payload).expect("the payload fits a frame")

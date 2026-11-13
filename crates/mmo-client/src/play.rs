@@ -119,7 +119,12 @@ mod tests {
 
   fn intents() -> Intents {
     let input = |tick| Input { tick: Tick(tick), heading: Some(Angle(0)), view: Angle(16384) };
-    Intents { zone: ZoneId(1), ack: Some(Tick(9)), inputs: [input(10), input(11), input(12)] }
+    Intents {
+      zone: ZoneId(1),
+      layer: 1,
+      ack: Some(Tick(9)),
+      inputs: [input(10), input(11), input(12)],
+    }
   }
 
   fn snapshot() -> Snapshot {
@@ -145,7 +150,7 @@ mod tests {
   async fn the_client_attaches_and_exchanges_streams_and_datagrams_with_the_gateway() {
     let fake = Fake::start(|mut peer| async move {
       assert_eq!(peer.read::<Attach>().await, Attach { session: TOKEN });
-      peer.write(&ToClient::Moved { zone: ZoneId(2) }).await;
+      peer.write(&ToClient::Moved { zone: ZoneId(2), layer: 1 }).await;
       let sent = peer.connection.read_datagram().await.expect("a datagram");
       assert_eq!(decode::<Intents>(&sent).ok(), Some(intents()));
       let bytes = datagram(&snapshot()).expect("a datagram");
@@ -157,7 +162,10 @@ mod tests {
       peer
     });
     let mut play = Play::attach(&fake.trust, &fake.address, TOKEN).await.expect("attached");
-    assert_eq!(play.next().await.ok(), Some(Down::Message(ToClient::Moved { zone: ZoneId(2) })));
+    assert_eq!(
+      play.next().await.ok(),
+      Some(Down::Message(ToClient::Moved { zone: ZoneId(2), layer: 1 }))
+    );
     play.send(Up::Intents(intents())).await.expect("sent");
     assert_eq!(play.next().await.ok(), Some(Down::Snapshot(snapshot())));
     play.send(say()).await.expect("sent");
