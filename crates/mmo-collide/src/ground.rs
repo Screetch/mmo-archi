@@ -1,4 +1,5 @@
-//! The ground of a zone, which the zone writer and each client build in the same way.
+//! The ground of a zone, which each layer writer of the zone and each client build in the same
+//! way.
 
 use crate::Solid;
 
@@ -12,7 +13,7 @@ const BLOCKS: [[f32; 3]; 4] =
 
 /// The solids of the ground of each zone: a flat square floor, with a few blocks on it.
 ///
-/// The zone writer collides its players with this ground, and a client draws it and predicts its
+/// The layer writer collides its players with this ground, and a client draws it and predicts its
 /// own body on it, so both read one list. A change of the list changes the result of a step.
 pub fn ground() -> Vec<Solid> {
   let half = SIDE / 2.0;

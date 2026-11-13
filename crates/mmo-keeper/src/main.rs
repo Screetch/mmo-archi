@@ -2,7 +2,7 @@
 //! of each layer in PostgreSQL.
 //!
 //! When it starts, it runs the migrations of `mmo-store` under the lock of sqlx. Then it takes the
-//! links of the zone writers on QUIC, and answers each [`ToKeeper`](mmo_protocol::ToKeeper) with
+//! links of the layer writers on QUIC, and answers each [`ToKeeper`](mmo_protocol::ToKeeper) with
 //! the queries of `mmo-store`, through 16 connections to PostgreSQL at most. It reads these
 //! variables of its environment:
 //!
@@ -10,8 +10,8 @@
 //! - `DATABASE_URL`: the database of the game, as `postgres://keeper@db/game`.
 //! - `KEEPER_CERTIFICATE` and `KEEPER_KEY`: the PEM files of the certificate chain of the keeper
 //!   and of its private key.
-//! - `KEEPER_AUTHORITY`: the PEM file of the certificates that sign the certificate of each zone
-//!   writer. The keeper refuses each peer whose certificate they do not sign, so only a zone
+//! - `KEEPER_AUTHORITY`: the PEM file of the certificates that sign the certificate of each layer
+//!   writer. The keeper refuses each peer whose certificate they do not sign, so only a layer
 //!   writer of the operator writes the game data.
 //!
 //! It runs until a fault stops it. Then it writes the fault on its standard error and exits with

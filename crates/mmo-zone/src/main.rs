@@ -18,7 +18,7 @@
 //! hash that `mmo_store::keys::ticks` names, for the load test.
 //! Each 10 s, and when a player logs out, it sends the players whose state changed to the keeper,
 //! each row with its version, and it keeps the presence of each player in Redis. While the keeper
-//! does not take a batch, the zone keeps the last state of each of those players, and sends it
+//! does not take a batch, the writer keeps the last state of each of those players, and sends it
 //! again at the next save. It reads these variables of its environment:
 //!
 //! - `ZONE_SHARD`: the id of the shard of the writer, as `1`.
@@ -29,10 +29,10 @@
 //! - `REDIS_URL`: the Redis of the game, as `redis://redis:6379`.
 //! - `ZONE_KEEPER`: the address of the keeper, as `keeper.internal:4433`. The name of the host is
 //!   the name that the certificate of the keeper must hold.
-//! - `ZONE_CERTIFICATE` and `ZONE_KEY`: the PEM files of the certificate chain of the zone writer
+//! - `ZONE_CERTIFICATE` and `ZONE_KEY`: the PEM files of the certificate chain of the layer writer
 //!   and of its private key. The writer shows them to each gateway and to the keeper.
 //! - `ZONE_AUTHORITY`: the PEM file of the certificates that sign the certificate of each
-//!   gateway and of the keeper. The zone writer refuses each peer whose certificate they do not
+//!   gateway and of the keeper. The layer writer refuses each peer whose certificate they do not
 //!   sign, so only a gateway of the operator relays the intents of a player, and only the keeper of
 //!   the operator takes the saves.
 //!
@@ -63,21 +63,21 @@ use crate::keeper::Keeper;
 use crate::link::Claimed;
 use crate::zone::Zone;
 
-/// The most connections of the zone writer to PostgreSQL. It reads a character at each join.
+/// The most connections of the layer writer to PostgreSQL. It reads a character at each join.
 const CONNECTIONS: u32 = 4;
 
-/// Why the zone writer stops.
+/// Why the layer writer stops.
 #[derive(Debug, thiserror::Error)]
 enum Error {
   #[error(transparent)]
   Config(#[from] config::Error),
-  #[error("the database refuses the zone writer: {0}")]
+  #[error("the database refuses the layer writer: {0}")]
   Store(#[from] mmo_store::Error),
   #[error(transparent)]
   Claim(#[from] claim::Error),
   #[error(transparent)]
   Keeper(#[from] keeper::Error),
-  #[error("the zone writer cannot take links on its address: {0}")]
+  #[error("the layer writer cannot take links on its address: {0}")]
   Address(#[from] io::Error),
   #[error("the endpoint of the links closed")]
   Closed,
@@ -85,14 +85,14 @@ enum Error {
   Released,
 }
 
-#[expect(clippy::disallowed_methods, reason = "main starts the runtime of the zone writer once")]
+#[expect(clippy::disallowed_methods, reason = "main starts the runtime of the layer writer once")]
 #[tokio::main]
 async fn main() -> ExitCode {
-  eprintln!("the zone writer stops: {}", write(|name| env::var(name).ok()).await);
+  eprintln!("the layer writer stops: {}", write(|name| env::var(name).ok()).await);
   ExitCode::FAILURE
 }
 
-/// Runs the zone writer until a fault stops it, and gives that fault. Each layer that it closes
+/// Runs the layer writer until a fault stops it, and gives that fault. Each layer that it closes
 /// leaves it idle, and it takes the next layer that a placement opens.
 async fn write(var: impl Fn(&str) -> Option<String>) -> Error {
   let pool = match open(var).await {
@@ -137,7 +137,7 @@ impl Pool {
   }
 }
 
-/// Opens each part of the zone writer. It binds its address before it claims a layer, so a writer
+/// Opens each part of the layer writer. It binds its address before it claims a layer, so a writer
 /// that cannot take links takes no epoch.
 async fn open(var: impl Fn(&str) -> Option<String>) -> Result<Pool, Error> {
   let config = Config::read(var)?;
@@ -320,7 +320,7 @@ mod tests {
   }
 
   #[sqlx::test(migrations = false)]
-  async fn the_zone_writer_stops_on_a_database_that_the_keeper_did_not_migrate_and_on_an_address_in_use(
+  async fn the_layer_writer_stops_on_a_database_that_the_keeper_did_not_migrate_and_on_an_address_in_use(
     _: PgPoolOptions,
     connect: PgConnectOptions,
   ) -> Result<(), mmo_store::Error> {
@@ -331,7 +331,7 @@ mod tests {
     let behind = write(var(world.vars(&address, database.as_str(), "nope"))).await.to_string();
     assert_eq!(
       behind,
-      "the database refuses the zone writer: the database lacks the migration 1, which the \
+      "the database refuses the layer writer: the database lacks the migration 1, which the \
        keeper runs"
     );
     let store = Store::migrate(PgPool::connect_with(connect).await?).await?;
@@ -354,7 +354,7 @@ mod tests {
       faults,
       [
         "Redis refuses the layer writer: Redis URL did not parse - InvalidClientConfig",
-        "the keeper holds no zone of the id that the zone writer claims",
+        "the keeper holds no zone of the layer that the layer writer claims",
       ]
     );
     let unset = write(var(Vec::new())).await.to_string();

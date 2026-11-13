@@ -1,5 +1,5 @@
-//! A world for the tests: an authority, the zone writer and a gateway with their certificates, the
-//! link of a gateway to the zone writer, and a keeper.
+//! A world for the tests: an authority, the layer writer and a gateway with their certificates, the
+//! link of a gateway to the layer writer, and a keeper.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -26,7 +26,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::link::BUILD;
 
-/// The certificates of a world, and the folder of the PEM files of the zone writer:
+/// The certificates of a world, and the folder of the PEM files of the layer writer:
 /// `authority.pem`, `zone.pem`, `zone.key` and `gateway.key`.
 pub(crate) struct World {
   folder: TempDir,
@@ -92,7 +92,7 @@ impl World {
     ]
   }
 
-  /// The endpoint of a keeper on a free port, which shows the certificate of the zone writer, for
+  /// The endpoint of a keeper on a free port, which shows the certificate of the layer writer, for
   /// the name `localhost`, and takes only a peer that the authority signed.
   pub(crate) fn keeper(&self) -> Endpoint {
     let file = |name: &str| self.folder.path().join(name);
@@ -124,7 +124,7 @@ impl World {
   }
 }
 
-/// A keeper that answers each message of a zone writer from a store, as mmo-keeper does, until
+/// A keeper that answers each message of a layer writer from a store, as mmo-keeper does, until
 /// the test stops it.
 pub(crate) struct Keeper {
   endpoint: Endpoint,
@@ -142,7 +142,7 @@ impl Keeper {
     Self { endpoint, serve, ends, ended }
   }
 
-  /// The address that a zone writer dials, as `ZONE_KEEPER` gives it.
+  /// The address that a layer writer dials, as `ZONE_KEEPER` gives it.
   pub(crate) fn address(&self) -> String {
     format!("localhost:{}", self.endpoint.local_addr().expect("an address").port())
   }
@@ -158,7 +158,7 @@ impl Keeper {
     });
   }
 
-  /// Takes the links of the zone writers again, and answers them from `store`.
+  /// Takes the links of the layer writers again, and answers them from `store`.
   pub(crate) fn resume(&mut self, store: Store) {
     self.serve.abort();
     self.serve = tokio::spawn(keep(self.endpoint.clone(), store, self.ends.clone()));
@@ -176,7 +176,7 @@ impl Drop for Keeper {
   }
 }
 
-/// Takes the links of the zone writers, each in a task that ends with this one.
+/// Takes the links of the layer writers, each in a task that ends with this one.
 async fn keep(endpoint: Endpoint, store: Store, ends: UnboundedSender<()>) {
   let mut links = JoinSet::new();
   loop {
@@ -185,7 +185,7 @@ async fn keep(endpoint: Endpoint, store: Store, ends: UnboundedSender<()>) {
   }
 }
 
-/// Answers each message of a zone writer in order, until the writer drops the link.
+/// Answers each message of a layer writer in order, until the writer drops the link.
 async fn answer(incoming: Incoming, store: Store, ends: UnboundedSender<()>) {
   let connection = incoming.await.expect("a link");
   let (mut send, recv) = connection.accept_bi().await.expect("a writer opens its stream at once");
@@ -209,7 +209,7 @@ async fn answer(incoming: Incoming, store: Store, ends: UnboundedSender<()>) {
   ends.send(()).ok();
 }
 
-/// The stream of a zone writer to a keeper.
+/// The stream of a layer writer to a keeper.
 struct Stream {
   recv: RecvStream,
   frames: Frames,
@@ -248,7 +248,7 @@ pub(crate) async fn life(redis: &Redis, key: &str) -> i64 {
   redis::cmd("PTTL").arg(key).query_async(&mut connection).await.expect("a life")
 }
 
-/// A gateway, with the stream that it opened to the zone writer.
+/// A gateway, with the stream that it opened to the layer writer.
 pub(crate) struct Peer {
   connection: Connection,
   pub(crate) send: SendStream,
@@ -268,7 +268,7 @@ impl Peer {
     self.send.write_all(bytes).await.expect("a write");
   }
 
-  /// The payload of the next frame of the zone writer.
+  /// The payload of the next frame of the layer writer.
   pub(crate) async fn read(&mut self) -> Vec<u8> {
     let mut chunk = [0; 4096];
     loop {
@@ -280,7 +280,7 @@ impl Peer {
     }
   }
 
-  /// Writes the hello of this version, and checks the hello of the zone writer.
+  /// Writes the hello of this version, and checks the hello of the layer writer.
   pub(crate) async fn greet(&mut self) {
     self.write(&frame(&Hello { build: 0 }.encode()).expect("a hello")).await;
     let theirs = Hello::decode(&self.read().await).expect("a hello of this version");
@@ -299,7 +299,7 @@ impl Peer {
     self.datagram(&relayed(intents.link, &encode(&intents.message)));
   }
 
-  /// The next snapshot that the zone writer sends to `link`, after the snapshots of the other
+  /// The next snapshot that the layer writer sends to `link`, after the snapshots of the other
   /// links.
   pub(crate) async fn snapshot(&self, link: Link) -> Snapshot {
     loop {
@@ -315,7 +315,7 @@ impl Peer {
     self.connection.close(0u32.into(), b"");
   }
 
-  /// The code and the reason with which the zone writer closed the link, or the fault of the
+  /// The code and the reason with which the layer writer closed the link, or the fault of the
   /// link.
   pub(crate) async fn closed(&self) -> Result<(u64, String), ConnectionError> {
     match self.connection.closed().await {

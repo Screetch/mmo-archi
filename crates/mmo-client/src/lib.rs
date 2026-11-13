@@ -1,6 +1,6 @@
 //! The client of mmo-archi.
 //!
-//! The client decides nothing: the zone writer is the one authority of the world. The client only
+//! The client decides nothing: the layer writer is the one authority of the world. The client only
 //! predicts its own body, to show it at once, and corrects the prediction when a snapshot of the
 //! writer comes.
 //!

@@ -7,7 +7,7 @@ use mmo_protocol::ShardId;
 use quinn::{ClientConfig, ServerConfig};
 use sqlx::postgres::PgConnectOptions;
 
-/// What the zone writer reads from its environment, as the doc of the crate says.
+/// What the layer writer reads from its environment, as the doc of the crate says.
 pub(crate) struct Config {
   /// The shard of the writer.
   pub(crate) shard: ShardId,
@@ -24,12 +24,12 @@ pub(crate) struct Config {
   /// The QUIC of the links of the gateways, which takes only a peer whose certificate the
   /// authority signed.
   pub(crate) server: ServerConfig,
-  /// The QUIC of the link to the keeper, which shows the certificate of the zone writer and takes
+  /// The QUIC of the link to the keeper, which shows the certificate of the layer writer and takes
   /// only a keeper whose certificate the authority signed.
   pub(crate) client: ClientConfig,
 }
 
-/// A variable of the environment that the zone writer cannot use.
+/// A variable of the environment that the layer writer cannot use.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
   #[error("the variable {0} is not set")]
@@ -76,7 +76,7 @@ mod tests {
   use crate::peer::{World, var};
 
   #[test]
-  fn the_zone_writer_reads_each_variable_and_names_the_one_that_it_cannot_use() {
+  fn the_layer_writer_reads_each_variable_and_names_the_one_that_it_cannot_use() {
     let world = World::new();
     let vars = world.vars("127.0.0.1:4433", "postgres://zone@localhost/game", "redis://redis");
     let read = |name: &'static str, value: Option<String>| {

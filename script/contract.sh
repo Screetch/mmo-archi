@@ -34,7 +34,7 @@ trap 'rm -f "$log"' EXIT
 breaks() {
   for manifest in crates/*/Cargo.toml; do
     git cat-file -e "$1:$manifest" 2>/dev/null || continue
-    # A crate with no library has no public items to check, as the gateway, the keeper and the zone writer.
+    # A crate with no library has no public items to check, as the gateway, the keeper and the layer writer.
     [ -f "$(dirname "$manifest")/src/lib.rs" ] || continue
     name=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
     # The release type minor fails only on a change that needs a new major version, which is a break.

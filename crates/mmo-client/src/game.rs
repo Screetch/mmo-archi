@@ -1,4 +1,4 @@
-//! The game of the player: the world that the zone writer shows, the prediction of the body of the
+//! The game of the player: the world that the layer writer shows, the prediction of the body of the
 //! player, and the camera.
 
 use glam::{Mat4, Vec3};
@@ -37,7 +37,7 @@ pub struct Wire {
 
 /// The game of one player. The window gives it the keys and the pointer, and calls
 /// [`Game::update`] and [`Game::scene`] for each frame. The game decides nothing: it predicts the
-/// body of its player and shows what the zone writer says.
+/// body of its player and shows what the layer writer says.
 pub struct Game {
   character: CharacterId,
   world: World,

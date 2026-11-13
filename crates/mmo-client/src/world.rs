@@ -1,4 +1,4 @@
-//! The entities that the snapshots of the zone writer give.
+//! The entities that the snapshots of the layer writer give.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -44,7 +44,7 @@ pub struct Seen {
   pub animation: u8,
 }
 
-/// The state of each entity that the player sees, as the last snapshots of the zone writer give
+/// The state of each entity that the player sees, as the last snapshots of the layer writer give
 /// it.
 #[derive(Debug, Default)]
 pub struct World {

@@ -19,7 +19,7 @@ use crate::settings::Settings;
 use crate::{Down, Failure, Play, enter};
 
 /// The time that the check waits for the world: the queue admits an account within 1 s, and the
-/// first snapshot comes within 50 ms of the join of the zone writer.
+/// first snapshot comes within 50 ms of the join of the layer writer.
 const LIMIT: Duration = Duration::from_secs(10);
 
 /// Runs the check as the environment that `read` gives configures it, and prints what it proved.

@@ -8,10 +8,10 @@
 //! - A client and the login service: [`ToLogin`] and [`FromLogin`], on a stream.
 //! - A client and a gateway: [`Attach`], [`FromClient`] and [`ToClient`] on stream 0, and
 //!   [`Intents`] and [`Snapshot`] in datagrams.
-//! - A gateway and a zone writer: [`ToZone`] and a [`Relayed`] [`ToClient`] on a stream, and the
+//! - A gateway and a layer writer: [`ToZone`] and a [`Relayed`] [`ToClient`] on a stream, and the
 //!   datagrams of each link, as [`relayed`] makes them.
-//! - Two zone writers: [`ToNeighbour`], on a stream.
-//! - A zone writer and the keeper: [`ToKeeper`] and [`FromKeeper`], on one stream that the writer
+//! - Two layer writers: [`ToNeighbour`], on a stream.
+//! - A layer writer and the keeper: [`ToKeeper`] and [`FromKeeper`], on one stream that the writer
 //!   opens.
 //!
 //! The state of the world goes on the wire in integers: [`Position`], [`Offset`], [`Velocity`]

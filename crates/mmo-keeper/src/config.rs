@@ -7,7 +7,7 @@ use sqlx::postgres::PgConnectOptions;
 
 /// What the keeper reads from its environment, as the doc of the crate says.
 pub(crate) struct Config {
-  /// The address of the links of the zone writers.
+  /// The address of the links of the layer writers.
   pub(crate) address: SocketAddr,
   /// The database of the game.
   pub(crate) database: PgConnectOptions,

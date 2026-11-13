@@ -6,10 +6,10 @@ use bitcode::{Decode, Encode};
 const CENTIMETRES: f64 = 100.0;
 const STEPS: f64 = 65536.0;
 
-/// The ticks that a zone writer runs each second.
+/// The ticks that a layer writer runs each second.
 pub const TICKS_PER_SECOND: u32 = 20;
 
-/// The number of a tick of a zone writer, which runs [`TICKS_PER_SECOND`] ticks each second.
+/// The number of a tick of a layer writer, which runs [`TICKS_PER_SECOND`] ticks each second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Tick(pub u32);
 
@@ -54,7 +54,7 @@ pub struct CharacterId(pub i64);
 
 /// The id of the connection of a client to a gateway.
 ///
-/// The gateway draws it at random from 64 bits when the connection opens. So a zone writer tells
+/// The gateway draws it at random from 64 bits when the connection opens. So a layer writer tells
 /// the links of two gateways apart with no list of gateways: two ids are equal only by a chance
 /// that the game ignores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
