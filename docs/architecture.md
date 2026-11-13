@@ -300,7 +300,7 @@ The map of a world is cut into zones. A zone is a square of 1024 m. It holds no 
 Each zone stands on one square of the map, which the table `zones` holds: its column grows toward the east, along x,
 and its row toward the north, along z. Each zone has its own coordinates, from 0 to 1024 m on x and on z. Two zones on
 next squares share a border, and each is the next zone of the other across it. A zone that stands on no square has no
-next zone, and a player stays at its edge.
+next zone.
 
 ### The shard
 
