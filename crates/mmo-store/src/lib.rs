@@ -11,7 +11,7 @@
 //! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
 //!   Redis, with its scripts.
 //! - The keeper: [`Store::add_zone`], [`Store::claim`], which gives a writer the next
-//!   [`Epoch`](mmo_protocol::Epoch) of its zone, and [`Store::save`], which writes the
+//!   [`Epoch`](mmo_protocol::Epoch) of its layer, and [`Store::save`], which writes the
 //!   [`Batch`](mmo_protocol::Batch) of a writer.
 
 mod accounts;
@@ -22,7 +22,7 @@ pub mod keys;
 pub mod testing;
 mod zones;
 
-use mmo_protocol::{Epoch, KeeperRefusal, ZoneId};
+use mmo_protocol::{Epoch, KeeperRefusal, Layer, ShardId, ZoneId};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
@@ -65,12 +65,22 @@ pub enum Error {
     /// The id that no zone has.
     zone: ZoneId,
   },
-  /// A newer writer claimed the zone after the writer that sent the batch.
-  #[error("zone {} is at epoch {}, and the batch is of epoch {}", zone.0, held.0, given.0)]
+  /// A newer writer claimed the layer after the writer that sent the batch, or no writer claimed
+  /// it, and then it holds the epoch 0.
+  #[error(
+    "layer {}:{} of shard {} is at epoch {}, and the batch is of epoch {}",
+    layer.zone.0,
+    layer.number,
+    shard.0,
+    held.0,
+    given.0
+  )]
   Epoch {
-    /// The zone of the batch.
-    zone: ZoneId,
-    /// The epoch of the last writer that claimed the zone.
+    /// The shard of the batch.
+    shard: ShardId,
+    /// The layer of the batch.
+    layer: Layer,
+    /// The epoch of the last writer that claimed the layer.
     held: Epoch,
     /// The epoch of the batch.
     given: Epoch,
@@ -145,7 +155,8 @@ fn taken(error: sqlx::Error, name: &str) -> Error {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    AccountId, Angle, Batch, CharacterId, Epoch, KeeperRefusal, Password, Position, State, ZoneId,
+    AccountId, Angle, Batch, CharacterId, Epoch, KeeperRefusal, Layer, Password, Position, ShardId,
+    State, ZoneId,
   };
   use sqlx::PgPool;
 
@@ -172,7 +183,8 @@ mod tests {
     let store = Store::migrate(pool.clone()).await?;
     pool.close().await;
     let state = State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 1 };
-    let batch = Batch { zone: ZoneId(1), epoch: Epoch(1), saves: Vec::new() };
+    let layer = Layer { zone: ZoneId(1), number: 1 };
+    let batch = Batch { shard: ShardId(1), layer, epoch: Epoch(1), saves: Vec::new() };
     let refusals = [
       Store::migrate(pool.clone()).await.err(),
       Store::open(pool).await.err(),
@@ -182,7 +194,7 @@ mod tests {
       store.characters(AccountId(1)).await.err(),
       store.load(&[CharacterId(1)]).await.err(),
       store.add_zone(ZoneId(1), "meadow").await.err(),
-      store.claim(ZoneId(1)).await.err(),
+      store.claim(ShardId(1), layer).await.err(),
       store.save(&batch).await.err(),
     ];
     let closed = "attempted to acquire a connection on a closed pool";
@@ -196,8 +208,9 @@ mod tests {
   }
 
   #[test]
-  fn the_keeper_refuses_a_lost_zone_and_an_old_epoch_as_such() {
-    let epoch = Error::Epoch { zone: ZoneId(1), held: Epoch(2), given: Epoch(1) };
+  fn the_keeper_refuses_a_lost_zone_and_an_old_epoch_of_a_layer_as_such() {
+    let layer = Layer { zone: ZoneId(1), number: 1 };
+    let epoch = Error::Epoch { shard: ShardId(1), layer, held: Epoch(2), given: Epoch(1) };
     let refusals = [Error::NoZone { zone: ZoneId(1) }, epoch].map(|error| error.refusal());
     assert_eq!(refusals, [KeeperRefusal::NoZone, KeeperRefusal::Stale { held: Epoch(2) }]);
   }

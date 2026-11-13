@@ -1,8 +1,8 @@
 use bitcode::{Decode, Encode};
 
 use crate::{
-  AccountId, Angle, CharacterId, Epoch, Link, Offset, Password, Position, TICKS_PER_SECOND, Tick,
-  Token, Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, ShardId,
+  TICKS_PER_SECOND, Tick, Token, Velocity, ZoneId,
 };
 
 /// A message of a client to the login service, on a stream.
@@ -355,8 +355,10 @@ pub struct Save {
 /// characters sends more batches.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Batch {
-  /// The zone of the writer.
-  pub zone: ZoneId,
+  /// The shard of the writer.
+  pub shard: ShardId,
+  /// The layer of the writer.
+  pub layer: Layer,
   /// The epoch that the writer claimed with [`ToKeeper::Claim`].
   pub epoch: Epoch,
   /// The saves.
@@ -372,11 +374,13 @@ pub const SAVES: usize = 1926;
 /// keeper answers each message with one [`FromKeeper`], in the order of the messages.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum ToKeeper {
-  /// Asks for the next epoch of a zone. The writer claims it before it writes the entry of the
-  /// zone in the directory.
+  /// Asks for the next epoch of a layer. The writer claims it before it renews the lease of the
+  /// layer in the directory with it.
   Claim {
-    /// The zone that the writer takes.
-    zone: ZoneId,
+    /// The shard of the layer.
+    shard: ShardId,
+    /// The layer that the writer takes.
+    layer: Layer,
   },
   /// Asks the keeper to write a batch in one transaction.
   Save(Batch),
@@ -385,9 +389,9 @@ pub enum ToKeeper {
 /// The answer of the keeper to a [`ToKeeper`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum FromKeeper {
-  /// The keeper wrote the next epoch of the zone, so it refuses each batch of the writers before.
+  /// The keeper wrote the next epoch of the layer, so it refuses each batch of the writers before.
   Claimed {
-    /// The epoch of the writer that claimed the zone.
+    /// The epoch of the writer that claimed the layer.
     epoch: Epoch,
   },
   /// The keeper wrote the batch. It wrote only the saves whose version is greater than the saved
@@ -405,9 +409,10 @@ pub enum FromKeeper {
 pub enum KeeperRefusal {
   /// The table `zones` holds no zone of this id.
   NoZone,
-  /// A newer writer claimed the zone, so the writer of the batch lost it.
+  /// A newer writer claimed the layer, so the writer of the batch lost it. A layer that no writer
+  /// claimed holds the epoch 0.
   Stale {
-    /// The epoch of the last writer that claimed the zone.
+    /// The epoch of the last writer that claimed the layer.
     held: Epoch,
   },
   /// The keeper cannot write in PostgreSQL now. The writer keeps its saves and sends them again.
@@ -426,8 +431,8 @@ mod tests {
     ToNeighbour, ToZone,
   };
   use crate::{
-    AccountId, Angle, CharacterId, Epoch, FRAME, Link, Offset, Password, Position, Tick, Token,
-    Velocity, ZoneId, datagram, decode, encode,
+    AccountId, Angle, CharacterId, Epoch, FRAME, Layer, Link, Offset, Password, Position, ShardId,
+    Tick, Token, Velocity, ZoneId, datagram, decode, encode,
   };
 
   const TOKEN: Token = Token([0xa5; 32]);
@@ -603,9 +608,19 @@ mod tests {
       Save { character: CharacterId(i64::MAX), state: STILL, version: 0 },
     ];
     round_trip(&[
-      ToKeeper::Claim { zone: ZoneId(7) },
-      ToKeeper::Save(Batch { zone: ZoneId(7), epoch: Epoch(3), saves }),
-      ToKeeper::Save(Batch { zone: ZoneId(-1), epoch: Epoch(0), saves: vec![] }),
+      ToKeeper::Claim { shard: ShardId(2), layer: Layer { zone: ZoneId(7), number: 3 } },
+      ToKeeper::Save(Batch {
+        shard: ShardId(2),
+        layer: Layer { zone: ZoneId(7), number: 3 },
+        epoch: Epoch(3),
+        saves,
+      }),
+      ToKeeper::Save(Batch {
+        shard: ShardId(u32::MAX),
+        layer: Layer { zone: ZoneId(-1), number: u32::MAX },
+        epoch: Epoch(0),
+        saves: vec![],
+      }),
     ]);
     round_trip(&[
       FromKeeper::Claimed { epoch: Epoch(4) },
@@ -626,8 +641,10 @@ mod tests {
     let ends = [far(i32::MIN, 0, i64::MIN), far(i32::MAX, u16::MAX, i64::MAX)];
     let bytes = |count: usize| {
       let saves = ends.into_iter().cycle().take(count).collect();
-      encode(&ToKeeper::Save(Batch { zone: ZoneId(i32::MIN), epoch: Epoch(i64::MAX), saves })).len()
+      let layer = Layer { zone: ZoneId(i32::MIN), number: u32::MAX };
+      let batch = Batch { shard: ShardId(u32::MAX), layer, epoch: Epoch(i64::MAX), saves };
+      encode(&ToKeeper::Save(batch)).len()
     };
-    assert_eq!([bytes(SAVES), bytes(SAVES + 1)], [FRAME - 26, FRAME + 8]);
+    assert_eq!([bytes(SAVES), bytes(SAVES + 1)], [FRAME - 16, FRAME + 18]);
   }
 }

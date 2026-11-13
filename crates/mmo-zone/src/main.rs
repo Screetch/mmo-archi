@@ -9,7 +9,8 @@
 //! it, as a delta against the last snapshot that its client acknowledged.
 //!
 //! The writer keeps its state as sections 2, 5 and 9 of `docs/architecture.md` say. When it
-//! starts it claims its zone from the keeper, which gives it the next epoch, and it writes its
+//! starts it claims the layer 1 of its zone in its shard from the keeper, which gives it the next
+//! epoch of that layer, and it writes its
 //! entry in the directory of zones in Redis. It stops when a newer epoch holds the zone, in the
 //! directory or in a refusal of the keeper. Each second it renews its entry, and adds the time of
 //! each tick that it ran to the hash that `mmo_store::keys::ticks` names, for the load test.
@@ -18,6 +19,7 @@
 //! does not take a batch, the zone keeps the last state of each of those players, and sends it
 //! again at the next save. It reads these variables of its environment:
 //!
+//! - `ZONE_SHARD`: the id of the shard of the writer, as `1`.
 //! - `ZONE_ID`: the id of the zone in the table `zones`, as `1`.
 //! - `ZONE_ADDRESS`: the address and the UDP port of the links, as `0.0.0.0:4434`.
 //! - `ZONE_PUBLIC`: the address that the gateways dial, as `zone-1.internal:4434`.
@@ -49,11 +51,12 @@ mod zone;
 use std::process::ExitCode;
 use std::{env, io};
 
+use mmo_protocol::Layer;
 use mmo_store::Store;
 use quinn::Endpoint;
 use sqlx::postgres::PgPoolOptions;
 
-use crate::claim::Claim;
+use crate::claim::{Claim, Held};
 use crate::config::Config;
 use crate::keeper::Keeper;
 use crate::link::Claimed;
@@ -103,8 +106,10 @@ async fn open(var: impl Fn(&str) -> Option<String>) -> Result<(Endpoint, Claimed
   let endpoint = Endpoint::server(config.server, config.address)?;
   let ipv4 = config.address.is_ipv4();
   let mut keeper = Keeper::new(endpoint.clone(), config.client, config.keeper, ipv4);
-  let epoch = keeper.claim(config.zone).await?;
-  let claim = Claim::open(&config.redis, config.zone, epoch, config.public).await?;
+  let layer = Layer { zone: config.zone, number: 1 };
+  let epoch = keeper.claim(config.shard, layer).await?;
+  let held = Held { shard: config.shard, layer, epoch };
+  let claim = Claim::open(&config.redis, held, config.public).await?;
   Ok((endpoint, Claimed { zone: Zone::new(config.zone), store, claim, keeper }))
 }
 
@@ -236,14 +241,16 @@ mod tests {
     let say = FromClient::Say { channel: "world".to_owned(), text: "hi".to_owned() };
     peer.tell(&ToZone::Client(Relayed { link: Link(2), message: say })).await;
     let mut lock = pool.begin().await?;
-    sqlx::query("SELECT epoch FROM zones WHERE id = 1 FOR UPDATE").execute(&mut *lock).await?;
+    let layer =
+      "SELECT epoch FROM layers WHERE shard_id = 1 AND zone_id = 1 AND number = 1 FOR UPDATE";
+    sqlx::query(layer).execute(&mut *lock).await?;
     peer.tell(&ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout })).await;
     peer.tell(&ToZone::Leave { link: Link(2) }).await;
     peer.tell(&ToZone::Join { link: Link(5), account, character: cael }).await;
     let back = time::timeout(WALK, peer.snapshot(Link(5))).await.expect("Cael comes back");
     assert_eq!(back.entered, [at(cael, 48_000, 0)]);
     let mut kept = store.load(&[brom]).await?[0];
-    assert_eq!(kept.version, 0, "the save of Brom waits for the lock on its zone");
+    assert_eq!(kept.version, 0, "the save of Brom waits for the lock on its layer");
     lock.commit().await?;
     let saved = time::timeout(WALK, async {
       while kept.version == 0 {
@@ -296,7 +303,7 @@ mod tests {
       ]
     );
     let unset = write(var(Vec::new())).await.to_string();
-    assert_eq!(unset, "the variable ZONE_ID is not set");
+    assert_eq!(unset, "the variable ZONE_SHARD is not set");
     Ok(())
   }
 }

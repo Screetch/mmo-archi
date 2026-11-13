@@ -1,5 +1,5 @@
 //! The keeper of mmo-archi: the one process that writes the characters, the items and the epoch
-//! of each zone in PostgreSQL.
+//! of each layer in PostgreSQL.
 //!
 //! When it starts, it runs the migrations of `mmo-store` under the lock of sqlx. Then it takes the
 //! links of the zone writers on QUIC, and answers each [`ToKeeper`](mmo_protocol::ToKeeper) with
@@ -75,8 +75,8 @@ mod tests {
   use std::net::UdpSocket;
 
   use mmo_protocol::{
-    Angle, Batch, Epoch, FromKeeper, KeeperRefusal, Password, Position, Save, State, ToKeeper,
-    ZoneId,
+    Angle, Batch, Epoch, FromKeeper, KeeperRefusal, Layer, Password, Position, Save, ShardId,
+    State, ToKeeper, ZoneId,
   };
   use mmo_store::{Saved, Store};
   use sqlx::ConnectOptions;
@@ -95,7 +95,7 @@ mod tests {
     State { position: Position { x: 102_400, y: 250, z: -3 }, yaw: Angle(16384), hit_points: 7 };
 
   #[sqlx::test(migrations = false)]
-  async fn a_writer_claims_its_zone_and_the_keeper_writes_each_newer_save(
+  async fn a_writer_claims_its_layer_and_the_keeper_writes_each_newer_save(
     _: PgPoolOptions,
     connect: PgConnectOptions,
   ) -> Result<(), mmo_store::Error> {
@@ -116,9 +116,11 @@ mod tests {
     let brom = store.create_character(account, "Brom", ZoneId(1), START).await?;
     let save = |epoch| {
       let saves = vec![Save { character: brom, state: MOVED, version: 1 }];
-      ToKeeper::Save(Batch { zone: ZoneId(1), epoch: Epoch(epoch), saves })
+      let layer = Layer { zone: ZoneId(1), number: 1 };
+      ToKeeper::Save(Batch { shard: ShardId(1), layer, epoch: Epoch(epoch), saves })
     };
-    let claim = |zone| ToKeeper::Claim { zone: ZoneId(zone) };
+    let claim =
+      |zone| ToKeeper::Claim { shard: ShardId(1), layer: Layer { zone: ZoneId(zone), number: 1 } };
     let mut answers = Vec::new();
     for message in [claim(1), save(1), save(1), claim(1), save(1), claim(9)] {
       answers.push(writer.ask(&message).await);

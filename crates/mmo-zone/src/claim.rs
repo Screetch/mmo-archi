@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Save, ZoneId};
+use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, Save, ShardId, ZoneId};
 use mmo_store::keys;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Script};
@@ -46,35 +46,39 @@ pub(crate) enum Entry {
   Absent(Vec<AccountId>),
 }
 
-/// The zone of a writer, the epoch that the keeper gave it, and its connection to Redis.
+/// The layer that a writer holds, in its shard, with the epoch that the keeper gave it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+  pub(crate) shard: ShardId,
+  pub(crate) layer: Layer,
+  pub(crate) epoch: Epoch,
+}
+
+/// The layer of a writer, and its connection to Redis.
 #[derive(Clone)]
 pub(crate) struct Claim {
   redis: ConnectionManager,
   zone: ZoneId,
-  epoch: Epoch,
+  held: Held,
   address: String,
 }
 
 impl Claim {
-  /// Writes the entry of `zone` in the directory with `epoch` and the `address` that the gateways
-  /// dial, and names the zone on the channel of the directory. It fails when the entry holds a
-  /// newer epoch, since a writer of that epoch has the zone.
-  pub(crate) async fn open(
-    url: &str,
-    zone: ZoneId,
-    epoch: Epoch,
-    address: String,
-  ) -> Result<Self, Error> {
+  /// Writes the entry of the zone of the layer that the writer `held` in the directory, with its
+  /// epoch and the `address` that the gateways dial, and names the zone on the channel of the
+  /// directory. It fails when the entry holds a newer epoch, since a writer of that epoch has the
+  /// zone.
+  pub(crate) async fn open(url: &str, held: Held, address: String) -> Result<Self, Error> {
     let redis = ConnectionManager::new(redis::Client::open(url)?).await?;
-    let claim = Self { redis, zone, epoch, address };
+    let claim = Self { redis, zone: held.layer.zone, held, address };
     claim.write(Entry::Zone { players: 0 }).await?;
-    claim.redis.clone().publish::<_, _, ()>(keys::DIRECTORY, zone.0).await?;
+    claim.redis.clone().publish::<_, _, ()>(keys::DIRECTORY, claim.zone.0).await?;
     Ok(claim)
   }
 
-  /// The batch of `saves` for the keeper, with the epoch of this writer.
+  /// The batch of `saves` for the keeper, with the layer and the epoch of this writer.
   pub(crate) fn batch(&self, saves: Vec<Save>) -> Batch {
-    Batch { zone: self.zone, epoch: self.epoch, saves }
+    Batch { shard: self.held.shard, layer: self.held.layer, epoch: self.held.epoch, saves }
   }
 
   pub(crate) async fn write(&self, entry: Entry) -> Result<(), Error> {
@@ -85,7 +89,7 @@ impl Claim {
           .key(keys::zone(self.zone))
           .arg(ENTRY_LIFE_MS)
           .arg(keys::EPOCH)
-          .arg(self.epoch.0)
+          .arg(self.held.epoch.0)
           .arg(keys::ADDRESS)
           .arg(&self.address)
           .arg(keys::PLAYERS)
@@ -94,7 +98,7 @@ impl Claim {
           .await?;
         match held {
           0 => Ok(()),
-          held => Err(Error::Superseded { zone: self.zone, held, own: self.epoch }),
+          held => Err(Error::Superseded { zone: self.zone, held, own: self.held.epoch }),
         }
       }
       Entry::Ticks(counts) if counts.is_empty() => Ok(()),
@@ -116,7 +120,7 @@ impl Claim {
           let fields = [
             (keys::CHARACTER, character.0),
             (keys::ZONE, i64::from(self.zone.0)),
-            (keys::EPOCH, self.epoch.0),
+            (keys::EPOCH, self.held.epoch.0),
           ];
           batch.hset_multiple(&key, &fields).ignore().expire(&key, PRESENCE_LIFE_S).ignore();
         }
@@ -135,19 +139,22 @@ mod tests {
   use std::collections::BTreeMap;
 
   use futures_util::StreamExt;
-  use mmo_protocol::Batch;
-  use mmo_protocol::{AccountId, CharacterId, Epoch, ZoneId};
+  use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, ShardId, ZoneId};
   use mmo_store::keys;
   use mmo_store::testing::Redis;
   use sqlx::PgPool;
 
-  use super::{Claim, Entry, Error};
+  use super::{Claim, Entry, Error, Held};
   use crate::peer::{hash, life};
 
-  const MEADOW: ZoneId = ZoneId(1);
+  const MEADOW: Layer = Layer { zone: ZoneId(1), number: 1 };
+
+  const fn held(epoch: i64) -> Held {
+    Held { shard: ShardId(1), layer: MEADOW, epoch: Epoch(epoch) }
+  }
 
   async fn claim(redis: &Redis, epoch: i64) -> Result<Claim, Error> {
-    Claim::open(&redis.url(), MEADOW, Epoch(epoch), "zone-1:4433".to_owned()).await
+    Claim::open(&redis.url(), held(epoch), "zone-1:4433".to_owned()).await
   }
 
   fn fields<const N: usize>(fields: [(&str, &str); N]) -> BTreeMap<String, String> {
@@ -175,7 +182,7 @@ mod tests {
     claim.write(Entry::Zone { players: 3 }).await.expect("the entry again");
     assert_eq!(hash(&redis, "zone:1").await, entry("3"));
     assert!((1..=3000).contains(&life(&redis, "zone:1").await));
-    let batch = Batch { zone: MEADOW, epoch: Epoch(1), saves: Vec::new() };
+    let batch = Batch { shard: ShardId(1), layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
     assert_eq!(claim.batch(Vec::new()), batch);
   }
 
@@ -190,7 +197,7 @@ mod tests {
     );
     assert_eq!(hash(&redis, "zone:1").await["epoch"], "9");
     newer.write(Entry::Zone { players: 1 }).await.expect("the newest epoch writes");
-    let bad = Claim::open("nope", MEADOW, Epoch(1), String::new()).await.err();
+    let bad = Claim::open("nope", held(1), String::new()).await.err();
     assert!(matches!(bad, Some(Error::Redis(_))), "{bad:?}");
   }
 
@@ -242,7 +249,7 @@ mod tests {
   #[sqlx::test(migrations = false)]
   async fn a_writer_names_each_command_that_redis_refuses(_: PgPool) {
     let redis = Redis::start().await;
-    let open = async |url: &str| Claim::open(url, MEADOW, Epoch(1), String::new()).await;
+    let open = async |url: &str| Claim::open(url, held(1), String::new()).await;
     let stranger = format!("redis://nobody:any@127.0.0.1:{}", redis.port());
     let mut faults = vec![open(&stranger).await.err()];
     for (name, rules) in [("noscript", "-@scripting"), ("nopublish", "-publish")] {

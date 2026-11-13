@@ -194,7 +194,7 @@ start() {
   launch login env MMO_LOGIN_ADDRESS="127.0.0.1:$login_port" MMO_LOGIN_CERTIFICATE="$tls/leaf.pem" \
     MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_WORLD=1 MMO_WORLD_CAP="$world_cap" \
     MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 "$bin/mmo-login"
-  launch zone env ZONE_ID=1 ZONE_ADDRESS="127.0.0.1:$zone_port" ZONE_PUBLIC="localhost:$zone_port" \
+  launch zone env ZONE_SHARD=1 ZONE_ID=1 ZONE_ADDRESS="127.0.0.1:$zone_port" ZONE_PUBLIC="localhost:$zone_port" \
     DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
     ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
   wait_for "the zone writer to list its zone" 40 zone_listed
