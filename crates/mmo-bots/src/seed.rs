@@ -4,6 +4,7 @@
 
 use futures_util::future::try_join_all;
 use mmo_client::Account;
+use mmo_collide::SIDE_CM;
 use mmo_protocol::{Angle, CharacterId, Password, Position, ShardId, State};
 use mmo_store::{NewCharacter, Store};
 
@@ -28,6 +29,8 @@ pub(crate) struct Bot {
   pub(crate) login: String,
   pub(crate) account: Account,
   pub(crate) character: CharacterId,
+  /// True when the bot starts near the east border of the zone and walks east, to cross it.
+  pub(crate) crosser: bool,
 }
 
 /// The `width` letters, from a to z, of the number `n`, the least digit first.
@@ -41,14 +44,23 @@ pub(crate) fn letters(mut n: u64, width: usize) -> String {
     .collect()
 }
 
-/// Where the bot `index` starts: the first `town` bots stand in one square of 128 m, and the others
-/// anywhere in the zone, in centimetres on the floor.
+/// The last `crossers` bots cross the east border of the zone.
+fn crosser(config: &Config, index: u32) -> bool {
+  index >= config.bots.saturating_sub(config.crossers)
+}
+
+/// Where the bot `index` starts: a crosser within 30 m of the east border, the first `town` bots in
+/// one square of 128 m, and the others anywhere in the zone, in centimetres on the floor.
 fn start(config: &Config, index: u32) -> State {
   let mut rng = Rng::new(config.seed ^ u64::from(index));
-  let (origin, span) = if index < config.town { (10_000, 12_800) } else { (1_000, 100_400) };
-  let mut coordinate = || origin + i32::try_from(rng.below(span)).unwrap_or_default();
-  let position = Position { x: coordinate(), y: 0, z: coordinate() };
-  State { position, yaw: Angle(0), hit_points: HIT_POINTS }
+  let mut at = |origin: i32, span: u32| origin + i32::try_from(rng.below(span)).unwrap_or_default();
+  let (x, z) = if crosser(config, index) {
+    (at(SIDE_CM - 3_000, 2_900), at(1_000, 100_400))
+  } else {
+    let (origin, span) = if index < config.town { (10_000, 12_800) } else { (1_000, 100_400) };
+    (at(origin, span), at(origin, span))
+  };
+  State { position: Position { x, y: 0, z }, yaw: Angle(0), hit_points: HIT_POINTS }
 }
 
 /// Makes the account and the character of the bot `index` in the store.
@@ -64,7 +76,14 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
   let saved = store.create_character(&new).await?;
   let password = Password(PASSWORD.to_owned());
   let account = Account { name, password, character, create: false };
-  Ok(Bot { index, shard, login: login.to_owned(), account, character: saved })
+  Ok(Bot {
+    index,
+    shard,
+    login: login.to_owned(),
+    account,
+    character: saved,
+    crosser: crosser(config, index),
+  })
 }
 
 /// Makes the account and the character of each bot, `SEEDERS` at once.
@@ -81,6 +100,7 @@ pub(crate) async fn seed(store: &Store, config: &Config) -> Result<Vec<Bot>, Fai
 mod tests {
   use std::time::Duration;
 
+  use mmo_collide::SIDE_CM;
   use mmo_protocol::{Password, Position, ShardId, ZoneId};
   use mmo_store::Store;
   use sqlx::PgPool;
@@ -98,6 +118,7 @@ mod tests {
       zone: ZoneId(3),
       bots,
       waiting: 0,
+      crossers: 0,
       town,
       ramp: 1,
       join: Duration::ZERO,
@@ -114,7 +135,7 @@ mod tests {
   ) {
     let store = Store::migrate(pool).await.expect("a migrated database");
     store.add_zone(ZoneId(3), "meadow").await.expect("a zone");
-    let bots = seed(&store, &config(10, 4)).await.expect("ten bots");
+    let bots = seed(&store, &Config { crossers: 3, ..config(10, 4) }).await.expect("ten bots");
     let names: Vec<_> = bots.iter().map(|bot| (bot.index, bot.account.name.as_str())).collect();
     assert_eq!(names.first(), Some(&(0, "botabc0")));
     assert_eq!(names.last(), Some(&(9, "botabc9")));
@@ -143,7 +164,13 @@ mod tests {
       let (x, _, z) = at(index);
       (1_000..101_400).contains(&x) && (1_000..101_400).contains(&z)
     };
-    assert!((0..4).all(town) && (4..10).all(spread));
+    let border = |index: usize| {
+      let (x, _, z) = at(index);
+      (SIDE_CM - 3_000..SIDE_CM - 100).contains(&x) && (1_000..101_400).contains(&z)
+    };
+    assert!((0..4).all(town) && (4..7).all(spread) && (7..10).all(border));
+    let crossers: Vec<u32> = bots.iter().filter(|bot| bot.crosser).map(|bot| bot.index).collect();
+    assert_eq!(crossers, [7, 8, 9]);
     assert!(saved.iter().all(|one| one.zone == ZoneId(3) && one.state.hit_points == 100));
     let again = seed(&store, &config(1, 0)).await.err().map(|error| error.to_string());
     assert_eq!(again.as_deref(), Some("the store refuses the bots: the name botabc0 is taken"));
