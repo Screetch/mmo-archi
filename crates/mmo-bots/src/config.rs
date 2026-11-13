@@ -25,6 +25,9 @@ pub(crate) struct Config {
   pub(crate) seed: u64,
 }
 
+/// The most bots that one test may run, and the bound of `MMO_BOTS_COUNT`.
+pub(crate) const MAX_BOTS: u32 = 500;
+
 /// A variable of the environment that the load test cannot use.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,6 +35,8 @@ pub enum Error {
   Unset(&'static str),
   #[error("the variable {name} is not a number: {source}")]
   Number { name: &'static str, source: ParseIntError },
+  #[error("the variable MMO_BOTS_COUNT holds {0} bots, over the bound of {max}", max = MAX_BOTS)]
+  Count(u32),
   #[error("MMO_BOTS_RUN holds 1 to 6 letters from a to z, and {0:?} does not")]
   Run(String),
 }
@@ -64,6 +69,10 @@ impl Config {
     if !(1..=6).contains(&run.len()) || !run.bytes().all(|byte| byte.is_ascii_lowercase()) {
       return Err(Error::Run(run));
     }
+    let bots = number(var, "MMO_BOTS_COUNT", None)?;
+    if bots > MAX_BOTS {
+      return Err(Error::Count(bots));
+    }
     Ok(Self {
       authority: text(var, "MMO_BOTS_AUTHORITY")?.into(),
       login: text(var, "MMO_BOTS_LOGIN")?,
@@ -71,7 +80,7 @@ impl Config {
       database: text(var, "DATABASE_URL")?,
       redis: text(var, "REDIS_URL")?,
       zone: ZoneId(number(var, "MMO_BOTS_ZONE", None)?),
-      bots: number(var, "MMO_BOTS_COUNT", None)?,
+      bots,
       town: number(var, "MMO_BOTS_TOWN", Some(0))?,
       ramp: number(var, "MMO_BOTS_RAMP", Some(50))?,
       join: seconds("MMO_BOTS_JOIN_SECONDS", 60)?,
@@ -131,6 +140,12 @@ mod tests {
   }
 
   #[test]
+  fn the_load_test_takes_the_most_bots_that_a_test_may_run() {
+    let config = read(&[("MMO_BOTS_COUNT", "500")], "").expect("a config");
+    assert_eq!(config.bots, 500);
+  }
+
+  #[test]
   fn the_load_test_names_the_variable_that_it_cannot_use() {
     let unset: Vec<_> =
       REQUIRED.iter().map(|(name, _)| read(&[], name).err().expect("a refusal")).collect();
@@ -155,6 +170,11 @@ mod tests {
         Some(format!("the variable {name} is not a number: invalid digit found in string"))
       );
     }
+    let over = read(&[("MMO_BOTS_COUNT", "501")], "").err();
+    assert_eq!(
+      over.as_deref(),
+      Some("the variable MMO_BOTS_COUNT holds 501 bots, over the bound of 500")
+    );
     for run in ["", "Abc", "abcdefg", "a1"] {
       let bad = read(&[("MMO_BOTS_RUN", run)], "").err().expect("a refusal");
       assert_eq!(

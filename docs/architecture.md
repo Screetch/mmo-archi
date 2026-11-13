@@ -739,7 +739,7 @@ document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for 
 `MMO_LOCAL_LAYER_CAP` for the cap of a layer, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
 `MMO_BOTS_TOWN` for the bots that start in one square of 128 m. The stack runs the pool of writers of section 6 for
 each shard. A layer writer keeps the player of a closed link for 30 s, so wait 35 s between two runs. Run no stage
-with more than 500 bots.
+with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
 
 The workflow `load` (`.github/workflows/load.yml`) runs the stages 2 and 3 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the

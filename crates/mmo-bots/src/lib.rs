@@ -20,7 +20,7 @@
 //!   name that its certificate must hold.
 //! - `DATABASE_URL` and `REDIS_URL`: the database and the Redis of the game.
 //! - `MMO_BOTS_ZONE` and `MMO_BOTS_COUNT`: the zone where the characters stand, which the table
-//!   `zones` holds, and the count of bots.
+//!   `zones` holds, and the count of bots, which is at most 500, since no test runs more.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.
