@@ -4,12 +4,12 @@
 
 use futures_util::future::try_join_all;
 use mmo_client::Account;
-use mmo_protocol::{Angle, CharacterId, Password, Position, State};
+use mmo_protocol::{Angle, CharacterId, Password, Position, ShardId, State};
 use mmo_store::{NewCharacter, Store};
 
+use crate::Failure;
 use crate::config::Config;
 use crate::rng::Rng;
-use crate::{Failure, SHARD};
 
 /// The accounts that the bots make at once: each one hashes a password, which takes 19 MiB.
 pub(crate) const SEEDERS: u32 = 8;
@@ -58,10 +58,11 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
     (format!("bot{run}{index}"), format!("B{run}{}", letters(index.into(), 4)));
   let id = store.create_account(&name, Password(PASSWORD.to_owned())).await?;
   let state = start(config, index);
-  let new = NewCharacter { account: id, shard: SHARD, name: &character, zone: config.zone, state };
+  let (shard, login) = config.shard(index);
+  let new =
+    NewCharacter { account: id, shard: ShardId(shard), name: &character, zone: config.zone, state };
   let saved = store.create_character(&new).await?;
   let password = Password(PASSWORD.to_owned());
-  let (shard, login) = config.shard(index);
   let account = Account { name, password, character, create: false };
   Ok(Bot { index, shard, login: login.to_owned(), account, character: saved })
 }
@@ -80,7 +81,7 @@ pub(crate) async fn seed(store: &Store, config: &Config) -> Result<Vec<Bot>, Fai
 mod tests {
   use std::time::Duration;
 
-  use mmo_protocol::{Position, ZoneId};
+  use mmo_protocol::{Password, Position, ShardId, ZoneId};
   use mmo_store::Store;
   use sqlx::PgPool;
 
@@ -118,6 +119,13 @@ mod tests {
     assert_eq!(bots[1].account.character, "Babcbaaa");
     let shards: Vec<_> = bots.iter().take(3).map(|bot| (bot.shard, bot.login.as_str())).collect();
     assert_eq!(shards, [(1, "a:1"), (2, "b:2"), (1, "a:1")]);
+    for bot in bots.iter().take(3) {
+      let password = Password("a password of the bots".to_owned());
+      let account = store.sign_in(&bot.account.name, password).await.expect("a sign in");
+      let account = account.expect("an account");
+      let listed = store.characters(account, ShardId(bot.shard)).await.expect("the characters");
+      assert_eq!(listed.iter().map(|one| one.id).collect::<Vec<_>>(), [bot.character]);
+    }
     let ids: Vec<_> = bots.iter().map(|bot| bot.character).collect();
     let saved = store.load(&ids).await.expect("the characters");
     let at = |index: usize| {
