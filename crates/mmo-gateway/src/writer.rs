@@ -1,11 +1,11 @@
-//! The link of the gateway to one zone writer, which the clients of that zone share.
+//! The link of the gateway to one layer writer, which the clients of that layer share.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  AccountId, CharacterId, DATAGRAM, FromClient, Link, Relayed, ToClient, ToZone, ZoneId, decode,
-  encode, frame, unrelayed,
+  AccountId, CharacterId, DATAGRAM, FromClient, Layer, Link, Relayed, ShardId, ToClient, ToZone,
+  decode, encode, frame, unrelayed,
 };
 use quinn::{Connection, SendStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::gateway::Gateway;
 use crate::link::{FAULT, Fault, Stream, framed, greet};
 
-/// The entry of a zone in the directory: the address of its writer, as `host:port`, and the epoch
+/// The lease of a layer in the directory: the address of its writer, as `host:port`, and the epoch
 /// of its claim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
@@ -21,10 +21,11 @@ pub(crate) struct Entry {
   pub(crate) epoch: i64,
 }
 
-/// The link to the writer of one zone. Each clone sends on the same link.
+/// The link to the writer of one layer. Each clone sends on the same link.
 #[derive(Clone)]
 pub(crate) struct Writer {
-  pub(crate) zone: ZoneId,
+  pub(crate) shard: ShardId,
+  pub(crate) layer: Layer,
   entry: Entry,
   connection: Connection,
   orders: UnboundedSender<Order>,
@@ -59,12 +60,12 @@ impl Writer {
     self.connection.stable_id()
   }
 
-  /// Ends the link, since the directory names another writer of the zone, or none.
+  /// Ends the link, since the directory names another writer of the layer, or none.
   pub(crate) fn end(&self) {
-    self.connection.close(FAULT, b"the directory names another writer of the zone");
+    self.connection.close(FAULT, b"the directory names another writer of the layer");
   }
 
-  /// Joins the character of a session to the zone on `link`, and relays the messages of the
+  /// Joins the character of a session to the layer on `link`, and relays the messages of the
   /// writer for that link to `to`.
   pub(crate) fn join(&self, link: Link, (account, character): (AccountId, CharacterId), to: Route) {
     self.order(Order::Route { link, to });
@@ -72,12 +73,13 @@ impl Writer {
   }
 
   /// Relays the messages of the writer for `link` to `to`, after a move of its player into this
-  /// zone.
+  /// layer.
   pub(crate) fn follow(&self, link: Link, to: Route) {
     self.order(Order::Route { link, to });
   }
 
-  /// Relays no more message of the writer for `link`, after a move of its player out of the zone.
+  /// Relays no more message of the writer for `link`, after a move of its player out of the
+  /// layer.
   pub(crate) fn forsake(&self, link: Link) {
     self.order(Order::Unroute(link));
   }
@@ -103,7 +105,7 @@ impl Writer {
 
   /// Ends when the link ends, with why.
   pub(crate) async fn lost(&self) -> Fault {
-    Fault::Lost { zone: self.zone, why: self.connection.closed().await }
+    Fault::Lost { layer: self.layer, why: self.connection.closed().await }
   }
 
   fn order(&self, order: Order) {
@@ -113,11 +115,11 @@ impl Writer {
   }
 }
 
-/// Greets the writer of `zone` on `connection`, and relays the link in a task of its own until a
-/// fault ends it.
+/// Greets the writer of a layer of a shard on `connection`, and relays the link in a task of its
+/// own until a fault ends it.
 pub(crate) async fn open(
   gateway: Arc<Gateway>,
-  zone: ZoneId,
+  (shard, layer): (ShardId, Layer),
   entry: Entry,
   connection: Connection,
 ) -> Result<Writer, Fault> {
@@ -125,8 +127,8 @@ pub(crate) async fn open(
   let (orders, heard) = unbounded_channel();
   let relay =
     Relay { connection: connection.clone(), send, stream, orders: heard, routes: BTreeMap::new() };
-  tokio::spawn(relay.run(gateway, zone));
-  Ok(Writer { zone, entry, connection, orders })
+  tokio::spawn(relay.run(gateway, shard, layer));
+  Ok(Writer { shard, layer, entry, connection, orders })
 }
 
 /// The task of a link: it writes the orders of the clients, and relays each message of the writer
@@ -140,14 +142,14 @@ struct Relay {
 }
 
 impl Relay {
-  async fn run(mut self, gateway: Arc<Gateway>, zone: ZoneId) {
+  async fn run(mut self, gateway: Arc<Gateway>, shard: ShardId, layer: Layer) {
     let fault = self.relay().await;
-    eprintln!("the link to the writer of zone {} ends: {fault}", zone.0);
+    eprintln!("the link to the writer of layer {}:{} ends: {fault}", layer.zone.0, layer.number);
     // A close after the close of the writer would hide why the writer closed from the clients.
     if self.connection.close_reason().is_none() {
       self.connection.close(FAULT, fault.to_string().as_bytes());
     }
-    gateway.forget(zone, self.connection.stable_id()).await;
+    gateway.forget(shard, layer, self.connection.stable_id()).await;
   }
 
   async fn relay(&mut self) -> Fault {

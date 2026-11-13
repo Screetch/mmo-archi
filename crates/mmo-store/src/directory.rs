@@ -24,6 +24,10 @@ pub const LEASE: Duration = Duration::from_millis(LEASE_MS);
 /// The most members of a party.
 pub const PARTY: u32 = 5;
 
+/// The life of a place that [`Directory::place`] gives in milliseconds, the time that a client
+/// has to reach a gateway with its session.
+const PLACE_MS: u64 = 60_000;
+
 static PLACE: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/place.lua")));
 static CLAIM: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/claim.lua")));
 static RENEW: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("directory/lease.lua")));
@@ -34,6 +38,21 @@ static GROUP: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("dire
 /// The id of a party in its shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PartyId(pub u64);
+
+/// What the writer of a layer writes with [`Directory::lease`] each second and at each change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lease<'a> {
+  /// The layer of the writer.
+  pub layer: Layer,
+  /// The epoch that the keeper gave the writer.
+  pub epoch: Epoch,
+  /// The address that the gateways dial.
+  pub address: &'a str,
+  /// The count of the players of the layer.
+  pub players: u32,
+  /// The accounts whose players the writer took since its last lease. Their places end.
+  pub taken: &'a [AccountId],
+}
 
 /// The answer of [`Directory::place`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,8 +82,11 @@ impl Directory {
   /// the player crosses from another zone, else the open layer with the most players that has
   /// room for the members of its party, and of these the lowest number.
   ///
-  /// When no layer has room, the player waits, and the directory opens the least free number of
-  /// the zone for a writer to claim, unless a layer of the zone waits for a writer already.
+  /// The layer holds the place of the player for 60 s, or until its writer takes the player and
+  /// names it in [`Lease::taken`], so placements that come faster than the writer writes its count
+  /// never pass the cap. When no layer has room, the player waits, and the directory opens the
+  /// least free number of the zone for a writer to claim, unless a layer of the zone waits for a
+  /// writer already.
   /// `leaving` is the layer that the player leaves: in another zone when it crosses, and in its
   /// zone when it moves out of a layer that drains.
   pub async fn place(
@@ -86,6 +108,8 @@ impl Directory {
       .arg(keys::PRESENCE)
       .arg(keys::parties(self.shard))
       .arg(keys::DIRECTORY)
+      .arg(keys::places(self.shard))
+      .arg(PLACE_MS)
       .arg(leaving.map(|layer| (layer.zone.0, layer.number)))
       .invoke_async(redis)
       .await?;
@@ -115,25 +139,23 @@ impl Directory {
     Ok(found.map(|(zone, number)| Layer { zone: ZoneId(zone), number }))
   }
 
-  /// Renews the lease of the writer of `layer`, with its `epoch` and the `address` that the
-  /// gateways dial, and writes the count of its `players`. It gives the epoch of the lease and
-  /// writes nothing when a writer of a newer epoch holds it.
+  /// Renews the lease of the writer of a layer and writes its count of players, as `lease` says.
+  /// It gives the epoch of the lease and writes nothing when a writer of a newer epoch holds it.
   pub async fn lease(
     self,
     redis: &mut impl ConnectionLike,
-    layer: Layer,
-    epoch: Epoch,
-    address: &str,
-    players: u32,
+    lease: &Lease<'_>,
   ) -> Result<Option<Epoch>, RedisError> {
     let held: i64 = RENEW
-      .key(keys::writer(self.shard, layer))
+      .key(keys::writer(self.shard, lease.layer))
       .key(keys::layers(self.shard))
+      .key(keys::placed(self.shard, lease.layer))
       .arg(LEASE_MS)
-      .arg(epoch.0)
-      .arg(address)
-      .arg(keys::field(layer))
-      .arg(players)
+      .arg(lease.epoch.0)
+      .arg(lease.address)
+      .arg(keys::field(lease.layer))
+      .arg(lease.players)
+      .arg(lease.taken.iter().map(|account| account.0).collect::<Vec<i64>>())
       .invoke_async(redis)
       .await?;
     Ok((held != 0).then_some(Epoch(held)))
@@ -159,8 +181,9 @@ impl Directory {
       .await
   }
 
-  /// Removes `layer` and its lease when it holds no player and the lease holds `epoch`, the epoch
-  /// of its writer, and gives whether it did. The number of the layer is then free again.
+  /// Removes `layer` and its lease when it holds no player and no place, and the lease holds
+  /// `epoch`, the epoch of its writer, and gives whether it did. The number of the layer is then
+  /// free again.
   pub async fn close(
     self,
     redis: &mut impl ConnectionLike,
@@ -171,6 +194,7 @@ impl Directory {
       .key(keys::layers(self.shard))
       .key(keys::draining(self.shard))
       .key(keys::writer(self.shard, layer))
+      .key(keys::placed(self.shard, layer))
       .arg(keys::field(layer))
       .arg(epoch.0)
       .arg(keys::DIRECTORY)
@@ -229,7 +253,7 @@ mod tests {
   use redis::AsyncCommands;
   use redis::aio::MultiplexedConnection;
 
-  use super::{Directory, PartyId, Placed};
+  use super::{Directory, Lease, PartyId, Placed};
   use crate::keys;
   use crate::testing::Redis;
 
@@ -264,9 +288,12 @@ mod tests {
     layer
   }
 
+  /// Renews the lease of `layer` with a count of `players`, as its writer does once it took each
+  /// player of a place.
   async fn count(db: &mut MultiplexedConnection, layer: Layer, epoch: i64, players: u32) {
-    let held = SHARD.lease(db, layer, Epoch(epoch), "w", players).await.expect("a lease");
-    assert_eq!(held, None);
+    let lease = Lease { layer, epoch: Epoch(epoch), address: "w", players, taken: &[] };
+    assert_eq!(SHARD.lease(db, &lease).await.expect("a lease"), None);
+    let () = db.del(keys::placed(SHARD.shard, layer)).await.expect("the places taken");
   }
 
   async fn hash(db: &mut MultiplexedConnection, key: &str) -> BTreeMap<String, String> {
@@ -322,6 +349,37 @@ mod tests {
 
   #[tokio::test]
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  async fn a_place_counts_until_the_writer_takes_its_player_so_a_rush_never_passes_the_cap() {
+    let (_redis, mut db) = shard(2).await;
+    place(&mut db, 9, 1).await;
+    assert_eq!(claimed(&mut db, "w", 1).await, on(1, 1));
+    let rush = [place(&mut db, 1, 1).await, place(&mut db, 2, 1).await, place(&mut db, 3, 1).await];
+    assert_eq!(rush, [Placed::On(on(1, 1)), Placed::On(on(1, 1)), Placed::Wait]);
+    assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "0"), ("1:2", "0")]));
+    let places: Vec<String> = db.zrange("placed:1:1:1", 0, -1).await.expect("the places");
+    assert_eq!(places, ["1", "2"]);
+    let life: Vec<(String, u64)> =
+      db.zrange_withscores("placed:1:1:1", 0, 0).await.expect("a life");
+    let time: (u64, u64) = redis::cmd("TIME").query_async(&mut db).await.expect("a time");
+    let left = life[0].1 - (time.0 * 1000 + time.1 / 1000);
+    assert!((59_000..=60_000).contains(&left), "{left}");
+    assert!(!SHARD.close(&mut db, on(1, 1), Epoch(1)).await.expect("a close"), "a place holds it");
+    let () = db.zadd("placed:1:1:1", "1", 1).await.expect("an old place");
+    let taken = [AccountId(2)];
+    let lease = Lease { layer: on(1, 1), epoch: Epoch(1), address: "w", players: 1, taken: &taken };
+    assert_eq!(SHARD.lease(&mut db, &lease).await.expect("a lease"), None);
+    let places: Vec<String> = db.zrange("placed:1:1:1", 0, -1).await.expect("the places");
+    assert_eq!(places, ["1"], "the lease ends the place of the player that the writer took");
+    assert_eq!(hash(&mut db, "layers:1").await["1:1"], "1");
+    count(&mut db, on(1, 1), 1, 0).await;
+    let () = db.zadd("placed:1:1:1", "1", 1).await.expect("an old place");
+    assert_eq!(place(&mut db, 3, 1).await, Placed::On(on(1, 1)), "an old place ends");
+    let () = db.del("placed:1:1:1").await.expect("the players taken");
+    assert!(SHARD.close(&mut db, on(1, 1), Epoch(1)).await.expect("a close"));
+  }
+
+  #[tokio::test]
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
   async fn two_writers_never_take_one_layer_and_a_newer_epoch_keeps_its_lease() {
     let (_redis, mut db) = shard(20).await;
     place(&mut db, 1, 1).await;
@@ -331,7 +389,8 @@ mod tests {
     claims.sort_by_key(Option::is_some);
     assert_eq!(claims, [None, Some(on(1, 1))]);
     let lease = async |db: &mut MultiplexedConnection, epoch, address| {
-      SHARD.lease(db, on(1, 1), Epoch(epoch), address, 3).await.expect("a lease")
+      let lease = Lease { layer: on(1, 1), epoch: Epoch(epoch), address, players: 3, taken: &[] };
+      SHARD.lease(db, &lease).await.expect("a lease")
     };
     assert_eq!(lease(&mut db, 2, "a").await, None);
     assert_eq!(lease(&mut db, 1, "b").await, Some(Epoch(2)));
@@ -339,7 +398,8 @@ mod tests {
     assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "3")]));
     assert_eq!(lease(&mut db, 3, "b").await, None);
     assert_eq!(hash(&mut db, "writer:1:1:1").await, fields([("address", "b"), ("epoch", "3")]));
-    let closed = SHARD.lease(&mut db, on(1, 9), Epoch(1), "c", 4).await.expect("a lease");
+    let lease = Lease { layer: on(1, 9), epoch: Epoch(1), address: "c", players: 4, taken: &[] };
+    let closed = SHARD.lease(&mut db, &lease).await.expect("a lease");
     assert_eq!(closed, None);
     assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "3")]));
   }
@@ -487,7 +547,13 @@ mod tests {
     let mut db = client.get_multiplexed_async_connection().await.expect("a connection");
     let refusals = [
       SHARD.claim(&mut db, "w").await.is_err(),
-      SHARD.lease(&mut db, on(1, 1), Epoch(1), "w", 0).await.is_err(),
+      SHARD
+        .lease(
+          &mut db,
+          &Lease { layer: on(1, 1), epoch: Epoch(1), address: "w", players: 0, taken: &[] },
+        )
+        .await
+        .is_err(),
       SHARD.close(&mut db, on(1, 1), Epoch(1)).await.is_err(),
       SHARD.leave(&mut db, AccountId(1)).await.is_err(),
     ];

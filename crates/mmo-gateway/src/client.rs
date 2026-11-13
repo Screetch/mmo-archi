@@ -3,7 +3,9 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use mmo_protocol::{Attach, FromClient, Intents, Link, ToClient, decode, encode, relayed};
+use mmo_protocol::{
+  Attach, FromClient, Intents, Layer, Link, ShardId, ToClient, decode, encode, relayed,
+};
 use quinn::{Connection, ConnectionError, Incoming, SendStream};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -26,8 +28,8 @@ pub(crate) async fn serve(incoming: Incoming, gateway: Arc<Gateway>) {
 }
 
 /// Takes the stream that the client opens. Each side writes its hello first, then the client
-/// sends its [`Attach`], and the gateway tells it the zone of its session as [`ToClient::Moved`],
-/// then joins the character of the session to that zone.
+/// sends its [`Attach`], and the gateway tells it the zone and the layer of its session as
+/// [`ToClient::Moved`], then joins the character of the session to that layer.
 async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infallible, Fault> {
   let (mut send, mut stream) = greet(connection.accept_bi().await).await?;
   let Attach { session } = decode(&stream.next().await?)?;
@@ -35,13 +37,14 @@ async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infal
     return Err(refuse(send).await);
   };
   let link = random();
-  let first = ToClient::Moved { zone: session.zone };
+  let first = ToClient::Moved { zone: session.layer.zone, layer: session.layer.number };
   send.write_all(&framed(&encode(&first))).await?;
-  let writer = gateway.writer(session.zone).await?;
+  let shard = session.shard;
+  let writer = gateway.writer(shard, session.layer).await?;
   let (messages, down) = unbounded_channel();
   let to = Route { messages, connection: connection.clone() };
   writer.join(link, (session.account, session.character), to.clone());
-  let mut client = Client { connection, gateway, link, writer, to, send, stream, down };
+  let mut client = Client { connection, gateway, shard, link, writer, to, send, stream, down };
   let fault = client.play().await;
   client.writer.leave(link);
   Err(fault)
@@ -59,10 +62,11 @@ async fn refuse(mut send: SendStream) -> Fault {
   Fault::NoSession
 }
 
-/// A client that plays, and the link to the writer of the zone of its player.
+/// A client that plays in a shard, and the link to the writer of the layer of its player.
 struct Client<'a> {
   connection: &'a Connection,
   gateway: &'a Arc<Gateway>,
+  shard: ShardId,
   link: Link,
   writer: Writer,
   to: Route,
@@ -94,7 +98,8 @@ impl Client<'_> {
     self.writer.relay(self.link, message)
   }
 
-  /// Relays the intents of a datagram to the writer of the zone that they name.
+  /// Relays the intents of a datagram to the writer of the layer that they name, in the shard of
+  /// the session.
   async fn intents(
     &self,
     datagram: Result<impl AsRef<[u8]>, ConnectionError>,
@@ -102,15 +107,16 @@ impl Client<'_> {
     let datagram = datagram?;
     let message: Intents = decode(datagram.as_ref())?;
     let bytes = relayed(self.link, datagram.as_ref());
-    if message.zone == self.writer.zone {
+    let layer = Layer { zone: message.zone, number: message.layer };
+    if layer == self.writer.layer {
       return self.writer.intents(bytes);
     }
-    self.gateway.writer(message.zone).await?.intents(bytes)
+    self.gateway.writer(self.shard, layer).await?.intents(bytes)
   }
 
   async fn deliver(&mut self, message: ToClient) -> Result<(), Fault> {
-    if let ToClient::Moved { zone } = message {
-      let next = self.gateway.writer(zone).await?;
+    if let ToClient::Moved { zone, layer } = message {
+      let next = self.gateway.writer(self.shard, Layer { zone, number: layer }).await?;
       next.follow(self.link, self.to.clone());
       self.writer.forsake(self.link);
       self.writer = next;

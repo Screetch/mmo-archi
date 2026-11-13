@@ -2,9 +2,12 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use mmo_protocol::{AccountId, Angle, FromLogin, Password, Position, State, ToLogin, ZoneId};
-use mmo_store::Store;
+use mmo_protocol::{
+  AccountId, Angle, Epoch, FromLogin, Password, Position, ShardId, State, ToLogin, ZoneId,
+};
 use mmo_store::testing::Redis;
+use mmo_store::{Directory, Lease, Store, keys};
+use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 
@@ -51,7 +54,7 @@ impl Game {
 
   /// A copy of the login service of world 1 with a cap of `cap` accounts.
   pub(crate) fn copy(&self, cap: u32) -> Login {
-    Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap }, MEADOW)
+    Login::new(self.store.clone(), self.redis.clone(), World { id: 1, cap, layer_cap: 20 }, MEADOW)
   }
 
   /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
@@ -59,7 +62,7 @@ impl Game {
     let user = format!("denied{denied}");
     self.deny(&user, denied).await;
     let redis = Self::connect(self.server.port(), &user).await;
-    Login::new(self.store.clone(), redis, World { id: 1, cap: 1 }, MEADOW)
+    Login::new(self.store.clone(), redis, World { id: 1, cap: 1, layer_cap: 20 }, MEADOW)
   }
 
   /// Takes from `user` of Redis the commands that the rule of ACL `denied` names.
@@ -74,6 +77,18 @@ impl Game {
   /// The URL of the Redis of the test.
   pub(crate) fn redis_url(&self) -> String {
     self.server.url()
+  }
+
+  /// Opens a layer of `zone` in world 1 with a writer, as a placement and a layer writer do, so a
+  /// selection in that zone gets it.
+  pub(crate) async fn layer(&self, zone: ZoneId) {
+    let mut redis = self.redis.clone();
+    let directory = Directory { shard: ShardId(1) };
+    let () = redis.hset(keys::shard(ShardId(1)), keys::LAYER_CAP, 20).await.expect("a cap");
+    directory.place(&mut redis, AccountId(0), zone, None).await.expect("a placement");
+    let layer = directory.claim(&mut redis, "w").await.expect("a claim").expect("a layer");
+    let lease = Lease { layer, epoch: Epoch(1), address: "w", players: 0, taken: &[] };
+    directory.lease(&mut redis, &lease).await.expect("a lease");
   }
 
   pub(crate) async fn account(&self, name: &str) -> AccountId {

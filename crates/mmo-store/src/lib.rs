@@ -27,7 +27,7 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 pub use characters::Saved;
-pub use directory::{Directory, LEASE, PARTY, PartyId, Placed};
+pub use directory::{Directory, LEASE, Lease, PARTY, PartyId, Placed};
 
 static MIGRATOR: Migrator = sqlx::migrate!();
 

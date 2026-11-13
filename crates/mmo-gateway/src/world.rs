@@ -1,5 +1,5 @@
-//! A world for the tests: an authority that signs the gateway and the zone writers, a Redis of the
-//! test alone, the zone writers that a test drives, and the clients.
+//! A world for the tests: an authority that signs the gateway and the layer writers, a Redis of the
+//! test alone, the layer writers that a test drives, and the clients.
 
 use std::fs;
 use std::future::IntoFuture;
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use bitcode::{DecodeOwned, Encode};
 use mmo_protocol::{
-  Attach, Frames, Hello, PROTOCOL, Relayed, ToClient, Token, ZoneId, decode, encode, frame,
-  relayed, unrelayed,
+  Attach, Frames, Hello, Layer, PROTOCOL, Relayed, ShardId, ToClient, Token, ZoneId, decode,
+  encode, frame, relayed, unrelayed,
 };
 use mmo_store::keys;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -35,7 +35,7 @@ pub(crate) const ANY: &str = "127.0.0.1:0";
 /// The user of Redis of the gateway, whose commands and keys a test can take away.
 const USER: &str = "gateway";
 
-/// The bound of each step of a test that waits for the gateway, a zone writer or a client. A step
+/// The bound of each step of a test that waits for the gateway, a layer writer or a client. A step
 /// takes milliseconds, so a step past the bound hangs, and the test fails with the name of the
 /// step.
 const STEP: Duration = Duration::from_secs(10);
@@ -137,32 +137,41 @@ impl World {
     address
   }
 
-  /// Writes the session of a character in a zone, as the login service does, and gives its
-  /// token.
+  /// Writes the session of a character in the layer 1 of a zone of shard 1, as the login service
+  /// does, and gives its token.
   pub(crate) async fn session(&self, account: i64, character: i64, zone: i32) -> Token {
     let mut bytes = [0; 32];
     getrandom::fill(&mut bytes).expect("random bytes");
     let token = Token(bytes);
-    let fields = [("account", account), ("character", character), ("zone", zone.into())];
+    let fields = [
+      (keys::ACCOUNT, account),
+      (keys::CHARACTER, character),
+      (keys::SHARD, 1),
+      (keys::ZONE, zone.into()),
+      (keys::LAYER, 1),
+    ];
     let mut redis = self.redis.clone();
     let () = redis.hset_multiple(keys::session(&token), &fields).await.expect("a session");
     token
   }
 
-  /// Writes the entry of `zone` in the directory, as its writer does.
+  /// Writes the lease of the layer 1 of `zone` of shard 1 in the directory, as its writer does.
   pub(crate) async fn entry(&self, zone: i32, address: &str, epoch: i64) {
-    let fields = [("address", address.to_owned()), ("epoch", epoch.to_string())];
+    let fields = [(keys::ADDRESS, address.to_owned()), (keys::EPOCH, epoch.to_string())];
     let mut redis = self.redis.clone();
-    let () = redis.hset_multiple(keys::zone(ZoneId(zone)), &fields).await.expect("an entry");
+    let key = keys::writer(ShardId(1), layer(zone));
+    let () = redis.hset_multiple(key, &fields).await.expect("a lease");
   }
 
-  /// Says on the channel of the directory that `zone` changed its writer, as a writer does.
+  /// Says on the channel of the directory that the layer 1 of `zone` changed its writer, as a
+  /// script of the directory does.
   pub(crate) async fn publish(&self, zone: i32) {
-    let () = self.redis.clone().publish(keys::DIRECTORY, zone).await.expect("a message");
+    let name = keys::layer(ShardId(1), layer(zone));
+    let () = self.redis.clone().publish(keys::DIRECTORY, name).await.expect("a message");
   }
 
-  /// A zone writer whose certificate the authority signed, and which takes only a gateway whose
-  /// certificate the authority signed. Its entry in the directory names it.
+  /// A layer writer whose certificate the authority signed, and which takes only a gateway whose
+  /// certificate the authority signed. The lease of the layer 1 of zone `id` names it.
   pub(crate) async fn zone(&self, id: i32) -> Zone {
     let file = |name: &str| self.folder.path().join(name);
     let config = mmo_link::server(&file("zone.pem"), &file("zone.key"), &file("authority.pem"));
@@ -217,6 +226,11 @@ impl World {
   }
 }
 
+/// The layer 1 of `zone`, the one layer of each zone of the tests of the gateway.
+fn layer(zone: i32) -> Layer {
+  Layer { zone: ZoneId(zone), number: 1 }
+}
+
 /// A Redis of one test alone, which ends with the test, with its log and its port.
 type Redis = (Child, Lines<BufReader<ChildStdout>>, u16);
 
@@ -253,13 +267,13 @@ async fn start_redis() -> Option<Redis> {
   }
 }
 
-/// A zone writer that a test drives.
+/// A layer writer that a test drives.
 pub(crate) struct Zone {
   endpoint: Endpoint,
 }
 
 impl Zone {
-  /// The address of the zone writer, as its entry in the directory holds it.
+  /// The address of the layer writer, as its entry in the directory holds it.
   pub(crate) fn address(&self) -> String {
     format!("localhost:{}", self.endpoint.local_addr().expect("an address").port())
   }
@@ -295,7 +309,7 @@ impl Zone {
   }
 }
 
-/// One end of a link of a gateway: a client, or a zone writer.
+/// One end of a link of a gateway: a client, or a layer writer.
 pub(crate) struct Peer {
   _endpoint: Option<Endpoint>,
   connection: Connection,
@@ -354,12 +368,12 @@ impl Peer {
     decode(&self.bytes_of_datagram().await).expect("a datagram of this version")
   }
 
-  /// Sends a datagram for the client of a link, as a zone writer does.
+  /// Sends a datagram for the client of a link, as a layer writer does.
   pub(crate) fn relay<M: Encode>(&self, message: &Relayed<M>) {
     self.datagram(&relayed(message.link, &encode(&message.message)));
   }
 
-  /// The next datagram that the gateway relays to this zone writer, with the link of its client.
+  /// The next datagram that the gateway relays to this layer writer, with the link of its client.
   pub(crate) async fn relayed_of<M: DecodeOwned>(&self) -> Relayed<M> {
     let bytes = self.bytes_of_datagram().await;
     let (link, datagram) = unrelayed(&bytes).expect("a link");

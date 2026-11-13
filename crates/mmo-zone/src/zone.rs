@@ -1,20 +1,17 @@
-//! The state of the zone, which its writer alone decides.
+//! The state of one layer of a zone, which its writer alone decides.
 
 use std::collections::BTreeMap;
 use std::mem;
 
 use mmo_collide::{Body, Terrain, step};
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, Entity, Input, Intents, Link, Position, Relayed, Save, Snapshot,
-  State, TICKS_PER_SECOND, Tick, Velocity, ZoneId,
+  AccountId, Angle, CharacterId, Entity, Input, Intents, Layer, Link, Position, Relayed, Save,
+  Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId,
 };
 use mmo_store::Saved;
 
 use crate::interest::Grid;
 use crate::view::{History, Sent};
-
-/// The most players that a zone holds.
-const CAP: usize = 2500;
 
 /// The ticks that the zone keeps the player of a link that closed: 30 s.
 const KEPT: u32 = 30 * TICKS_PER_SECOND;
@@ -32,8 +29,8 @@ pub(crate) struct Gateway(pub(crate) u64);
 pub(crate) enum Refusal {
   #[error("the character is in zone {}", zone.0)]
   Elsewhere { zone: ZoneId },
-  #[error("the zone holds {CAP} players")]
-  Full,
+  #[error("the layer holds {cap} players, its cap")]
+  Full { cap: usize },
 }
 
 /// A player that left the zone, and the save that its last state needs. The writer keeps the
@@ -45,9 +42,11 @@ pub(crate) struct Leaver {
   pub(crate) save: Option<Save>,
 }
 
-/// The state of one zone: its players on the ground, at its present tick.
+/// The state of one layer of a zone: its players on the ground, at its present tick.
 pub(crate) struct Zone {
-  id: ZoneId,
+  layer: Layer,
+  /// The most players of the layer, which the writer read from its shard when it claimed it.
+  cap: usize,
   terrain: Terrain,
   tick: Tick,
   players: BTreeMap<i64, Player>,
@@ -78,9 +77,10 @@ enum Attachment {
 }
 
 impl Zone {
-  pub(crate) fn new(id: ZoneId) -> Self {
+  pub(crate) fn new(layer: Layer, cap: usize) -> Self {
     Self {
-      id,
+      layer,
+      cap,
       terrain: ground(),
       tick: Tick(0),
       players: BTreeMap::new(),
@@ -135,11 +135,11 @@ impl Zone {
     account: AccountId,
     saved: &Saved,
   ) -> Result<(), Refusal> {
-    if saved.zone != self.id {
+    if saved.zone != self.layer.zone {
       return Err(Refusal::Elsewhere { zone: saved.zone });
     }
     let attachment = Attachment::Linked { gateway, link, ack: None, sent: Sent::default() };
-    let full = self.players.len() >= CAP;
+    let full = self.players.len() >= self.cap;
     match self.players.get_mut(&saved.character.0) {
       Some(player) => {
         if let Attachment::Linked { link: old, .. } = player.attachment {
@@ -147,7 +147,7 @@ impl Zone {
         }
         player.attachment = attachment;
       }
-      None if full => return Err(Refusal::Full),
+      None if full => return Err(Refusal::Full { cap: self.cap }),
       None => {
         self.players.insert(saved.character.0, Player::new(account, saved, attachment));
       }
@@ -190,8 +190,8 @@ impl Zone {
       .extend(left.map(|mut player| Leaver { account: player.account, save: player.unsaved(id) }));
   }
 
-  /// Keeps each input of `intents` for one of the next 4 ticks, when `intents` names this zone and
-  /// comes on the link of a player.
+  /// Keeps each input of `intents` for one of the next 4 ticks, when `intents` names this layer
+  /// and comes on the link of a player.
   pub(crate) fn intents(&mut self, gateway: Gateway, link: Link, intents: &Intents) {
     let now = self.tick.0;
     let player = self.links.get(&link.0).and_then(|id| self.players.get_mut(id));
@@ -200,7 +200,7 @@ impl Zone {
     else {
       return;
     };
-    if *via != gateway || intents.zone != self.id {
+    if *via != gateway || intents.zone != self.layer.zone || intents.layer != self.layer.number {
       return;
     }
     if let Some(tick) = intents.ack
@@ -331,15 +331,19 @@ fn ground() -> Terrain {
 
 #[cfg(test)]
 mod tests {
+  use mmo_protocol::Layer;
   use mmo_protocol::{
     AccountId, Angle, Change, CharacterId, Entity, Input, Intents, Link, Offset, Position, Relayed,
     Save, Snapshot, State, TICKS_PER_SECOND, Tick, Velocity, ZoneId, encode,
   };
   use mmo_store::Saved;
 
-  use super::{CAP, Gateway, KEPT, Leaver, Refusal, Zone};
+  use super::{Gateway, KEPT, Leaver, Refusal, Zone};
 
   const MEADOW: ZoneId = ZoneId(1);
+  const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
+  /// The cap of a layer at the start of a shard.
+  const CAP: usize = 500;
   const ACCOUNT: AccountId = AccountId(3);
   const GATE: Gateway = Gateway(1);
   const EAST: Option<Angle> = Some(Angle(0));
@@ -368,6 +372,7 @@ mod tests {
   fn intents(ack: Option<u32>, ticks: [u32; 3], heading: Option<Angle>) -> Intents {
     Intents {
       zone: MEADOW,
+      layer: 1,
       ack: ack.map(Tick),
       inputs: ticks.map(|tick| Input { tick: Tick(tick), heading, view: NORTH }),
     }
@@ -388,7 +393,7 @@ mod tests {
   /// 3 ticks before.
   #[test]
   fn a_crowd_that_walks_gets_snapshots_of_74_bytes_on_average() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     let mut seed = 9_u64;
     let mut below = |n: u64| {
       seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
@@ -414,7 +419,7 @@ mod tests {
         zone.intents(
           GATE,
           Link(link),
-          &Intents { zone: MEADOW, ack: ack.map(Tick), inputs: [input; 3] },
+          &Intents { zone: MEADOW, layer: 1, ack: ack.map(Tick), inputs: [input; 3] },
         );
       }
       let sent = zone.tick();
@@ -428,7 +433,7 @@ mod tests {
 
   #[test]
   fn a_player_walks_with_the_inputs_of_its_link_and_its_client_gets_each_delta() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     zone.intents(GATE, Link(1), &intents(None, [1, 2, 3], EAST));
     assert_eq!(zone.tick(), [full(1, 1, vec![entity(7, 10_030, 600, NORTH)])]);
@@ -454,10 +459,12 @@ mod tests {
 
   #[test]
   fn the_zone_takes_only_the_inputs_of_the_next_4_ticks_on_the_link_of_a_player() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     let elsewhere = Intents { zone: ZoneId(2), ..intents(None, [1, 2, 3], EAST) };
     zone.intents(GATE, Link(1), &elsewhere);
+    let other_layer = Intents { layer: 2, ..intents(None, [1, 2, 3], EAST) };
+    zone.intents(GATE, Link(1), &other_layer);
     zone.intents(GATE, Link(2), &intents(None, [1, 2, 3], EAST));
     zone.intents(Gateway(2), Link(1), &intents(None, [1, 2, 3], EAST));
     zone.intents(GATE, Link(1), &intents(Some(9), [0, 5, 6], EAST));
@@ -465,27 +472,26 @@ mod tests {
   }
 
   #[test]
-  fn the_zone_refuses_a_character_of_another_zone_and_a_player_past_its_cap() {
-    let mut zone = Zone::new(MEADOW);
+  fn the_layer_refuses_a_character_of_another_zone_and_a_player_past_its_cap() {
+    let mut zone = Zone::new(LAYER, 3);
     let elsewhere = Saved { zone: ZoneId(2), ..saved(1, 0) };
     assert_eq!(
       zone.join(GATE, Link(1), ACCOUNT, &elsewhere),
       Err(Refusal::Elsewhere { zone: ZoneId(2) })
     );
-    for id in 0..CAP {
-      let id = i64::try_from(id).unwrap();
+    for id in 0_i64..3 {
       assert_eq!(zone.join(GATE, Link(id.unsigned_abs()), ACCOUNT, &saved(id, 0)), Ok(()));
     }
     let refused =
       zone.join(GATE, Link(u64::MAX), ACCOUNT, &saved(-1, 0)).map_err(|why| why.to_string());
-    assert_eq!(refused, Err("the zone holds 2500 players".to_owned()));
+    assert_eq!(refused, Err("the layer holds 3 players, its cap".to_owned()));
     let elsewhere = Refusal::Elsewhere { zone: ZoneId(2) }.to_string();
     assert_eq!(elsewhere, "the character is in zone 2");
   }
 
   #[test]
   fn a_player_whose_link_closes_stays_30_s_and_comes_back_to_its_state() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     assert_eq!(zone.join(GATE, Link(2), ACCOUNT, &saved(8, 10_100)), Ok(()));
     zone.intents(GATE, Link(2), &intents(None, [1, 2, 3], EAST));
@@ -510,7 +516,7 @@ mod tests {
 
   #[test]
   fn a_player_that_logs_out_leaves_the_zone_at_once() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     assert_eq!(zone.join(GATE, Link(2), ACCOUNT, &saved(8, 10_100)), Ok(()));
     zone.logout(Gateway(2), Link(2));
@@ -522,7 +528,7 @@ mod tests {
   /// The block from x = 498 m to x = 502 m stops the capsule of the body a little before it.
   #[test]
   fn a_block_of_the_ground_stops_a_player() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     let start = Saved {
       state: State { position: Position { x: 49_000, y: 0, z: 50_000 }, ..saved(7, 0).state },
       ..saved(7, 0)
@@ -540,7 +546,7 @@ mod tests {
 
   #[test]
   fn a_player_that_moved_goes_to_the_store_again_with_a_greater_version_until_it_is_acknowledged() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     assert_eq!(zone.join(GATE, Link(2), AccountId(4), &saved(8, 10_100)), Ok(()));
     assert_eq!(zone.dirty(), []);
@@ -559,7 +565,7 @@ mod tests {
 
   #[test]
   fn a_player_that_leaves_for_good_takes_its_unsaved_state_to_the_store() {
-    let mut zone = Zone::new(MEADOW);
+    let mut zone = Zone::new(LAYER, CAP);
     assert_eq!(zone.join(GATE, Link(1), ACCOUNT, &saved(7, 10_000)), Ok(()));
     assert_eq!(zone.join(GATE, Link(2), AccountId(4), &saved(8, 10_100)), Ok(()));
     assert_eq!(zone.join(GATE, Link(3), AccountId(5), &saved(9, 10_200)), Ok(()));

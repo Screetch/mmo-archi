@@ -162,7 +162,10 @@ impl Writer {
     tokio::spawn(deliver(keeper, sent, events.clone()));
     let (gateways, owed) = (BTreeMap::new(), BTreeMap::new());
     let timing = BTreeMap::new();
-    Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed }
+    let writer = Self { zone, store, claim, batches, events, gateways, ticks: 0, timing, owed };
+    // The first lease of the epoch of the writer opens the layer.
+    writer.write(Entry::Layer { players: 0, taken: Vec::new() });
+    writer
   }
 
   /// Takes an event, and gives the fault that stops the zone writer when the event brings one.
@@ -227,7 +230,8 @@ impl Writer {
     Ok(self.admit(gateway, link, account, &saved)?)
   }
 
-  /// Takes the player of `saved` into the zone, and writes its presence.
+  /// Takes the player of `saved` into the layer, writes the count of the layer, which ends the
+  /// place of the player in the directory in the same step, and writes its presence.
   fn admit(
     &mut self,
     gateway: Gateway,
@@ -236,6 +240,7 @@ impl Writer {
     saved: &Saved,
   ) -> Result<(), Refusal> {
     self.zone.join(gateway, link, account, saved)?;
+    self.write(Entry::Layer { players: self.zone.count(), taken: vec![account] });
     self.write(Entry::Present(vec![(account, saved.character)]));
     Ok(())
   }
@@ -295,8 +300,8 @@ impl Writer {
         None
       }
       Err(keeper::Error::Stale { held }) => {
-        let zone = batch.layer.zone;
-        Some(claim::Error::Superseded { zone, held: held.0, own: batch.epoch }.into())
+        let layer = batch.layer;
+        Some(claim::Error::Superseded { layer, held: held.0, own: batch.epoch }.into())
       }
       Err(error) => {
         eprintln!(
@@ -342,7 +347,7 @@ impl Writer {
     if self.ticks.is_multiple_of(ANNOUNCE_EVERY) {
       let timing = mem::take(&mut self.timing);
       self.write(Entry::Ticks(timing));
-      self.write(Entry::Zone { players: self.zone.count() });
+      self.write(Entry::Layer { players: self.zone.count(), taken: Vec::new() });
     }
     if self.ticks == 0 {
       self.keep();
@@ -444,13 +449,14 @@ mod tests {
   };
   use mmo_protocol::{Epoch, Layer, ShardId};
   use mmo_store::testing::Redis;
-  use mmo_store::{Saved, Store, keys};
+  use mmo_store::{Directory, Lease, Saved, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
+  use redis::AsyncCommands;
   use sqlx::PgPool;
   use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-  use super::{Claim, Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
-  use crate::claim::Held;
+  use super::{Claimed, Entry, Event, Gateway, SAVE_EVERY, Writer, claim, keeper, serve};
+  use crate::claim::Taken;
   use crate::config::Config;
   use crate::peer::{Keeper, Peer, World, hash, var};
   use crate::zone::Zone;
@@ -490,12 +496,31 @@ mod tests {
       let config = Config::read(var(vars)).expect("a config");
       let endpoint = Endpoint::server(config.server, config.address).expect("an endpoint");
       let mut keeper = keeper::Keeper::new(endpoint.clone(), config.client, config.keeper, true);
-      let epoch = keeper.claim(SHARD, LAYER).await.expect("an epoch");
+      let mut admin = self.admin().await;
+      let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, 500).await.expect("a cap");
+      let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), 0).await.expect("a layer");
+      let () = admin.del(keys::writer(SHARD, LAYER)).await.expect("no lease");
       let address = "zone-1:4433".to_owned();
-      let held = Held { shard: SHARD, layer: LAYER, epoch };
-      let claim = Claim::open(&self.redis.url(), held, address).await.expect("a claim");
+      let taken = Taken::wait(&self.redis.url(), SHARD, address).await.expect("a layer");
+      let epoch = keeper.claim(SHARD, taken.layer).await.expect("an epoch");
+      let zone = Zone::new(taken.layer, taken.cap);
+      let claim = taken.hold(epoch);
       let store = self.store.clone();
-      (endpoint, Claimed { zone: Zone::new(MEADOW), store, claim, keeper })
+      (endpoint, Claimed { zone, store, claim, keeper })
+    }
+
+    async fn admin(&self) -> redis::aio::MultiplexedConnection {
+      let client = redis::Client::open(self.redis.url()).expect("a URL");
+      client.get_multiplexed_async_connection().await.expect("a connection")
+    }
+
+    /// Leases the layer to a writer of `epoch`, as a newer writer does.
+    async fn supersede(&self, epoch: i64) {
+      let directory = Directory { shard: SHARD };
+      let lease =
+        Lease { layer: LAYER, epoch: Epoch(epoch), address: "z:1", players: 0, taken: &[] };
+      let newer = directory.lease(&mut self.admin().await, &lease).await;
+      assert_eq!(newer.expect("a lease"), None);
     }
 
     /// A writer that claims the zone, and the events that its tasks send.
@@ -521,7 +546,7 @@ mod tests {
         heading: Some(Angle(0)),
         view: Angle(0),
       });
-      writer.zone.intents(GATE, Link(1), &Intents { zone: MEADOW, ack: None, inputs });
+      writer.zone.intents(GATE, Link(1), &Intents { zone: MEADOW, layer: 1, ack: None, inputs });
       writer.tick();
     }
   }
@@ -673,14 +698,15 @@ mod tests {
     for _ in 0..2 * TICKS_PER_SECOND {
       writer.tick();
     }
-    // Each second writes the ticks and the entry of the zone: 4 events, all of them writes.
+    // The first lease, then each second the ticks and the lease of the layer: 5 events, all of
+    // them writes.
     let ended = Cell::new(0);
     let entries = |_: &Writer, _: &Event| {
       ended.set(ended.get() + 1);
-      ended.get() == 4
+      ended.get() == 5
     };
     assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
-    let ticks = hash(&meadow.redis, "ticks:1").await;
+    let ticks = hash(&meadow.redis, "ticks:1:1:1").await;
     let counts: Vec<(u32, u64)> = ticks
       .iter()
       .map(|(bucket, count)| (bucket.parse().expect("a bucket"), count.parse().expect("a count")))
@@ -716,7 +742,7 @@ mod tests {
     assert_eq!(last, kept);
     let [(_, snapshot)] = next.zone.tick().try_into().expect("one snapshot");
     assert_eq!(snapshot.message.entered[0].position, kept.state.position);
-    assert_eq!(hash(&meadow.redis, "zone:1").await["epoch"], "2");
+    assert_eq!(hash(&meadow.redis, "writer:1:1:1").await["epoch"], "2");
   }
 
   #[sqlx::test(migrations = false)]
@@ -731,19 +757,16 @@ mod tests {
     let fault = hear(&mut writer, &mut heard, saved_event).await;
     assert_eq!(
       fault.as_deref(),
-      Some("zone 1 is held by a writer of epoch 2, which is newer than the epoch 1")
+      Some("layer 1:1 is held by a writer of epoch 2, which is newer than the epoch 1")
     );
 
     let (mut other, mut heard) = meadow.writer().await;
-    let url = meadow.redis.url();
-    let newer = Held { shard: SHARD, layer: LAYER, epoch: Epoch(9) };
-    let newer = Claim::open(&url, newer, "z:1".to_owned());
-    newer.await.expect("a claim of a newer epoch");
+    meadow.supersede(9).await;
     walk(&mut other, 1, 20);
     let fault = hear(&mut other, &mut heard, |_, _| false).await;
     assert_eq!(
       fault.as_deref(),
-      Some("zone 1 is held by a writer of epoch 9, which is newer than the epoch 3")
+      Some("layer 1:1 is held by a writer of epoch 9, which is newer than the epoch 3")
     );
   }
 
@@ -755,11 +778,12 @@ mod tests {
     let entries = |_: &Writer, event: &Event| matches!(event, Event::Entries(_));
     assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
     let present = BTreeMap::from(
-      [("character", "1"), ("zone", "1"), ("epoch", "1")].map(|(k, v)| (k.into(), v.into())),
+      [("character", "1"), ("shard", "1"), ("zone", "1"), ("layer", "1"), ("epoch", "1")]
+        .map(|(k, v)| (k.into(), v.into())),
     );
     let key = format!("presence:{}", meadow.account.0);
     assert_eq!(hash(&meadow.redis, &key).await, present);
-    assert_eq!(hash(&meadow.redis, "zone:1").await["address"], "zone-1:4433");
+    assert_eq!(hash(&meadow.redis, "writer:1:1:1").await["address"], "zone-1:4433");
 
     walk(&mut writer, 1, 3);
     let logout = ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout });
@@ -824,7 +848,7 @@ mod tests {
     let unsaved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
     assert_eq!(
       (unsaved.version, writer.owed.len(), hash(&meadow.redis, &key).await.len()),
-      (0, 1, 3)
+      (0, 1, 5)
     );
 
     meadow.keeper.resume(meadow.store.clone());
@@ -857,14 +881,11 @@ mod tests {
   async fn a_writer_that_a_newer_epoch_holds_ends_the_serve_of_its_links(pool: PgPool) {
     let meadow = Meadow::new(pool).await;
     let (endpoint, claimed) = meadow.claimed().await;
-    let url = meadow.redis.url();
-    let newer = Held { shard: SHARD, layer: LAYER, epoch: Epoch(9) };
-    let newer = Claim::open(&url, newer, "z:1".to_owned());
-    newer.await.expect("a claim of a newer epoch");
+    meadow.supersede(9).await;
     let fault = serve(endpoint, claimed).await;
     assert_eq!(
       fault.to_string(),
-      "zone 1 is held by a writer of epoch 9, which is newer than the epoch 1"
+      "layer 1:1 is held by a writer of epoch 9, which is newer than the epoch 1"
     );
   }
 
@@ -876,7 +897,7 @@ mod tests {
     let entries = |_: &Writer, event: &Event| matches!(event, Event::Entries(_));
     assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
     let key = format!("presence:{}", meadow.account.0);
-    assert_eq!(hash(&meadow.redis, &key).await.len(), 3);
+    assert_eq!(hash(&meadow.redis, &key).await.len(), 5);
     let logout = ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout });
     assert!(writer.hear(Event::Message(GATE, logout)).is_none());
     while !hash(&meadow.redis, &key).await.is_empty() {

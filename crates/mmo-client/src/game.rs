@@ -4,7 +4,7 @@
 use glam::{Mat4, Vec3};
 use mmo_collide::{DT, Terrain, ground};
 use mmo_protocol::{
-  Angle, CharacterId, Entity, Intents, Position, Snapshot, Tick, ToClient, Velocity, ZoneId,
+  Angle, CharacterId, Entity, Intents, Layer, Position, Snapshot, Tick, ToClient, Velocity, ZoneId,
 };
 use mmo_render::Placed;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -42,7 +42,8 @@ pub struct Game {
   character: CharacterId,
   world: World,
   predictor: Option<Predictor>,
-  zone: Option<ZoneId>,
+  /// The layer of the player, which the gateway names first.
+  layer: Option<Layer>,
   camera: Camera,
   keys: Keys,
   up: UnboundedSender<Up>,
@@ -72,7 +73,7 @@ impl Game {
       character,
       world: World::default(),
       predictor: None,
-      zone: None,
+      layer: None,
       camera: Camera::default(),
       keys: Keys::default(),
       up,
@@ -109,7 +110,8 @@ impl Game {
       changed: vec![],
       left: vec![],
     };
-    to.send(Down::Message(ToClient::Moved { zone: ZoneId(1) })).expect("the game listens");
+    to.send(Down::Message(ToClient::Moved { zone: ZoneId(1), layer: 1 }))
+      .expect("the game listens");
     to.send(Down::Snapshot(first)).expect("the game listens");
     (Self::new(CharacterId(1), up, down), Wire { up: from, down: to })
   }
@@ -212,8 +214,8 @@ impl Game {
 
   fn message(&mut self, message: &ToClient) {
     match message {
-      ToClient::Moved { zone } => {
-        self.zone = Some(*zone);
+      ToClient::Moved { zone, layer } => {
+        self.layer = Some(Layer { zone: *zone, number: *layer });
         self.world.clear();
         self.predictor = None;
       }
@@ -224,12 +226,14 @@ impl Game {
 
   /// One tick of 50 ms: predict the step, and send the last 3 inputs.
   fn tick(&mut self) {
-    let (Some(predictor), Some(zone)) = (&mut self.predictor, self.zone) else {
+    let (Some(predictor), Some(Layer { zone, number: layer })) = (&mut self.predictor, self.layer)
+    else {
       return;
     };
     let yaw = self.camera.yaw();
     predictor.step(self.keys.heading(yaw), Angle::from_radians(yaw));
-    let intents = predictor.recent().map(|inputs| Intents { zone, ack: self.world.ack(), inputs });
+    let ack = self.world.ack();
+    let intents = predictor.recent().map(|inputs| Intents { zone, layer, ack, inputs });
     if intents.is_some_and(|intents| self.up.send(Up::Intents(intents)).is_err()) {
       self.over = true;
     }
@@ -280,7 +284,7 @@ mod tests {
   /// A game in the zone 1 that shows the player at 100 m and another character at 120 m.
   fn playing() -> (Game, Wire) {
     let (mut game, wire) = fresh();
-    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(1) })).expect("sent");
+    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(1), layer: 1 })).expect("sent");
     wire
       .down
       .send(Down::Snapshot(snapshot(10, vec![entity(1, 10_000), entity(2, 12_000)])))
@@ -298,7 +302,7 @@ mod tests {
     let ones = sent(&mut wire);
     assert_eq!(ones.len(), 1);
     let one = ones[0];
-    assert_eq!((one.zone, one.ack), (ZoneId(1), Some(Tick(10))));
+    assert_eq!((one.zone, one.layer, one.ack), (ZoneId(1), 1, Some(Tick(10))));
     assert_eq!(one.inputs[2].tick, Tick(14));
     assert_eq!(one.inputs[2].heading, Some(Angle(0)));
     game.key(Direction::Forward, false);
@@ -345,7 +349,7 @@ mod tests {
   #[test]
   fn a_move_to_another_zone_starts_the_world_again_and_the_other_messages_wait_their_turn() {
     let (mut game, mut wire) = playing();
-    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(2) })).expect("sent");
+    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(2), layer: 3 })).expect("sent");
     for message in [
       ToClient::Full { zone: ZoneId(3) },
       ToClient::Line { channel: "world".to_owned(), from: "Ada".to_owned(), text: "hi".to_owned() },
@@ -358,7 +362,8 @@ mod tests {
     assert!(sent(&mut wire).is_empty());
     wire.down.send(Down::Snapshot(snapshot(3, vec![entity(1, 10_000)]))).expect("sent");
     game.update(0.05);
-    assert_eq!(sent(&mut wire)[0].zone, ZoneId(2));
+    let moved = sent(&mut wire)[0];
+    assert_eq!((moved.zone, moved.layer), (ZoneId(2), 3));
   }
 
   #[test]
@@ -385,7 +390,7 @@ mod tests {
     assert!((4..=5).contains(&ticks), "{ticks} ticks");
     assert!(f32::from(u8::try_from(ticks).expect("a count")) * 0.05 <= LONGEST + 0.05);
     let (mut absent, wire) = fresh();
-    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(1) })).expect("sent");
+    wire.down.send(Down::Message(ToClient::Moved { zone: ZoneId(1), layer: 1 })).expect("sent");
     wire.down.send(Down::Snapshot(snapshot(4, vec![entity(2, 12_000)]))).expect("sent");
     absent.update(0.2);
     assert_eq!(absent.scene(1.0).characters.len(), 1);

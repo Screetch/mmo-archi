@@ -137,11 +137,13 @@ pub enum ToClient {
   /// The gateway finds no session for the token of [`Attach`], so the client logs in again.
   NoSession,
   /// The player is in this zone, which the client names in each next [`Intents`]. The gateway
-  /// sends it first after an [`Attach`], with the zone of the session, and a zone writer sends
-  /// it when the player moves to another zone.
+  /// sends it first after an [`Attach`], with the zone and the layer of the session, and a layer
+  /// writer sends it when the player moves to another zone or to another layer of its zone.
   Moved {
     /// The zone of the player.
     zone: ZoneId,
+    /// The number of the layer of the player in its zone.
+    layer: u32,
   },
   /// The next zone holds as many players as it can, so the player stays at its border.
   Full {
@@ -162,8 +164,11 @@ pub enum ToClient {
 /// The datagram of a client, 20 times each second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Intents {
-  /// The zone of the player, to which the gateway relays the datagram.
+  /// The zone of the player. The gateway relays the datagram to the writer of the layer of the
+  /// player in that zone.
   pub zone: ZoneId,
+  /// The number of the layer of the player in its zone.
+  pub layer: u32,
   /// The tick of the last snapshot that the client received, or `None` before the first.
   pub ack: Option<Tick>,
   /// The last 3 inputs of the player, so the zone writer recovers the inputs of a lost datagram.
@@ -470,6 +475,7 @@ mod tests {
     let input = |tick, heading| Input { tick: Tick(tick), heading, view: Angle(16384) };
     Intents {
       zone: ZoneId(7),
+      layer: 3,
       ack: Some(Tick(997)),
       inputs: [input(998, None), input(999, Some(Angle(0))), input(1000, Some(Angle(32768)))],
     }
@@ -517,7 +523,7 @@ mod tests {
     ]);
     round_trip(&[
       ToClient::NoSession,
-      ToClient::Moved { zone: ZoneId(2) },
+      ToClient::Moved { zone: ZoneId(2), layer: u32::MAX },
       ToClient::Full { zone: ZoneId(-1) },
       ToClient::Line { channel: "world".to_owned(), from: "Ada".to_owned(), text: "hi".to_owned() },
     ]);
@@ -570,7 +576,7 @@ mod tests {
       ToZone::Client(Relayed { link: LINK, message: FromClient::Logout }),
       ToZone::Leave { link: LINK },
     ]);
-    round_trip(&[Relayed { link: LINK, message: ToClient::Moved { zone: ZoneId(3) } }]);
+    round_trip(&[Relayed { link: LINK, message: ToClient::Moved { zone: ZoneId(3), layer: 2 } }]);
     round_trip(&[ToNeighbour::Transfer {
       account: AccountId(11),
       link: LINK,
@@ -586,8 +592,10 @@ mod tests {
 
   #[test]
   fn the_bytes_of_a_datagram_stay_the_bytes_of_this_version() {
-    let bytes =
-      [4, 7, 1, 2, 229, 3, 2, 230, 3, 231, 3, 232, 3, 6, 0, 0, 0, 0, 128, 0, 0, 64, 0, 64, 0, 64];
+    let bytes = [
+      4, 7, 4, 3, 1, 2, 229, 3, 2, 230, 3, 231, 3, 232, 3, 6, 0, 0, 0, 0, 128, 0, 0, 64, 0, 64, 0,
+      64,
+    ];
     assert_eq!(datagram(&intents()).as_ref().map_err(ToString::to_string), Ok(&bytes.to_vec()));
   }
 

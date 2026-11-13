@@ -197,8 +197,9 @@ fix what your change broke, and report what was broken before.
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
-  `MMO_LOCAL_WORLD_CAP` (100) sets the cap of the world, and `MMO_LOCAL_PROFILE=release` builds and runs the release
-  profile, which the numbers of `docs/architecture.md` need.
+  `MMO_LOCAL_WORLD_CAP` (100) sets the cap of the world and `MMO_LOCAL_LAYER_CAP` (500) the cap of a layer, and the
+  stack runs a pool of layer writers for them on the ports from `MMO_LOCAL_ZONE_PORT` up. `MMO_LOCAL_PROFILE=release`
+  builds and runs the release profile, which the numbers of `docs/architecture.md` need.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole, but for
   `crates/mmo-client/src/window.rs`, the one file that needs a window, which `.cargo/config.toml` leaves out. The tests of `mmo-render`
   draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe

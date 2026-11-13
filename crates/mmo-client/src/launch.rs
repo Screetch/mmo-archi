@@ -181,7 +181,7 @@ mod tests {
   /// its intents, checks them, and closes the link. A snapshot can pass the zone, so it sends more.
   async fn gateway(mut peer: Peer) -> Peer {
     assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
-    peer.write(&ToClient::Moved { zone: ZoneId(1) }).await;
+    peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 1 }).await;
     let mut tick = 12;
     let sent = loop {
       let bytes = datagram(&snapshot(tick)).expect("a datagram");

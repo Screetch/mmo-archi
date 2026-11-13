@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use mmo_client::{Down, Fault, Gap, Place, Play, Predictor, Trust, Up, World, enter};
 use mmo_collide::{Terrain, ground};
-use mmo_protocol::{Angle, CharacterId, Intents, Snapshot, ToClient, ZoneId, encode};
+use mmo_protocol::{Angle, CharacterId, Intents, Layer, Snapshot, ToClient, ZoneId, encode};
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior, interval};
 
@@ -69,7 +69,9 @@ enum Error {
 /// The body of the player, and what it knows of the world.
 struct Walk {
   character: CharacterId,
-  zone: ZoneId,
+  /// The layer of the player, which the gateway names first, before the snapshot that shows the
+  /// player and so before the first datagram of the bot.
+  layer: Layer,
   rng: Rng,
   world: World,
   body: Option<Predictor>,
@@ -113,7 +115,8 @@ impl Walk {
     }
     self.ticks += 1;
     body.step(self.heading, self.heading.unwrap_or(Angle(0)));
-    body.recent().map(|inputs| Intents { zone: self.zone, ack: self.world.ack(), inputs })
+    let Layer { zone, number: layer } = self.layer;
+    body.recent().map(|inputs| Intents { zone, layer, ack: self.world.ack(), inputs })
   }
 }
 
@@ -138,9 +141,9 @@ async fn play(
   out.waited = Some(started.elapsed());
   let mut link = Play::attach(&shared.trust, &shared.gateway, token).await?;
   let rng = Rng::new(shared.seed.wrapping_mul(0x9e37_79b9) ^ u64::from(bot.index));
-  let (zone, character) = (shared.zone, bot.character);
+  let (layer, character) = (Layer { zone: shared.zone, number: 0 }, bot.character);
   let mut walk =
-    Walk { character, zone, rng, world: World::default(), body: None, heading: None, ticks: 0 };
+    Walk { character, layer, rng, world: World::default(), body: None, heading: None, ticks: 0 };
   let mut clock = interval(TICK);
   clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
   loop {
@@ -168,7 +171,7 @@ async fn play(
             Err(_) => out.gaps += 1,
           }
         }
-        Down::Message(ToClient::Moved { zone }) => walk.zone = zone,
+        Down::Message(ToClient::Moved { zone, layer }) => walk.layer = Layer { zone, number: layer },
         Down::Message(ToClient::Line { .. }) => {}
         Down::Message(other) => return Err(Error::Message(other)),
       },
@@ -200,8 +203,8 @@ mod tests {
   use mmo_client::testing::{Fake, hold};
   use mmo_client::{Account, Place, Trust};
   use mmo_protocol::{
-    Attach, CharacterId, FromClient, FromLogin, Password, Refusal, Snapshot, ToClient, ToLogin,
-    Token, ZoneId, encode,
+    Attach, CharacterId, FromClient, FromLogin, Layer, Password, Refusal, Snapshot, ToClient,
+    ToLogin, Token, ZoneId, encode,
   };
   use tokio::sync::{oneshot, watch};
   use tokio::time::sleep;
@@ -252,7 +255,7 @@ mod tests {
     let (done, finished) = oneshot::channel();
     let gateway = Fake::start(move |mut peer| async move {
       assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
-      peer.write(&ToClient::Moved { zone: ZoneId(1) }).await;
+      peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 2 }).await;
       let line = ToClient::Line {
         channel: "world".to_owned(),
         from: "Ada".to_owned(),
@@ -333,8 +336,9 @@ mod tests {
   }
 
   fn walk() -> Walk {
-    let (character, zone, rng) = (CharacterId(42), ZoneId(1), Rng::new(1));
-    Walk { character, zone, rng, world: World::default(), body: None, heading: None, ticks: 0 }
+    let (character, layer, rng) =
+      (CharacterId(42), Layer { zone: ZoneId(1), number: 1 }, Rng::new(1));
+    Walk { character, layer, rng, world: World::default(), body: None, heading: None, ticks: 0 }
   }
 
   #[test]
@@ -350,7 +354,7 @@ mod tests {
     let headings: Vec<_> = (0..=TURN)
       .map(|_| {
         let intents = walk.tick().expect("the inputs of a tick");
-        assert_eq!(intents.zone, ZoneId(1));
+        assert_eq!((intents.zone, intents.layer), (ZoneId(1), 1));
         walk.heading
       })
       .collect();

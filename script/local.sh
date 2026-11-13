@@ -1,8 +1,9 @@
 #!/bin/sh
 # The whole stack of the game on this machine, with one command each to start it, to check it and to stop it:
 #
-#   sh script/local.sh start    builds the servers, then starts PostgreSQL, Redis, the keeper, the login service, one
-#                               zone writer and one gateway, and prints the addresses that a client uses.
+#   sh script/local.sh start    builds the servers, then starts PostgreSQL, Redis, the keeper, the login service, the
+#                               pool of layer writers of shard 1 and one gateway, and prints the addresses that a
+#                               client uses.
 #   sh script/local.sh check    makes an account and a character through the login service, links to the gateway,
 #                               and waits for the first snapshot of the zone, with the headless binary mmo-check.
 #   sh script/local.sh status   says which processes of the stack run.
@@ -14,7 +15,10 @@
 #
 # The stores run on the ports 55432 and 56379, not on the ports of compose.yaml, so a PostgreSQL or a Redis that
 # already runs on this machine keeps its data and its ports. `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`,
-# `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT` and `MMO_LOCAL_GATEWAY_PORT` change a port.
+# `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT` and `MMO_LOCAL_GATEWAY_PORT` change a port:
+# the layer writers take the ports from `MMO_LOCAL_ZONE_PORT` up. `MMO_LOCAL_WORLD_CAP` and `MMO_LOCAL_LAYER_CAP` set
+# the cap of the shard and the cap of a layer, and the pool holds one writer for the zone, one for each layer that the
+# cap of the shard fills, and 2 more.
 # The stores need initdb, postgres, pg_isready, psql, redis-server and redis-cli: `MMO_LOCAL_PG_BIN` names the folder
 # of the programs of PostgreSQL when it is not in the PATH. The TLS material needs openssl.
 set -eu
@@ -26,9 +30,14 @@ pg_port=${MMO_LOCAL_PG_PORT:-55432}
 redis_port=${MMO_LOCAL_REDIS_PORT:-56379}
 keeper_port=${MMO_LOCAL_KEEPER_PORT:-54433}
 login_port=${MMO_LOCAL_LOGIN_PORT:-54434}
-zone_port=${MMO_LOCAL_ZONE_PORT:-54435}
+# The layer writers take the ports from this one up, one each.
+zone_port=${MMO_LOCAL_ZONE_PORT:-54440}
 gateway_port=${MMO_LOCAL_GATEWAY_PORT:-54436}
 world_cap=${MMO_LOCAL_WORLD_CAP:-100}
+layer_cap=${MMO_LOCAL_LAYER_CAP:-500}
+# The pool of the layer writers of the shard, as section 6 of docs/architecture.md says: one for the zone, one for each
+# layer that the cap of the shard fills, and 2 for the recovery.
+pool=$((1 + (world_cap + layer_cap - 1) / layer_cap + 2))
 # debug or release: the numbers of docs/architecture.md come from release builds.
 profile=${MMO_LOCAL_PROFILE:-debug}
 bin=${CARGO_TARGET_DIR:-$root/target}/$profile
@@ -60,6 +69,7 @@ program() {
   case $1 in
     postgres) echo postgres ;;
     redis) echo redis-server ;;
+    zone*) echo mmo-zone ;;
     *) echo "mmo-$1" ;;
   esac
 }
@@ -117,9 +127,19 @@ zone_made() {
     "INSERT INTO zones (id, name) VALUES (1, 'meadow') ON CONFLICT DO NOTHING" >/dev/null 2>&1
 }
 
-zone_listed() {
-  alive zone || die "the zone writer stopped"
-  [ "$(redis-cli -p "$redis_port" exists zone:1)" = 1 ]
+# The names of the layer writers of the pool, zone1 and up, or those of the pid files of a stack that runs.
+writers() {
+  if [ "${1:-}" = held ]; then
+    for file in "$state"/zone*.pid; do
+      [ -f "$file" ] && basename "$file" .pid
+    done
+    return 0
+  fi
+  number=1
+  while [ "$number" -le "$pool" ]; do
+    echo "zone$number"
+    number=$((number + 1))
+  done
 }
 
 # An authority and one certificate for each server of the stack, for local work only. The certificate holds the names
@@ -166,9 +186,10 @@ start() {
   for port in "$pg_port" "$redis_port"; do
     ! nc -z -w 1 127.0.0.1 "$port" || die "the port $port is in use: set MMO_LOCAL_PG_PORT and MMO_LOCAL_REDIS_PORT"
   done
-  for name in postgres redis keeper login zone gateway; do
+  for name in postgres redis keeper login gateway $(writers held); do
     ! alive "$name" || die "$name runs already: run sh script/local.sh stop first"
   done
+  rm -f "$state"/zone*.pid
   mkdir -p "$state/redis"
   say "building the servers, which takes minutes when the build is cold"
   case $profile in
@@ -193,24 +214,28 @@ start() {
 
   launch login env MMO_LOGIN_ADDRESS="127.0.0.1:$login_port" MMO_LOGIN_CERTIFICATE="$tls/leaf.pem" \
     MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_WORLD=1 MMO_WORLD_CAP="$world_cap" \
-    MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 "$bin/mmo-login"
-  launch zone env ZONE_SHARD=1 ZONE_ID=1 ZONE_ADDRESS="127.0.0.1:$zone_port" ZONE_PUBLIC="localhost:$zone_port" \
-    DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
-    ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
-  wait_for "the zone writer to list its zone" 40 zone_listed
+    MMO_LAYER_CAP="$layer_cap" MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 "$bin/mmo-login"
+  # Each writer of the pool starts idle, and takes a layer that a placement opens.
+  port=$zone_port
+  for name in $(writers); do
+    launch "$name" env ZONE_SHARD=1 ZONE_ADDRESS="127.0.0.1:$port" ZONE_PUBLIC="localhost:$port" \
+      DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
+      ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
+    port=$((port + 1))
+  done
   launch gateway env GATEWAY_ADDRESS="127.0.0.1:$gateway_port" GATEWAY_CERTIFICATE="$tls/leaf.pem" \
     GATEWAY_KEY="$tls/leaf.key" GATEWAY_LINK_CERTIFICATE="$tls/leaf.pem" GATEWAY_LINK_KEY="$tls/leaf.key" \
     GATEWAY_AUTHORITY="$tls/ca.pem" REDIS_URL="$redis" "$bin/mmo-gateway"
 
   sleep 1
-  for name in postgres redis keeper login zone gateway; do
+  for name in postgres redis keeper login gateway $(writers); do
     alive "$name" || die "$name stopped just after its start"
   done
   say "the stack runs. A client uses these addresses, all on QUIC over UDP except the two stores:"
   echo "  login      localhost:$login_port"
   echo "  gateway    localhost:$gateway_port"
   echo "  authority  $tls/ca.pem  (the certificate that signs each server)"
-  echo "  keeper     localhost:$keeper_port  zone writer 1  localhost:$zone_port  (the servers use these two)"
+  echo "  keeper     localhost:$keeper_port  $pool layer writers from localhost:$zone_port  (the servers use these)"
   echo "  postgres   $database"
   echo "  redis      $redis"
   echo "  logs       $state/<process>.log"
@@ -218,7 +243,7 @@ start() {
 }
 
 check() {
-  for name in login zone gateway; do
+  for name in login gateway zone1; do
     alive "$name" || die "$name does not run: run sh script/local.sh start first"
   done
   # An account name holds letters and digits, and the login service makes 5 accounts an hour for one address.
@@ -231,7 +256,7 @@ check() {
 # The load test: bots that make accounts in the database, log in through the login service, wait in its queue, link to
 # the gateway and walk. The count is the first argument, and the other variables of mmo-bots pass through the environment.
 bots() {
-  for name in login zone gateway; do
+  for name in login gateway zone1; do
     alive "$name" || die "$name does not run: run sh script/local.sh start first"
   done
   # Each bot opens a socket for its login and one for its gateway.
@@ -263,20 +288,22 @@ halt() {
 
 stop() {
   halt gateway TERM
-  halt zone TERM
+  for name in $(writers held); do
+    halt "$name" TERM
+  done
   halt login TERM
   halt keeper TERM
   halt redis TERM
   # SIGINT is the fast shutdown of PostgreSQL: it does not wait for a client to leave.
   halt postgres INT
-  for name in postgres redis keeper login zone gateway; do
+  for name in postgres redis keeper login gateway $(writers held); do
     ! alive "$name" || die "$name stays"
   done
   say "no process of the stack stays"
 }
 
 status() {
-  for name in postgres redis keeper login zone gateway; do
+  for name in postgres redis keeper login gateway $(writers held); do
     if alive "$name"; then echo "$name runs, pid $(cat "$state/$name.pid")"; else echo "$name is stopped"; fi
   done
 }

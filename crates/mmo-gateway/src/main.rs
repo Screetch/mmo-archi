@@ -11,7 +11,7 @@
 //! - `GATEWAY_CERTIFICATE` and `GATEWAY_KEY`: the PEM files of the certificate chain that the
 //!   clients trust, and of its private key.
 //! - `GATEWAY_LINK_CERTIFICATE` and `GATEWAY_LINK_KEY`: the PEM files of the certificate with
-//!   which the gateway shows each zone writer that the operator runs it, and of its private key.
+//!   which the gateway shows each layer writer that the operator runs it, and of its private key.
 //! - `GATEWAY_AUTHORITY`: the PEM file of the certificates that sign the certificate of each zone
 //!   writer. The gateway relays no intent to a peer whose certificate they do not sign.
 //! - `REDIS_URL`: the Redis of the world, as `redis://redis:6379`.
@@ -121,7 +121,7 @@ mod tests {
 
   fn intents(zone: i32) -> Intents {
     let input = Input { tick: Tick(8), heading: Some(Angle(0)), view: Angle(16384) };
-    Intents { zone: ZoneId(zone), ack: Some(Tick(7)), inputs: [input; 3] }
+    Intents { zone: ZoneId(zone), layer: 1, ack: Some(Tick(7)), inputs: [input; 3] }
   }
 
   fn line(text: &str) -> ToClient {
@@ -216,7 +216,7 @@ mod tests {
     let token = world.session(11, 42, 1).await;
     let address = world.gateway().await;
     let (mut client, first) = world.announced(address, token).await;
-    assert_eq!(first, ToClient::Moved { zone: ZoneId(1) });
+    assert_eq!(first, ToClient::Moved { zone: ZoneId(1), layer: 1 });
     let mut one = meadow.accept().await;
     let link = link_at(&client, &one).await;
     let join = ToZone::Join { link, account: AccountId(11), character: CharacterId(42) };
@@ -241,7 +241,7 @@ mod tests {
     client.send_datagram(&intents(2));
     let mut two = forest.accept().await;
     assert_eq!(two.relayed_of::<Intents>().await, Relayed { link, message: intents(2) });
-    let moved = ToClient::Moved { zone: ZoneId(2) };
+    let moved = ToClient::Moved { zone: ZoneId(2), layer: 1 };
     one.tell(&Relayed { link, message: moved.clone() }).await;
     assert_eq!(client.message::<ToClient>().await, moved);
     one.tell(&Relayed { link, message: line("from the meadow") }).await;
@@ -327,9 +327,10 @@ mod tests {
     world.entry(4, "[::1]:4434", 1).await;
     world.entry(6, "localhost:0", 1).await;
     world.entry(7, &strange.address(), 1).await;
+    world.entry(8, "localhost:4434", 0).await;
     let address = world.gateway().await;
     let mut reasons = Vec::new();
-    for zone in [9, 3, 4, 6] {
+    for zone in [9, 8, 3, 4, 6] {
       let client = world.attached(address, world.session(11, 42, zone).await).await;
       reasons.push(client.closed().await);
     }
@@ -340,7 +341,7 @@ mod tests {
     let refused = newer.accept_with(PROTOCOL + 1).await;
     reasons.push(client.closed().await);
     drop(refused);
-    for keys in ["~zone:*", "~session:*"] {
+    for keys in ["~writer:*", "~session:*"] {
       let token = world.session(11, 42, 1).await;
       world.grant(keys, "+@all").await;
       reasons.push(world.attach(address, token).await.closed().await);
@@ -348,10 +349,11 @@ mod tests {
     assert_eq!(
       reasons,
       [
-        reason("the directory names no writer of zone 9"),
-        reason("the gateway cannot resolve the address of a zone writer: invalid socket address"),
-        reason("the address [::1]:4434 of a zone writer names no host that the gateway reaches"),
-        reason("the gateway cannot link to a zone writer: invalid remote address: 127.0.0.1:0"),
+        reason("the directory names no writer of layer 9:1"),
+        reason("the directory names no writer of layer 8:1"),
+        reason("the gateway cannot resolve the address of a layer writer: invalid socket address"),
+        reason("the address [::1]:4434 of a layer writer names no host that the gateway reaches"),
+        reason("the gateway cannot link to a layer writer: invalid remote address: 127.0.0.1:0"),
         Err("aborted by peer: the cryptographic handshake failed: error 51: invalid peer certificate: \
              BadSignature"
           .to_owned()),
@@ -395,7 +397,7 @@ mod tests {
       [
         reason(MALFORMED),
         reason(MALFORMED),
-        reason("the directory names no writer of zone 9"),
+        reason("the directory names no writer of layer 9:1"),
         reason(ENDED),
         reason(LARGE),
       ]
@@ -409,7 +411,9 @@ mod tests {
     let meadow = world.zone(1).await;
     let address = world.gateway().await;
     let (mut writer, mut played) = play(&world, address, &meadow, &[1, 2, 3, 4]).await;
-    writer.tell(&Relayed { link: played[0].1, message: ToClient::Moved { zone: ZoneId(9) } }).await;
+    writer
+      .tell(&Relayed { link: played[0].1, message: ToClient::Moved { zone: ZoneId(9), layer: 1 } })
+      .await;
     writer.relay(&Relayed { link: played[2].1, message: crowd() });
     played[1].0.recv.stop(7u32.into()).expect("an open stream");
     let line = Relayed { link: played[1].1, message: line(SAY) };
@@ -424,7 +428,7 @@ mod tests {
     assert_eq!(
       reasons,
       [
-        reason("the directory names no writer of zone 9"),
+        reason("the directory names no writer of layer 9:1"),
         reason(STOPPED),
         reason(&format!("a datagram holds 1100 bytes at most, and this one holds {size}")),
       ]
@@ -455,7 +459,8 @@ mod tests {
     for client in &clients {
       reasons.push(client.closed().await);
     }
-    let lost = |zone: i32| reason(&format!("the link to the writer of zone {zone} ends: closed"));
+    let lost =
+      |zone: i32| reason(&format!("the link to the writer of layer {zone}:1 ends: closed"));
     assert_eq!(
       reasons,
       [reason(MALFORMED), reason(SHORT), reason(STOPPED), lost(1), lost(2), lost(3)]
@@ -486,8 +491,8 @@ mod tests {
     world.grant("~*", "+@all").await;
     world.entry(1, &meadow.address(), 2).await;
     world.publish(1).await;
-    assert_eq!(ada.closed().await, reason("the link to the writer of zone 1 ends: closed"));
-    assert_eq!(one.closed().await, reason("the directory names another writer of the zone"));
+    assert_eq!(ada.closed().await, reason("the link to the writer of layer 1:1 ends: closed"));
+    assert_eq!(one.closed().await, reason("the directory names another writer of the layer"));
     let mut dee = world.attached(address, world.session(14, 45, 1).await).await;
     let mut again = meadow.accept().await;
     let link = link_at(&dee, &again).await;
@@ -495,7 +500,7 @@ mod tests {
     assert_eq!(dee.message::<ToClient>().await, line(SAY));
 
     two.close();
-    let lost = "the link to the writer of zone 2 ends: closed by peer: 0";
+    let lost = "the link to the writer of layer 2:1 ends: closed by peer: 0";
     assert_eq!(bob.closed().await, reason(lost));
     forest.close();
   }

@@ -6,9 +6,10 @@
 //!
 //! The login service makes only 5 new accounts an hour for one address, so [`run`] first makes the
 //! accounts and the characters in PostgreSQL, with `mmo-store` as the login service does, and then
-//! each bot logs in through the login service. The tick times come from the hash that each zone
-//! writer keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads it before and after the
-//! measure and takes the difference. The bytes are the sizes of the datagrams, with no header of
+//! each bot logs in through the login service. The tick times come from the hash that the writer
+//! of each layer of the zone keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads them before
+//! and after the measure and takes the difference. The bots play in shard 1, the shard of
+//! `script/local.sh`. The bytes are the sizes of the datagrams, with no header of
 //! IP, UDP or QUIC, which add about 60 bytes to each datagram.
 //!
 //! [`run`] reads these variables of its environment:
@@ -44,6 +45,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use mmo_client::Trust;
+use mmo_protocol::ShardId;
 use mmo_store::Store;
 use sqlx::postgres::PgPoolOptions;
 use tokio::sync::watch;
@@ -56,6 +58,9 @@ use report::Report;
 use seed::SEEDERS;
 
 pub use config::Error as ConfigError;
+
+/// The shard of the bots.
+const SHARD: ShardId = ShardId(1);
 
 /// Why the load test does not end.
 #[derive(Debug, thiserror::Error)]
@@ -127,9 +132,9 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
     });
   }
   settle(&shared, tasks.len(), config.join).await;
-  let before = ticks::read(&mut redis, config.zone).await;
+  let before = ticks::read(&mut redis, SHARD, config.zone).await;
   sleep(config.play).await;
-  let after = ticks::read(&mut redis, config.zone).await;
+  let after = ticks::read(&mut redis, SHARD, config.zone).await;
   stop.send_replace(true);
   let mut outcomes: Vec<Outcome> = Vec::new();
   while let Some(done) = tasks.join_next().await {
@@ -262,7 +267,7 @@ mod tests {
     faults.push(run_with(&refused(&[], 1)).await);
     faults.push(run_with(&refused(&[("REDIS_URL", "nope")], 0)).await);
     faults.push(run_with(&refused(&[("REDIS_URL", "redis://127.0.0.1:1")], 0)).await);
-    let blind = user(&redis, "blind", &["-hgetall"]).await;
+    let blind = user(&redis, "blind", &["-hkeys"]).await;
     faults.push(run_with(&refused(&[("REDIS_URL", blind.as_str())], 0)).await);
     let starts = [
       "the certificate cannot be read",

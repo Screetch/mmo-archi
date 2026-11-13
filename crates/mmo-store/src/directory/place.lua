@@ -3,13 +3,19 @@
 -- another zone, else the open layer with the most players and room, and else none, so the player waits.
 -- KEYS: the layers, the draining layers and the caps of the shard, and the presence of the account.
 -- ARGV: the zone, the account, the shard, the prefixes of the writers of the shard, of the presences and of the
--- parties of the shard, the channel of the directory, and when the player leaves a layer, its zone and its number.
+-- parties of the shard, the channel of the directory, the prefix of the places of the shard and their life in
+-- milliseconds, and when the player leaves a layer, its zone and its number.
+-- The count of a layer is the count of its writer and each place that a placement gave and its writer did not take yet,
+-- so placements that come faster than the writer writes its count never pass the cap. The layer that it gives holds
+-- the place of the account until the writer takes the player, or until the place ends.
 -- A layer whose lease is absent, or holds the epoch 0 of a claim before the keeper answered, waits for its writer and
 -- takes no player. It gives the number of the layer, or 0 when the player waits. When it gives 0 and no layer of the
 -- zone waits for its writer, it adds the least free number of the zone to the layers, with a count of 0, for a writer
 -- to claim.
 local zone, account, shard = ARGV[1], ARGV[2], ARGV[3]
-local from_zone, from_number = ARGV[8], ARGV[9]
+local from_zone, from_number = ARGV[10], ARGV[11]
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local cap = tonumber(redis.call('HGET', KEYS[3], 'layer_cap'))
 if not cap then
   return redis.error_reply('NOCAP shard ' .. shard .. ' has no layer_cap')
@@ -25,7 +31,8 @@ for i = 1, #listed, 2 do
     if not epoch or epoch == '0' then
       unclaimed = true
     elseif redis.call('SISMEMBER', KEYS[2], field) == 0 then
-      open[tonumber(n)] = tonumber(listed[i + 1])
+      redis.call('ZREMRANGEBYSCORE', ARGV[8] .. field, '-inf', now)
+      open[tonumber(n)] = tonumber(listed[i + 1]) + redis.call('ZCARD', ARGV[8] .. field)
     end
   end
 end
@@ -47,14 +54,18 @@ end
 local function room(number, count)
   return open[number] ~= nil and open[number] + count <= cap
 end
+local function give(number)
+  redis.call('ZADD', ARGV[8] .. zone .. ':' .. number, now + tonumber(ARGV[9]), account)
+  return number
+end
 if joined then
   if room(joined, 1) then
-    return joined
+    return give(joined)
   end
   return 0
 end
 if from_zone and from_zone ~= zone and room(tonumber(from_number), need) then
-  return tonumber(from_number)
+  return give(tonumber(from_number))
 end
 local best
 for number, count in pairs(open) do
@@ -63,7 +74,7 @@ for number, count in pairs(open) do
   end
 end
 if best then
-  return best
+  return give(best)
 end
 if not unclaimed then
   local free = 1

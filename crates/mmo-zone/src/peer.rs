@@ -81,7 +81,6 @@ impl World {
   ) -> Vec<(&'static str, String)> {
     vec![
       ("ZONE_SHARD", "1".to_owned()),
-      ("ZONE_ID", "1".to_owned()),
       ("ZONE_ADDRESS", address.to_owned()),
       ("ZONE_PUBLIC", "zone-1:4433".to_owned()),
       ("DATABASE_URL", database.to_owned()),
