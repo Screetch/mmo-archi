@@ -48,8 +48,9 @@ pub enum Placed {
 /// The directory of the layers of one shard: the layers of each zone with their counts of
 /// players, the layers that drain, and the lease of the writer of each layer.
 ///
-/// A layer is open when it stands in the directory, a writer holds its lease, and it does not
-/// drain. The cap of each layer is the [`LAYER_CAP`](keys::LAYER_CAP) of the shard.
+/// A layer is open when it stands in the directory, a writer holds its lease with an epoch that
+/// the keeper gave, and it does not drain. The cap of each layer is the
+/// [`LAYER_CAP`](keys::LAYER_CAP) of the shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Directory {
   /// The shard of the directory.
@@ -301,6 +302,8 @@ mod tests {
     let life: i64 = db.pttl("writer:1:1:1").await.expect("a life");
     assert!((2000..=3000).contains(&life), "{life}");
     assert_eq!(SHARD.claim(&mut db, "w2:4433").await.expect("a claim"), None);
+    assert_eq!(place(&mut db, 1, 1).await, Placed::Wait, "the keeper did not answer the writer");
+    assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "0")]));
     count(&mut db, on(1, 1), 1, 0).await;
     assert_eq!(place(&mut db, 1, 1).await, Placed::On(on(1, 1)));
     count(&mut db, on(1, 1), 1, 2).await;
@@ -410,6 +413,7 @@ mod tests {
     for layer in [on(1, 1), on(1, 2), on(2, 1), on(2, 2), on(3, 1), on(3, 3)] {
       db.hset::<_, _, _, ()>("layers:1", keys::field(layer), 0).await.expect("a layer");
       assert_eq!(SHARD.claim(&mut db, "w").await.expect("a claim"), Some(layer));
+      count(&mut db, layer, 1, 0).await;
     }
     for (layer, players) in [(on(1, 1), 1), (on(1, 2), 1), (on(3, 1), 1), (on(3, 3), 3)] {
       count(&mut db, layer, 1, players).await;

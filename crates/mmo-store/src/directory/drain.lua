@@ -18,7 +18,8 @@ local listed = redis.call('HGETALL', KEYS[1])
 for i = 1, #listed, 2 do
   local field = listed[i]
   local zone = string.match(field, '^(-?%d+):%d+$')
-  if zone == ARGV[1] and field ~= own and redis.call('EXISTS', ARGV[3] .. field) == 1
+  local epoch = redis.call('HGET', ARGV[3] .. field, 'epoch')
+  if zone == ARGV[1] and field ~= own and epoch and epoch ~= '0'
     and redis.call('SISMEMBER', KEYS[2], field) == 0 then
     room = room + math.max(cap - tonumber(listed[i + 1]), 0)
   end

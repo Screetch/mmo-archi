@@ -4,8 +4,10 @@
 -- KEYS: the layers, the draining layers and the caps of the shard, and the presence of the account.
 -- ARGV: the zone, the account, the shard, the prefixes of the writers of the shard, of the presences and of the
 -- parties of the shard, the channel of the directory, and when the player leaves a layer, its zone and its number.
--- It gives the number of the layer, or 0 when the player waits. When it gives 0 and each layer of the zone has a
--- writer, it adds the least free number of the zone to the layers, with a count of 0, for a writer to claim.
+-- A layer whose lease is absent, or holds the epoch 0 of a claim before the keeper answered, waits for its writer and
+-- takes no player. It gives the number of the layer, or 0 when the player waits. When it gives 0 and no layer of the
+-- zone waits for its writer, it adds the least free number of the zone to the layers, with a count of 0, for a writer
+-- to claim.
 local zone, account, shard = ARGV[1], ARGV[2], ARGV[3]
 local from_zone, from_number = ARGV[8], ARGV[9]
 local cap = tonumber(redis.call('HGET', KEYS[3], 'layer_cap'))
@@ -19,7 +21,8 @@ for i = 1, #listed, 2 do
   local z, n = string.match(field, '^(-?%d+):(%d+)$')
   if z == zone then
     used[tonumber(n)] = true
-    if redis.call('EXISTS', ARGV[4] .. field) == 0 then
+    local epoch = redis.call('HGET', ARGV[4] .. field, 'epoch')
+    if not epoch or epoch == '0' then
       unclaimed = true
     elseif redis.call('SISMEMBER', KEYS[2], field) == 0 then
       open[tonumber(n)] = tonumber(listed[i + 1])
