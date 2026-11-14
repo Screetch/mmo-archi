@@ -13,6 +13,7 @@ from furb.engine import (
   act,
   acting,
   bash,
+  cancel,
   cd,
   chain,
   clock,
@@ -22,6 +23,7 @@ from furb.engine import (
   get,
   operated,
   over,
+  pause,
   paused,
   peek,
   prompt,
@@ -38,11 +40,11 @@ The round is autonomous: the word of the owner comes when he can give it, so the
 Put each item in queue as a dict, in the order of the work, the hard work first: its key, brief and thread, and when it needs them its after (the keys whose PRs merge first), areas (its files), model, and kind (edit, audit or fix, edit by default). Then await conduct(). Each round runs tend(), sweep(), review(), keep_disk(), staff(), asked() and align(), then waits every seconds or until a worker ends. working maps the prompt of each worker to its item, which keeps its slot and, once the worker ends, the PR of its report in pr, or 0.
 1. staff() hires the first item of queue whose after all merged, whose model has room, and whose files that must change ALONE no live worker and no open PR of the round holds, while fewer than cap() - 1 workers live, so one slot stays for a fixer: a worker lives while its chain said a fact in the last QUIET seconds, and one that said none is one notice with its open acts; cap() is at most MOST, and limits["room"][family] for each model family.
 2. The files of an item are its areas, which you write, and a test file holds no item. An item with no areas holds no file. A conflict on a file that need not change alone gets a fixer, by E3 of #1084. Each item that waits on a PR or a file is one line of the next notice, with its cause, once.
-3. A worker runs on a chain thread/key, at model_of(item), and an edit or a fix in a workspace {repo}-wN of its own, never one whose furb-holder names the chain of a live worker, and never one that holds work off a branch: a dirty tree, or a commit that no remote holds while its branch is the head of no merged PR. The round skips such a workspace and tells you once. Each round keep_disk() keeps KEEP GB of the disk free: it deletes the target of the idle workspace whose last worker was hired first, never of one that a live worker holds, and tells you once when it cannot. Its brief starts with the asks of the owner that its item carries. Its brief sends each build of the worker through script/build-slot.sh, which holds the slots of builds that all the workers of the machine share and caps the jobs of cargo: the tool holds that rule, and the round only briefs it.
-4. A worker that ends gives its report whole in the next notice. A worker that ends with no PR is a decision, and its notice wakes you.
+3. A worker runs on a chain thread/key, at model_of(item), and an edit or a fix in a workspace {repo}-wN of its own, never one whose furb-holder names the chain of a live worker, and never one that holds work off a branch: a dirty tree, or a commit that no remote holds while its branch is the head of no merged PR. The round skips such a workspace and tells you once. Each round keep_disk() keeps KEEP GB of the disk free: it deletes the target of the idle workspace whose last worker was hired first, never of one that a live worker holds, and tells you once when it cannot. Its brief starts with the asks of the owner that its item carries. Its brief sends each build of the worker through script/build-slot.sh, which holds the slots of builds that all the workers of the machine share and caps the jobs of cargo: the tool holds that rule, and the round only briefs it. Its brief also tells the worker to show no log whole, and to filter each log with grep, head or tail, so the record stays small.
+4. A worker that ends gives its report whole in the next notice. A worker that ends with no PR is a decision, and its notice wakes you. As soon as a worker ends, tend() closes its chain: it cancels each open act of the chain and pauses it, so its model reads nothing more and the record stays small. A fixer that forks that chain still reads it.
 5. A PR of the round is an open PR whose label w:key names an item that the round holds. A red or conflicting one counts as handled only while a worker that knows of its head acts: its live maker, which the round tells at once, once for each head and problem, to fix it before any other step, else a fixer that the round sent for that head, at most 2 for a head, then a notice. A fixer runs at the model of the fixer on a fork of the chain of the worker that made the PR, when the round holds that worker, so it starts with what that worker read and did. A head that such a worker has not moved in UNMOVED seconds is one notice, with the worker and its last act. handler() holds that rule for the sweep.
 6. While the newest run of the gates on main failed, the round sends no order and no fixer for a red PR, and tells you once. A red PR whose failed checks all fail on main too gets no fixer either, and the round says so in one line.
-7. The round merges a green PR itself, and GitHub merges none: the round turns off the auto-merge of each PR that it tends, since GitHub would merge a head that stands on an old main. The ruleset of main requires the checks GATE and the title and no up-to-date branch, so the round holds that rule in its own merge. It merges a PR only when its head holds the current tip of its base and the newest run of its gates passed on that head: in one command it reads how far the head is behind its base, and merges with gh pr merge --squash --match-head-commit only at 0, else with gh stack merge for a layer of a stack. A green PR that is behind its base is not merged: the round updates its branch with gh pr update-branch, one PR for each sweep, only while no other PR of the round stands on the current tip with its gates still running, so the gates run again on the head and the next sweep reads them. Each merge changes main, so the PRs that wait are behind it, and each one meets the same rule in its turn. With no ruleset of main that requires the check GATE, the round merges no PR and tells you once. A draft, an open box of its checklist, or the label hold, hold:owner-review or owner-merge keeps a PR from the merge, and the label paused takes it out of the round.
+7. The round merges a green PR itself, and GitHub merges none: the round turns off the auto-merge of each PR that it tends, since GitHub would merge a head that stands on an old main. The ruleset of main requires the checks GATE and the title and no up-to-date branch, so the round holds that rule in its own merge. It merges a PR only when its head holds the current tip of its base and the checks GATE and LOAD both passed on that head, LOAD when the paths of LOADED on main take a file of the PR, since only those start it: a check that failed, that has not run or that still runs keeps the PR from the merge. In one command it reads how far the head is behind its base, and merges with gh pr merge --squash --match-head-commit only at 0, else with gh stack merge for a layer of a stack. A green PR that is behind its base is not merged: the round updates its branch with gh pr update-branch, one PR for each sweep, only while no other PR of the round stands on the current tip with its checks still running, so the gates run again on the head and the next sweep reads them. Each merge changes main, so the PRs that wait are behind it, and each one meets the same rule in its turn. With no ruleset of main that requires the check GATE, the round merges no PR and tells you once. A draft, an open box of its checklist, or the label hold, hold:owner-review or owner-merge keeps a PR from the merge, and the label paused takes it out of the round.
 8. At ALIGN_EVERY merged PRs since the last audit of each target of AUDITS, the round queues the next free audit of that target, alignN, of kind audit, on limits["models"]["astra"] when N is odd, else on the model of audit. alignN checks main against the words of the owner. Each row of its register becomes an item, queued in the order of the register after the items of queue, unless the coordinator asks for the rows before the items that no worker holds yet.
 9. Each message of the owner that no ask of owner_asks names is one line, and so is each ask that is not done or a decision while no item in queue, at work or on an open PR of the round carries it. asked() gives the new lines in one notice, and no new notice while its last one stands open: no word of the owner drops between his message and main. A worker that ends with a line Left: <ids> queues one follow-up for each ask that no other item carries, and a follow-up that leaves it again is a decision.
 10. Each new comment of the owner on a PR of the round goes to the worker on it, else to a fixer on a fork of the chain of its maker, and the label hold comes on the PR until its worker pushes the fix and takes hold off.
@@ -56,6 +58,8 @@ UNMOVED = 1800.0
 ALIGN_EVERY = 4
 OWNER = "Screetch"
 GATE = "the gates"
+LOAD = "the load"
+LOADED = ".github/workflows/load.yml"
 FAILS = ("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "CANCELLED")
 GREEN = ("SUCCESS", "SKIPPED", "NEUTRAL")
 HOLDS = ("hold", "hold:owner-review", "owner-merge", "paused")
@@ -101,7 +105,7 @@ def asks_kept() -> dict[str, dict]:
 
 owner_asks: dict[str, dict] = globals().setdefault("owner_asks", asks_kept())
 
-RULES = """Write no word of the owner in a PR, a commit, a comment, an issue or a file, as a quote, a translation or an attribution: say in your own words what the change does. Run no real life of a model. Never open a window on this machine, not even for a test: the owner works on it, and each window takes his mouse and his keyboard. Run a check of the app only on the runners of CI. Start each comment, review, issue and PR body that you write on GitHub with 🤖, since you write from the owner's account and his own words carry no mark; a title keeps its own rule. Never take off the label owner-merge: only the owner takes it off, and that is his approval to merge. The owner sleeps or is away: ask him nothing and wait for nothing of his. Take each decision yourself from the brief and the rulings, say it in your PR body, and go on. A cause that a brief names is a hypothesis: check it in the log before you build on it. Ask the one who gave you this work on its chain only when it alone can decide: await prompt(str, question, on="{home}"). Set each timeout and each wait to about twice the time that the step should take, never a round bound in case, and make a long step print its progress, so that a hang shows at once. Never wait on CI in a bash for more than 10 minutes: not gh pr checks --watch, not gh run watch, not a loop of sleep around gh. To wait for the checks of your PR, await checked(number) and never write a loop of your own. Rerun a check only when its line says [machine] or [cancelled], once for each head, with gh run rerun <run> --failed, and then await checked(number) again; a [defect] is yours to fix. Once your push is done, read the checks once and close with the PR and its checks as they stand, since the round tends them. A build with no cap took this machine down out of memory, so each build goes through sh script/build-slot.sh <command>, from the root of your workspace: cargo, git commit, whose hooks run cargo, and sh script/hooks/pre-commit. It holds one of the slots of builds that all the workers of the machine share, waits for a free one, and caps the jobs of cargo at 4. Give its bash a timeout of 2400 seconds: when it exits 75, no slot freed in 1200 seconds, so run it again. Run one build at a time, give cargo no -j and no CARGO_BUILD_JOBS above 4, and start no build in the background."""
+RULES = """Write no word of the owner in a PR, a commit, a comment, an issue or a file, as a quote, a translation or an attribution: say in your own words what the change does. Run no real life of a model. Never open a window on this machine, not even for a test: the owner works on it, and each window takes his mouse and his keyboard. Run a check of the app only on the runners of CI. Start each comment, review, issue and PR body that you write on GitHub with 🤖, since you write from the owner's account and his own words carry no mark; a title keeps its own rule. Never take off the label owner-merge: only the owner takes it off, and that is his approval to merge. The owner sleeps or is away: ask him nothing and wait for nothing of his. Take each decision yourself from the brief and the rulings, say it in your PR body, and go on. A cause that a brief names is a hypothesis: check it in the log before you build on it. Ask the one who gave you this work on its chain only when it alone can decide: await prompt(str, question, on="{home}"). Set each timeout and each wait to about twice the time that the step should take, never a round bound in case, and make a long step print its progress, so that a hang shows at once. Never wait on CI in a bash for more than 10 minutes: not gh pr checks --watch, not gh run watch, not a loop of sleep around gh. To wait for the checks of your PR, await checked(number) and never write a loop of your own. Rerun a check only when its line says [machine] or [cancelled], once for each head, with gh run rerun <run> --failed, and then await checked(number) again; a [defect] is yours to fix. Once your push is done, read the checks once and close with the PR and its checks as they stand, since the round tends them. A build with no cap took this machine down out of memory, so each build goes through sh script/build-slot.sh <command>, from the root of your workspace: cargo, git commit, whose hooks run cargo, and sh script/hooks/pre-commit. It holds one of the slots of builds that all the workers of the machine share, waits for a free one, and caps the jobs of cargo at 4. Give its bash a timeout of 2400 seconds: when it exits 75, no slot freed in 1200 seconds, so run it again. Run one build at a time, give cargo no -j and no CARGO_BUILD_JOBS above 4, and start no build in the background. Never show a whole log, as the output of a build, a test or a run of CI: filter each log with grep, head or tail, so the record stays small."""
 
 WORKER = """You are a worker on the repository {repo}. Do one item, and open its PR yourself.
 1. Your branch is w/{key}. {workspace} Build on origin/main, and stack your branch on an open PR only when your change needs its code, and say why in the body. Make a stack with gh stack, and run skill("gh-stack") in a word of your own before you make or touch one.
@@ -175,7 +179,9 @@ gh api 'repos/{owner}/{repo}/rules/branches/main' --jq '[.[] | select(.type == "
 c=$?; echo; echo "--- $c"
 gh api 'repos/{owner}/{repo}/commits/main/check-runs?per_page=100' --jq '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name]'
 c=$?; echo; echo "--- $c"
-"""
+gh api 'repos/{owner}/{repo}/contents/@LOADED@?ref=main' -H 'Accept: application/vnd.github.raw'
+c=$?; echo; echo "--- $c"
+""".replace("@LOADED@", LOADED)
 
 REVIEWS = r"""for n in {prs}; do
 gh api "repos/{owner}/{repo}/pulls/$n/comments" --jq '.[] | "\(.pull_request_url | split("/") | last)\tc\(.id)\t\(.user.login)\t\(.path):\(.line // .original_line)\t\(.body | gsub("[\r\n\t]"; " "))"' || exit 1
@@ -443,6 +449,17 @@ def left(item: dict, report: str) -> None:
     kept_asks()
 
 
+def open_acts(where: str) -> list[str]:
+  return [str(x[1]) for x in transcript(where) if re.fullmatch(re.escape(str(x[0])) + r"\d+", str(x[1])) and not over(x[1])]
+
+
+def shut(name: str) -> None:
+  where = working_at(name)
+  for one in open_acts(where):
+    cancel(one, "its item ended")
+  pause(where, "its item ended")
+
+
 def tend() -> None:
   for name, item in working.items():
     if "pr" in item or not over(name):
@@ -458,12 +475,13 @@ def tend() -> None:
     else:
       notice(f"end {name}", f"The worker {key} ({name}) ended with no PR, which needs your decision:\n\n{report}")
     left(item, report)
+    shut(name)
   for name in living():
     facts = transcript(working_at(name))
     if progress.get(name, (-1, 0.0))[0] != len(facts):
       progress[name] = (len(facts), clock())
     elif unheard(name):
-      acts = [str(x[1]) for x in facts if re.fullmatch(re.escape(str(x[0])) + r"\d+", str(x[1])) and not over(x[1])]
+      acts = open_acts(working_at(name))
       notice(f"quiet {name} {len(facts)}", f"The worker {working[name]['key']} ({name}) said no fact on its chain for {int(QUIET // 60)} minutes, so the round counts it as no live worker. Its open acts: {', '.join(acts[-10:]) or 'none'}.")
   for gone in [n for n in progress if n not in living()]:
     progress.pop(gone)
@@ -482,13 +500,18 @@ def keep_disk() -> Generator[set[str], object, None]:
     raise Refused(f"the keep of the disk exited {got.code}: {got.stderr.content.strip()[-200:]}")
 
 
+def passed(pr: dict, name: str) -> bool:
+  return dict(zip(pr["names"], pr["checks"])).get(name) == "SUCCESS"
+
+
 def state(pr: dict) -> str:
   checks = pr["checks"]
   if pr["mergeable"] == "CONFLICTING":
     return "conflicting"
   if pr["open"] or (any(c in FAILS for c in checks) and all(c in (*FAILS, *GREEN) for c in checks)):
     return "red"
-  return "green" if GATE in pr["names"] and all(c in GREEN for c in checks) else "running"
+  loaded = passed(pr, LOAD) or not pr.get("load", True)
+  return "green" if passed(pr, GATE) and loaded and all(c in GREEN for c in checks) else "running"
 
 
 def trouble(pr: dict) -> str:
@@ -566,14 +589,24 @@ def land(ready: list[dict], flips: list[str]) -> Generator[set[str], object, Non
     yield from shell("".join(f"{{ {x}; }} >/dev/null 2>&1; " for x in steps), timeout=300)
 
 
+def globbed(path: str, glob: str) -> bool:
+  return bool(re.fullmatch(re.escape(glob).replace(r"\*\*", ".*").replace(r"\*", "[^/]*"), path))
+
+
+def load_paths(text: str) -> list[str] | None:
+  block = re.search(r"(?m)^  pull_request:\n    paths:\n((?:      - .+\n)+)", text)
+  return re.findall(r"- (\S+)", block[1]) if block else None
+
+
 def sweep() -> Generator[set[str], object, None]:
   got = yield from shell(PRS, timeout=300)
   bits = re.split(r"\n--- (\d+)\n", "\n" + got.stdout.content)
-  if len(bits) != 11 or any(code != "0" for code in bits[1:8:2]):
+  if len(bits) != 13 or any(code != "0" for code in bits[1:8:2]):
     raise Refused(f"gh listed no PRs: {got.stderr.content.strip()[-300:] or 'it said nothing'}")
   mine = {n for n, pr in prs.items() if ours(pr)}
   prs.clear()
   prs.update({pr["n"]: pr for pr in json.loads(bits[0])})
+  globs = load_paths(bits[10]) if bits[11] == "0" else None
   fresh = {n: head for n, head in json.loads(bits[2]) if n not in merges}
   merges.update(fresh)
   landed.extend(sorted(fresh.keys() & mine))
@@ -594,9 +627,10 @@ def sweep() -> Generator[set[str], object, None]:
   flips: list[str] = []
   ready: list[dict] = []
   for n in sorted(prs):
-    pr = prs[n]
+    pr: Any = prs[n]
     if not ours(pr) or "paused" in pr["labels"]:
       continue
+    pr["load"] = globs is None or any(globbed(f, g) for f in pr["files"] for g in globs)
     now = pr["state"] = state(pr)
     failing = {name for name, end in zip(pr["names"], pr["checks"]) if end in FAILS}
     labelled = bool(set(HOLDS) & set(pr["labels"]))
