@@ -1,7 +1,7 @@
 #!/bin/sh
 # Reads the report that `sh script/local.sh bots <count>` printed, and fails when the run broke a rule of scale:
 #
-#   sh script/report.sh <report> <count> <realms> [<waiting> [<recover> [<crossers> [<leavers>]]]]
+#   sh script/report.sh <report> <count> <realms> [<waiting> [<recover> [<crossers> [<leavers> [<rush>]]]]]
 #
 # The program of the bots exits with 0 when a bot fails, so this script reads its report. It fails when the report
 # is missing, when a bot did not play or wait in the queue, or ended with a fault (a message that fails to decode is
@@ -12,7 +12,9 @@
 # back on another layer, when two realms play and a bot saw a bot of the other one, and, when <crossers> is above 0, when
 # a crosser did not enter the next zone or entered a layer with another number than its own, and, when <leavers> is above 0, when a bot
 # left does not play at the end, or the last look at the directory shows an empty layer or a layer of a quarter of its
-# cap or fewer whose players fit in the other layers. It checks no tick time and no
+# cap or fewer whose players fit in the other layers, and, when <rush> is above 0, when the level of a realm in the list
+# was not the level of its admitted players, when the full realm made a new character, or when the layers of a realm
+# did not hold its bots that play. It checks no tick time and no
 # byte budget, which stage 2 of section 12 of docs/architecture.md proves.
 set -eu
 
@@ -23,13 +25,14 @@ waiting=${4:-0}
 recover=${5:-0}
 crossers=${6:-0}
 leavers=${7:-0}
+rush=${8:-0}
 
 awk -v want="$count" -v realms="$realms" -v waiting="$waiting" -v recover="$recover" -v crossers="$crossers" \
-  -v leavers="$leavers" '
+  -v leavers="$leavers" -v rush="$rush" '
   /^load test: / { found = 1; bots = $3; played = $5; queued = $7 }
   /^  [0-9]+ bots: / { faults += $1; print "fault: " $0 }
   /^realm [0-9]+: / { opened++ }
-  /^budget (no layer over its cap|each realm opened the layers that its players need|the queue holds the bots that must wait|the queue admits in the order of entry|each waiting bot holds the place of its order of entry|each waiting bot gets its place at least each 7 s|each bot that lost its link played again|each bot played again within [0-9]+ s|each bot played again on its layer|each crosser entered the next zone|each entry into the next zone kept the number of its layer|no bot saw a bot of another realm|each bot left plays|no layer stands empty|no layer of a quarter of its cap or fewer fits in the other layers): / {
+  /^budget (no layer over its cap|each realm opened the layers that its players need|the queue holds the bots that must wait|the queue admits in the order of entry|each waiting bot holds the place of its order of entry|each waiting bot gets its place at least each 7 s|each bot that lost its link played again|each bot played again within [0-9]+ s|each bot played again on its layer|each crosser entered the next zone|each entry into the next zone kept the number of its layer|no bot saw a bot of another realm|each bot left plays|no layer stands empty|no layer of a quarter of its cap or fewer fits in the other layers|the level of each realm matches its admitted players at each look|the full realm refuses a new character and makes none|each realm holds the players of its bots): / {
     lines++
     if ($NF != "ok") { print "error: " $0; bad = 1 }
   }
@@ -39,9 +42,9 @@ awk -v want="$count" -v realms="$realms" -v waiting="$waiting" -v recover="$reco
       printf "error: %s of %s bots played, %s waited of %s that must, and %d ended with a fault\n", played, want, queued, waiting, faults
       bad = 1
     }
-    expected = 6 + 3 * recover + 2 * (crossers > 0) + (realms > 1) + 3 * (leavers > 0)
+    expected = 6 + 3 * recover + 2 * (crossers > 0) + (realms > 1) + 3 * (leavers > 0) + 3 * (rush > 0)
     if (opened != realms || lines != expected) {
-      printf "error: the report shows %d of %d realms, and %d of its %d lines of the budget on the layers, the queue, the recovery and the drain\n", opened, realms, lines, expected
+      printf "error: the report shows %d of %d realms, and %d of its %d lines of the budget on the layers, the queue, the recovery, the drain and the realms\n", opened, realms, lines, expected
       bad = 1
     }
     exit bad

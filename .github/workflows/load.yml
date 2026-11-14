@@ -14,7 +14,8 @@ name: load
 # alone, with 200 bots and one fault for each run: the stop of the layer writer of their layer, of the gateway and of
 # the keeper, as `script/faults.sh` says. Before it, it runs stage 5 on the head alone, since a base below the drain
 # cannot pass it: 200 bots on layers of cap 20, of which 150 log out once each plays, and the measure of 150 s that
-# follows shows each layer that they emptied drained and closed.
+# follows shows each layer that they emptied drained and closed. Last it runs stage 7 on the head alone, since a base
+# with no list of the realms cannot pass it: 285 bots in 3 realms of cap 100, of which the first fills to full.
 on:
   workflow_dispatch:
   pull_request:
@@ -23,6 +24,7 @@ on:
       - crates/mmo-client/**
       - crates/mmo-collide/**
       - crates/mmo-gateway/**
+      - crates/mmo-login/**
       - crates/mmo-protocol/**
       - crates/mmo-store/**
       - crates/mmo-zone/**
@@ -196,8 +198,32 @@ jobs:
               echo '```'
             } >>"$GITHUB_STEP_SUMMARY"
           done
+          # Stage 7, on the head: the first realm fills to full with 100 bots, the bot before the rush asks there for a new
+          # character, and a rush of 50 waits in its queue. Then the first 20 bots log out, and 20 bots of the rush enter
+          # in their order while 30 still wait. The second realm gets 85 bots and the third 50. The measure of 90 s covers
+          # the 60 s that the slot of a bot that logged out can still last.
+          export MMO_LOCAL_REALMS=3 MMO_LOCAL_REALM_CAP=100 MMO_LOCAL_LAYER_CAP=20 MMO_LOCAL_ZONES=1
+          export MMO_LOCAL_ATTRIBUTES='Europe:French:normal Europe:French:normal America:English:role-play'
+          echo "$(date +%T) head: stage 7"
+          dir=$out/head-realms
+          mkdir -p "$dir"
+          export MMO_LOCAL_DIR=$dir/stack
+          sh script/local.sh start >"$dir/start.log"
+          if ! MMO_BOTS_REALMS=150,85,50 MMO_BOTS_RUSH=50 MMO_BOTS_LEAVERS=20 MMO_BOTS_WAITING=30 MMO_BOTS_PLAY_SECONDS=90 \
+            timeout 600 sh script/local.sh bots 285 >"$dir/bots.log" 2>&1 ||
+            ! sh script/report.sh "$dir/bots.log" 285 3 30 0 0 20 50; then
+            broken="$broken realms"
+            tail -n 45 "$dir/bots.log"
+          fi
+          sh script/local.sh stop >/dev/null
+          {
+            echo "### head: stage 7, 285 bots in 3 realms of cap 100, the first one full"
+            echo '```'
+            tail -n 45 "$dir/bots.log"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
           [ -z "$failed" ] || echo "::error::the bots of the head failed in the stages of$failed bots"
-          [ -z "$broken" ] || echo "::error::the bots of the head failed in the stages 5 and 6 for$broken"
+          [ -z "$broken" ] || echo "::error::the bots of the head failed in the stages 5, 6 and 7 for$broken"
           [ -z "$failed$broken" ] || exit 1
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

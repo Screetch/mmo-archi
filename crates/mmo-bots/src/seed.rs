@@ -5,7 +5,7 @@
 use futures_util::future::try_join_all;
 use mmo_client::Account;
 use mmo_collide::SIDE_CM;
-use mmo_protocol::{Angle, CharacterId, Password, Position, RealmId, State};
+use mmo_protocol::{AccountId, Angle, CharacterId, Password, Position, RealmId, State};
 use mmo_store::{NewCharacter, Store};
 
 use crate::Failure;
@@ -27,10 +27,16 @@ pub(crate) struct Bot {
   /// The realm that the bot plays in, and the address of the login service of that realm.
   pub(crate) realm: u32,
   pub(crate) login: String,
+  pub(crate) id: AccountId,
   pub(crate) account: Account,
   pub(crate) character: CharacterId,
   /// True when the bot starts near the east border of the zone and walks east, to cross it.
   pub(crate) crosser: bool,
+  /// The rank of the bot in the rush of the last bots of the first realm, when it is one of them.
+  pub(crate) rush: Option<u32>,
+  /// The name of a new character that the bot asks for first, when it is the last bot of the first
+  /// realm before the rush: it fills the realm, so the realm must refuse that character.
+  pub(crate) probe: Option<String>,
 }
 
 /// The `width` letters, from a to z, of the number `n`, the least digit first.
@@ -78,13 +84,19 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
   let saved = store.create_character(&new).await?;
   let password = Password(PASSWORD.to_owned());
   let account = Account { name, password, character, create: false };
+  let (_, rank, count) = config.placed(index);
+  let first = count.saturating_sub(config.rush);
+  let rushing = config.rush > 0 && realm == 1;
   Ok(Bot {
     index,
     realm,
     login: login.to_owned(),
+    id,
     account,
     character: saved,
     crosser: crosser(config, index),
+    rush: (rushing && rank >= first).then(|| rank - first),
+    probe: (rushing && rank + 1 == first).then(|| format!("N{run}{}", letters(index.into(), 4))),
   })
 }
 
@@ -122,6 +134,8 @@ mod tests {
       waiting: 0,
       crossers: 0,
       leavers: 0,
+      split: Vec::new(),
+      rush: 0,
       town,
       ramp: 1,
       join: Duration::ZERO,
@@ -175,6 +189,22 @@ mod tests {
     let crossers: Vec<u32> = bots.iter().filter(|bot| bot.crosser).map(|bot| bot.index).collect();
     assert_eq!(crossers, [0, 1, 2]);
     assert!(saved.iter().all(|one| one.zone == ZoneId(3) && one.state.hit_points == 100));
+    assert!(bots.iter().all(|bot| bot.rush.is_none() && bot.probe.is_none()));
+    let rush = Config { split: vec![4, 2], rush: 2, run: "ghi".to_owned(), ..config(6, 0) };
+    let bots = seed(&store, &rush).await.expect("six bots");
+    let roles: Vec<_> =
+      bots.iter().map(|bot| (bot.realm, bot.rush, bot.probe.as_deref())).collect();
+    assert_eq!(
+      roles,
+      [
+        (1, None, None),
+        (1, None, Some("Nghibaaa")),
+        (1, Some(0), None),
+        (1, Some(1), None),
+        (2, None, None),
+        (2, None, None)
+      ]
+    );
     let again = seed(&store, &config(1, 0)).await.err().map(|error| error.to_string());
     assert_eq!(again.as_deref(), Some("the store refuses the bots: the name botabc0 is taken"));
     let elsewhere = Config { zone: ZoneId(99), run: "def".to_owned(), ..config(1, 0) };

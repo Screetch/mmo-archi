@@ -218,11 +218,13 @@ fix what your change broke, and report what was broken before.
   `Europe:French:normal`). The stack runs a login service and a pool of layer writers for each realm, the writers on the
   ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the realms, and their report
   gives the layers that opened in each realm and the players on each. Set the same `MMO_LOCAL_REALMS` for `bots` as for
-  `start`. `sh script/report.sh <report> <count> <realms> [<waiting> [<recover>]]` reads that report and fails on a bot
-  that did not play or wait in the queue, on a layer over its cap, on a realm with too few layers, on a queue that
-  holds another count of bots than `<waiting>`, admits out of its order or gives no place each 7 s, and, when
-  `<recover>` is 1, on a bot that did not play again in time or on its layer. `MMO_BOTS_WAITING` and
-  `MMO_BOTS_RECOVER_SECONDS` set those two rules for the bots. `sh script/local.sh fault <gateway|keeper|writer>
+  `start`. `sh script/report.sh <report> <count> <realms> [<waiting> [<recover> [<crossers> [<leavers> [<rush>]]]]]`
+  reads that report and fails on a bot that did not play or wait in the queue, on a layer over its cap, on a realm with
+  too few layers, on a queue that holds another count of bots than `<waiting>`, admits out of its order or gives no
+  place each 7 s, when `<recover>` is 1, on a bot that did not play again in time or on its layer, and, when `<rush>` is
+  above 0, on a level of the list of the realms apart from the admitted players, on a full realm that made a new
+  character, or on a realm whose layers do not hold its bots. `MMO_BOTS_WAITING`, `MMO_BOTS_RECOVER_SECONDS` and
+  `MMO_BOTS_RUSH` set those rules for the bots, and `MMO_BOTS_REALMS` the count of the bots of each realm. `sh script/local.sh fault <gateway|keeper|writer>
   [seconds]` ends one process of the running stack with KILL, waits, and starts it again, `sh script/local.sh versions`
   prints the version of the save of each character, and `sh script/local.sh players` the players that the directory
   counts. `sh script/faults.sh <writer|gateway|keeper> <count> <log>` runs stage 6 for one fault on that stack. No

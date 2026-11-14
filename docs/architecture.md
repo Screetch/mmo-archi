@@ -904,11 +904,14 @@ more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
 On a machine of the owner, a run stays small: layers of cap 5, the least cap of a layer, realms of cap 20 and 50 bots at
 most, as `MMO_LOCAL_LAYER_CAP=5`, `MMO_LOCAL_REALM_CAP=20` and `sh script/local.sh bots 50`. Stage 7 runs there as 3
 realms of cap 20 with 26, 17 and 7 bots: the first realm is full with 6 bots in its queue, the second is at the level
-high and the third at the level low.
+high and the third at the level low. Then 4 bots log out, 4 of the queue enter and 2 still wait, as
+`MMO_BOTS_REALMS=26,17,7 MMO_BOTS_RUSH=6 MMO_BOTS_LEAVERS=4 MMO_BOTS_WAITING=2 MMO_BOTS_PLAY_SECONDS=80` and `sh
+script/report.sh <report> 50 3 2 0 0 4 6` say.
 
-The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4, 5 and 6 on a runner of CI, for each pull request
-that changes a crate of the path of a player. It runs the stages 2, 3 and 4 on a new stack of the release build of the
-base of the pull request, then of the change, on the same runner, and the stages 5 and 6 on the change alone. It fails when a bot of the change cannot play, when a layer of the
+The workflow `load` (`.github/workflows/load.yml`) runs the stages 2 to 7 on a runner of CI, for each pull request that
+changes a crate of the path of a player. It runs the stages 2, 3 and 4 on a new stack of the release build of the base
+of the pull request, then of the change, on the same runner, and the stages 5, 6 and 7 on the change alone. It fails
+when a bot of the change cannot play, when a layer of the
 change passes its cap, when a realm of the change opens fewer layers than its players need, and, in stage 3, when a bot
 sees a bot of the other realm, when a crosser does not enter the next zone and when a crossing into it does not keep the
 number of its layer, as `sh script/report.sh` reads them from the report of the bots. Its summary gives the report of
@@ -942,18 +945,23 @@ script/report.sh <report> 200 1 0 0 0 150` fails when one of them is over. The s
 base below the drain cannot pass it. The tests of `mmo-zone` prove the same drain, move and close with a cap of 4.
 
 Stage 7 runs 285 bots on a new stack of the change, with 3 realms of cap 100 and layers of cap 20, as the last stage of
-the job `the load`, since a base with no list of realms cannot pass it. The item that builds the list of the realms and
-their levels adds the stage. Each bot has a character that the program of the bots made before in the realm of its
-login. The first realm gets 100 bots that play, then a rush of 50 bots that log in at the same time, so it is at the
-level full and the 50 wait in its queue. The second realm gets 85 bots, at the level high, and the third 50 bots, at the
+the job `the load`, since a base with no list of realms cannot pass it. Each bot has a character that the program of
+the bots made before in the realm of its login, as `MMO_BOTS_REALMS=150,85,50` gives them. The first realm gets 100
+bots that play, then a rush of 50 bots that log in once each other bot plays, as `MMO_BOTS_RUSH=50` says, so it is at
+the level full and the 50 wait in its queue. The rush logs in at the pace of the ramp, so the order in which the bots
+see their places is the order of entry that the queue keeps. The second realm gets 85 bots, at the level high, and the third 50 bots, at the
 level medium. The test of `Population::of` in `mmo-protocol` proves each bound of each level.
 
-Each second of the play, the program of the bots asks for `Realms`, reads the admitted set and the cap of each realm,
-and counts each realm whose level is not `Population::of` of those two numbers. While the first realm is full, one of
-its bots asks for a new character, and the report gives the refusal that it got and the count of its characters. Then 20
-bots of the first realm log out, and 20 bots of its queue enter in their order of entry and play, while 30 still wait.
-The report prints a `realms:` line and a line of the budget for each rule of the table, and `sh script/report.sh` fails
-when one of them is over.
+Each second of the play, the program of the bots asks for `Realms`, reads the admitted set and the cap of each realm
+just before and just after, and counts each realm whose level is not `Population::of` of either pair of numbers. The
+100th bot of the first realm, which fills it, first asks for a new character, and the report gives the refusal that it
+got and the count of its characters there. Then it plays its own character in its slot. Then 20 bots of the first realm
+log out, as `MMO_BOTS_LEAVERS=20` says, and 20 bots of its queue enter in their order of entry and play, while 30 still
+wait, as `MMO_BOTS_WAITING=30` says. The slot of a bot that logged out lasts up to 60 s more, so the play lasts 90 s.
+The report prints a `realms:` line and a line of the budget for each rule of the table: the level matches the admitted
+players at each look, the full realm refuses the new character and makes none, and the layers of each realm hold its
+bots that play. The lines of the queue and of the drain hold the rest, and `sh script/report.sh <report> 285 3 30 0 0
+20 50` fails when one of them is over.
 
 ### The first local results
 
