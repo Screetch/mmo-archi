@@ -338,6 +338,9 @@ pub(crate) struct Report {
   layers: Seen,
   /// The bots that played, by their shard.
   shards: BTreeMap<u32, usize>,
+  /// The bots that played and never left their zone, by their shard: the players that its layers
+  /// of the zone must hold.
+  stayed: BTreeMap<u32, usize>,
   window: Duration,
 }
 
@@ -376,6 +379,11 @@ impl Report {
     for out in outcomes.iter().filter(|out| out.joined.is_some()) {
       *shards.entry(out.shard).or_default() += 1;
     }
+    let mut stayed = BTreeMap::new();
+    let left = |out: &Outcome| out.crossings.iter().any(|(from, to)| from.zone != to.zone);
+    for out in outcomes.iter().filter(|out| out.joined.is_some() && !left(out)) {
+      *stayed.entry(out.shard).or_default() += 1;
+    }
     let mut unjoined = BTreeMap::new();
     for out in outcomes.iter().filter(|out| out.joined.is_none() && out.fault.is_none()) {
       *unjoined.entry(out.phase).or_default() += 1;
@@ -407,6 +415,7 @@ impl Report {
       drain: Drain::new(outcomes, &layers),
       layers,
       shards,
+      stayed,
       window,
     }
   }
@@ -517,7 +526,7 @@ impl fmt::Display for Report {
     let capped =
       self.layers.values().all(|shard| shard.layers.values().all(|l| l.most <= shard.cap));
     let opened = self.layers.iter().all(|(id, shard)| {
-      shard.layers.len() >= needed(self.shards.get(id).copied().unwrap_or_default(), shard.cap)
+      shard.layers.len() >= needed(self.stayed.get(id).copied().unwrap_or_default(), shard.cap)
     });
     let budget = [
       ("tick p99 at most 25 ms", *total > 0 && *p99 <= BUDGET),
@@ -746,6 +755,25 @@ mod tests {
     assert!(text.ends_with("budget no bot saw a bot of another shard: over\n"), "{text}");
     let text = report(&[on(1, &[7]), on(1, &[])]);
     assert!(!text.contains("sight") && !text.contains("another shard"), "{text}");
+  }
+
+  #[test]
+  fn a_shard_needs_layers_for_the_bots_that_stayed_in_its_zone_alone() {
+    let layer = |zone, number| Layer { zone: ZoneId(zone), number };
+    let gone = Outcome {
+      role: Role::Crosser,
+      crossings: vec![(layer(1, 2), layer(2, 1))],
+      ..played(1, 2, 0, 0, 0)
+    };
+    let outcomes = [played(1, 2, 0, 0, 0), played(1, 2, 0, 0, 0), gone];
+    let text = |layers| {
+      let seen = Seen::from([(1, shard(2, layers))]);
+      let zero = Duration::ZERO;
+      Report::new(3, 0, zero, &outcomes, &BTreeMap::new(), seen, zero).to_string()
+    };
+    let opened = "budget each shard opened the layers that its players need: ";
+    assert!(text(&[(1, 2, 2)]).contains(&format!("{opened}ok")));
+    assert!(text(&[]).contains(&format!("{opened}over")));
   }
 
   #[test]
