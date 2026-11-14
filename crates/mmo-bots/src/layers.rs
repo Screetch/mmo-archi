@@ -8,10 +8,11 @@ use mmo_store::keys;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 
-/// The players of one layer at the last look, and the most that it held at any look.
+/// The players of one layer at the last look, or `None` when it no longer stood then, and the
+/// most that it held at any look.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Players {
-  pub(crate) now: u32,
+  pub(crate) now: Option<u32>,
   pub(crate) most: u32,
 }
 
@@ -42,7 +43,6 @@ pub(crate) async fn read(
 }
 
 /// Looks at the directory of each of the `shards` first shards, and adds what it shows to `seen`.
-/// A layer that no longer stands holds no player now.
 pub(crate) async fn look(
   redis: &mut MultiplexedConnection,
   shards: u32,
@@ -53,10 +53,10 @@ pub(crate) async fn look(
     let shard = seen.entry(id).or_default();
     let cap: Option<u32> = redis.hget(keys::shard(ShardId(id)), keys::LAYER_CAP).await?;
     shard.cap = cap.unwrap_or_default();
-    shard.layers.values_mut().for_each(|layer| layer.now = 0);
+    shard.layers.values_mut().for_each(|layer| layer.now = None);
     for (number, now) in read(redis, id, zone).await? {
       let players = shard.layers.entry(number).or_default();
-      (players.now, players.most) = (now, players.most.max(now));
+      (players.now, players.most) = (Some(now), players.most.max(now));
     }
   }
   Ok(())
@@ -88,13 +88,14 @@ mod tests {
     }
     let mut seen = Seen::new();
     look(&mut connection, 2, zone, &mut seen).await.expect("a look");
-    let players = |now, most| Players { now, most };
+    let players = |now, most| Players { now: Some(now), most };
     let first = Shard { cap: 20, layers: BTreeMap::from([(1, players(5, 5)), (2, players(3, 3))]) };
     assert_eq!(seen, Seen::from([(1, first), (2, Shard::default())]));
     let () = connection.hset("layers:1", "1:1", 2).await.expect("a count");
     let () = connection.hdel("layers:1", "1:2").await.expect("a close");
     look(&mut connection, 2, zone, &mut seen).await.expect("a look");
-    let layers = BTreeMap::from([(1, players(2, 5)), (2, players(0, 3))]);
+    let closed = Players { now: None, most: 3 };
+    let layers = BTreeMap::from([(1, players(2, 5)), (2, closed)]);
     assert_eq!(seen.get(&1), Some(&Shard { cap: 20, layers }));
     redis::cmd("ACL")
       .arg(&["SETUSER", "default", "-hget"])

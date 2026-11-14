@@ -40,6 +40,10 @@ pub(crate) struct Shared {
   pub(crate) crossers: usize,
   /// The shard of each character of the bots, by its id.
   pub(crate) shards: HashMap<i64, u32>,
+  /// The count of the first bots that log out when `leave` changes.
+  pub(crate) leavers: u32,
+  /// The signal for the leavers to log out.
+  pub(crate) leave: watch::Receiver<bool>,
 }
 
 /// What one bot measured.
@@ -66,8 +70,8 @@ pub(crate) struct Outcome {
   pub(crate) joined: Option<Instant>,
   /// The shard that the bot plays in.
   pub(crate) shard: u32,
-  /// True when the bot walks east from near the border of its zone, to cross it.
-  pub(crate) crosser: bool,
+  pub(crate) role: Role,
+  pub(crate) end: End,
   /// Each move of the bot to another layer, which the gateway tells it, from the layer that it
   /// left to the layer that it entered.
   pub(crate) crossings: Vec<(Layer, Layer)>,
@@ -87,6 +91,30 @@ pub(crate) struct Outcome {
   /// The largest snapshot, in bytes.
   pub(crate) largest: usize,
   pub(crate) fault: Option<String>,
+}
+
+/// What a bot does in a run, beside its walk.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Role {
+  #[default]
+  Walker,
+  /// It walks east from near the border of its zone, to cross it.
+  Crosser,
+  /// It logs out at the signal of the run, as a player who ends the game does.
+  Leaver,
+}
+
+/// Where the player of a bot stands when the run ends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum End {
+  /// No snapshot showed the player since its last move or its last loss of the link.
+  #[default]
+  Unseen,
+  /// A snapshot showed the player after its last move and its last loss of the link.
+  Playing,
+  /// The bot logged out. It then sends nothing more, and the gateway ends its link, which ends the
+  /// bot with no fault.
+  LoggedOut,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -261,6 +289,37 @@ async fn again(shared: &Shared, token: Token, stop: &mut watch::Receiver<bool>) 
   }
 }
 
+/// Runs one tick of the walk and sends its inputs, unless the bot logged out.
+async fn send_walk(walk: &mut Walk, out: &mut Outcome, link: &mut Play) {
+  if out.end != End::LoggedOut
+    && let Some(intents) = walk.tick()
+  {
+    out.up += encode(&intents).len();
+    let chat = (walk.ticks % SAY == 1).then(say);
+    for up in iter::once(Up::Intents(intents)).chain(chat) {
+      // A dead link ends `link.next()` at once, so a send that fails ends nothing here.
+      drop(link.send(up).await);
+    }
+  }
+}
+
+/// Waits until the crossers play, unless the bot is one. It gives false when the run ended first.
+async fn after_crossers(
+  shared: &Shared,
+  bot: &Bot,
+  stop: &mut watch::Receiver<bool>,
+  out: &mut Outcome,
+) -> bool {
+  while !bot.crosser && shared.ready.load(Ordering::Relaxed) < shared.crossers {
+    out.phase = "crossers";
+    tokio::select! {
+      () = sleep(RETRY) => {}
+      _ = stop.changed() => return false,
+    }
+  }
+  true
+}
+
 async fn play(
   shared: &Shared,
   bot: &Bot,
@@ -269,12 +328,8 @@ async fn play(
 ) -> Result<bool, Error> {
   // The crossers log in first: they fill the first layer of their shard, so a crosser enters the
   // layer with its number in the next zone, which the first crossing opens.
-  while !bot.crosser && shared.ready.load(Ordering::Relaxed) < shared.crossers {
-    out.phase = "crossers";
-    tokio::select! {
-      () = sleep(RETRY) => {}
-      _ = stop.changed() => return Ok(false),
-    }
+  if !after_crossers(shared, bot, &mut stop, out).await {
+    return Ok(false);
   }
   out.phase = "login";
   let started = Instant::now();
@@ -291,21 +346,16 @@ async fn play(
   let mut link = Play::attach(&shared.trust, &shared.gateway, token).await?;
   out.phase = "snapshot";
   let mut walk = Walk::new(shared, bot);
+  let mut leave = shared.leave.clone();
   let mut clock = interval(TICK);
   clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
   loop {
     tokio::select! {
       _ = clock.tick() => {
-        if let Some(intents) = walk.tick() {
-          out.up += encode(&intents).len();
-          let chat = (walk.ticks % SAY == 1).then(say);
-          for up in iter::once(Up::Intents(intents)).chain(chat) {
-            // A dead link ends `link.next()` at once, so a send that fails ends nothing here.
-            drop(link.send(up).await);
-          }
-        }
+        send_walk(&mut walk, out, &mut link).await;
       }
       down = link.next() => match down {
+        Err(_) if out.end == End::LoggedOut => return Ok(false),
         Err(_) if shared.reconnect && out.joined.is_some() => {
           walk.lose(out);
           match again(shared, token, &mut stop).await {
@@ -322,7 +372,17 @@ async fn play(
         Down::Message(other) => return Err(Error::Message(other)),
         },
       },
-      _ = stop.changed() => return Ok(false),
+      _ = leave.changed(), if out.role == Role::Leaver && out.end != End::LoggedOut => {
+        out.end = End::LoggedOut;
+        // A dead link ends `link.next()` at once, so a send that fails ends nothing here.
+        drop(link.send(Up::Logout).await);
+      }
+      _ = stop.changed() => {
+        if out.end != End::LoggedOut && walk.body.is_some() {
+          out.end = End::Playing;
+        }
+        return Ok(false);
+      }
     }
   }
 }
@@ -332,7 +392,12 @@ async fn play(
 /// fault. A bot leaves as a player who closes the game does: it closes its link, and the layer
 /// writer keeps its player for 30 s.
 pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>) -> Outcome {
-  let mut out = Outcome { shard: bot.shard, crosser: bot.crosser, ..Outcome::default() };
+  let role = match (bot.index < shared.leavers, bot.crosser) {
+    (true, _) => Role::Leaver,
+    (false, true) => Role::Crosser,
+    (false, false) => Role::Walker,
+  };
+  let mut out = Outcome { shard: bot.shard, role, ..Outcome::default() };
   let ended = play(shared, bot, stop, &mut out).await;
   out.queued = matches!(ended, Ok(true));
   out.fault = ended.err().map(|error| error.to_string());
@@ -360,7 +425,7 @@ mod tests {
   use tokio::sync::{oneshot, watch};
   use tokio::time::{sleep, timeout};
 
-  use super::{Outcome, Shared, TURN, Walk, again, run};
+  use super::{End, Outcome, Role, Shared, TURN, Walk, again, run};
   use crate::fixture::{authority, entity, login_service, send, snapshot};
   use crate::rng::Rng;
   use crate::seed::Bot;
@@ -393,6 +458,8 @@ mod tests {
       reconnect: false,
       crossers: 0,
       shards: HashMap::new(),
+      leavers: 0,
+      leave: watch::channel(false).1,
     }
   }
 
@@ -456,8 +523,58 @@ mod tests {
     );
     assert!(out.up > 0 && out.waited.is_some() && out.entered.is_some() && out.joined.is_some());
     assert_eq!(shared.ready.load(Ordering::Relaxed), 1);
+    assert_eq!((out.role, out.end), (Role::Walker, End::Playing));
     gateway.end().await;
     login.end().await;
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_leaver_logs_out_at_the_signal_of_the_run_and_ends_with_no_fault() {
+    for closes in [true, false] {
+      let out = leave(closes).await;
+      let ended = (out.fault, out.role, out.end);
+      assert_eq!(ended, (None, Role::Leaver, End::LoggedOut), "the gateway closes: {closes}");
+    }
+  }
+
+  /// Runs one leaver to its logout. Then the gateway closes its link when `closes` holds, as it
+  /// does, and else the measure ends first and stops the bot.
+  async fn leave(closes: bool) -> Outcome {
+    let login = login_service("Brom", 42);
+    let (seen, played) = oneshot::channel();
+    let (done, finished) = oneshot::channel();
+    let gateway = Fake::start(move |mut peer| async move {
+      peer.read::<Attach>().await;
+      peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 1 }).await;
+      sleep(Duration::from_millis(300)).await;
+      send(&peer, &snapshot(10, None, vec![entity(42)]));
+      let line = FromClient::Say { channel: "world".to_owned(), text: "hello".to_owned() };
+      assert_eq!(peer.read::<FromClient>().await, line);
+      seen.send(()).expect("the test waits for the play");
+      assert_eq!(peer.read::<FromClient>().await, FromClient::Logout);
+      if closes {
+        peer.connection.close(1_u32.into(), b"the link to the writer of layer 1:1 ends: closed");
+      }
+      done.send(()).expect("the test waits for the logout");
+      peer
+    });
+    let (leaving, leave) = watch::channel(false);
+    let shared = Shared { leavers: 1, leave, ..shared_by(&login, &gateway) };
+    let (stop, stopped) = watch::channel(false);
+    let signals = async {
+      played.await.expect("a bot that plays");
+      leaving.send_replace(true);
+      finished.await.expect("a logout");
+      if !closes {
+        stop.send_replace(true);
+      }
+    };
+    let leaver = bot(&login);
+    let (out, ()) = tokio::join!(run(&shared, &leaver, stopped), signals);
+    gateway.end().await;
+    login.end().await;
+    out
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
@@ -471,9 +588,9 @@ mod tests {
     let idle = Fake::start(hold);
     let shared = shared_by(&login, &idle);
     let (_stop, stopped) = watch::channel(false);
-    let out = run(&shared, &bot(&login), stopped).await;
-    let refused = (out.fault.as_deref(), out.place, out.joined.is_none());
-    assert_eq!(refused, (Some("the login service refuses: Password"), None, true));
+    let out = run(&shared, &Bot { crosser: true, ..bot(&login) }, stopped).await;
+    let refused = (out.fault.as_deref(), out.place, out.joined.is_none(), out.role);
+    assert_eq!(refused, (Some("the login service refuses: Password"), None, true, Role::Crosser));
     assert_eq!(shared.ready.load(Ordering::Relaxed), 1);
     login.end().await;
 

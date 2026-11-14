@@ -8,8 +8,8 @@ use mmo_protocol::Layer;
 use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 use tokio::time::Instant;
 
-use crate::bot::Outcome;
-use crate::layers::{Seen, Shard};
+use crate::bot::{End, Outcome, Role};
+use crate::layers::{Players, Seen, Shard};
 use crate::ticks::Counts;
 
 /// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
@@ -220,7 +220,7 @@ struct Crossing {
 impl Crossing {
   fn new(outcomes: &[Outcome]) -> Self {
     let next = |(from, to): &&(Layer, Layer)| to.zone.0 == from.zone.0 + 1;
-    let crossers = || outcomes.iter().filter(|out| out.crosser);
+    let crossers = || outcomes.iter().filter(|out| out.role == Role::Crosser);
     let entries = || crossers().flat_map(|out| &out.crossings).filter(next);
     Self {
       crossers: crossers().count(),
@@ -251,6 +251,66 @@ impl Crossing {
   }
 }
 
+/// What the bots that log out left behind them: the bots that play on, and the layers of the last
+/// look at the directory, which the drain of the layers that the leavers emptied made.
+#[derive(Debug, PartialEq)]
+struct Drain {
+  /// The bots that must log out, and those that did.
+  leavers: usize,
+  left: usize,
+  /// The bots that must play to the end, and those that play at the end.
+  staying: usize,
+  playing: usize,
+  /// The layers that stand with no player at the last look.
+  empty: usize,
+  /// The layers that hold a quarter of their cap or fewer at the last look, while the other layers
+  /// of their shard have room for their players.
+  sparse: usize,
+}
+
+impl Drain {
+  fn new(outcomes: &[Outcome], layers: &Seen) -> Self {
+    let (mut empty, mut sparse) = (0, 0);
+    for shard in layers.values() {
+      let counts: Vec<u32> = shard.layers.values().filter_map(|layer| layer.now).collect();
+      let room: u32 = counts.iter().map(|players| shard.cap.saturating_sub(*players)).sum();
+      let fits = |players: u32| room - shard.cap.saturating_sub(players) >= players;
+      empty += counts.iter().filter(|players| **players == 0).count();
+      let low = |players: &&u32| **players > 0 && **players * 4 <= shard.cap;
+      sparse += counts.iter().filter(low).filter(|players| fits(**players)).count();
+    }
+    let staying: Vec<&Outcome> = outcomes.iter().filter(|out| out.role != Role::Leaver).collect();
+    Self {
+      leavers: outcomes.len() - staying.len(),
+      left: outcomes.iter().filter(|out| out.end == End::LoggedOut).count(),
+      staying: staying.len(),
+      playing: staying.iter().filter(|out| out.end == End::Playing).count(),
+      empty,
+      sparse,
+    }
+  }
+
+  /// The line of the report, when some bots log out.
+  fn line(&self) -> Option<String> {
+    let Self { leavers, left, staying, playing, empty, sparse } = self;
+    let text = format!(
+      "drain: {left} of {leavers} bots logged out, {playing} of {staying} bots left play, {empty} layers stand empty, {sparse} sparse layers fit in the others"
+    );
+    (*leavers > 0).then_some(text)
+  }
+
+  /// The lines of the budget, when some bots log out.
+  fn budget(&self) -> Option<[(&'static str, bool); 3]> {
+    let plays = self.left == self.leavers && self.playing == self.staying;
+    let lines = [
+      ("each bot left plays", plays),
+      ("no layer stands empty", self.empty == 0),
+      ("no layer of a quarter of its cap or fewer fits in the other layers", self.sparse == 0),
+    ];
+    (self.leavers > 0).then_some(lines)
+  }
+}
+
 /// The result of a run.
 #[derive(Debug)]
 pub(crate) struct Report {
@@ -264,6 +324,7 @@ pub(crate) struct Report {
   /// The bots that the end of the measure found before their first snapshot, by their phase: a
   /// bot that waits in the queue is one of them.
   unjoined: BTreeMap<&'static str, usize>,
+  drain: Drain,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -343,6 +404,7 @@ impl Report {
       snapshots: outcomes.iter().map(|out| out.snapshots).sum(),
       gaps: outcomes.iter().map(|out| out.gaps).sum(),
       ticks: Ticks::new(ticks),
+      drain: Drain::new(outcomes, &layers),
       layers,
       shards,
       window,
@@ -368,7 +430,8 @@ fn millis(d: Duration) -> f64 {
 impl Report {
   /// The line of the report on one shard: its layers and the players on each.
   fn shard_line(&self, id: u32, shard: &Shard) -> String {
-    let players: Vec<String> = shard.layers.values().map(|layer| layer.now.to_string()).collect();
+    let now = |layer: &Players| layer.now.map_or("closed".to_owned(), |now| now.to_string());
+    let players: Vec<String> = shard.layers.values().map(now).collect();
     format!(
       "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer: {}",
       shard.layers.len(),
@@ -407,6 +470,18 @@ impl Report {
   }
 }
 
+impl Report {
+  fn stat_lines(&self) -> [String; 5] {
+    [
+      stats("place in the queue at login", &self.position, "place"),
+      stats("wait from login to session", &self.waited, "s"),
+      stats("wait from login to the first snapshot", &self.entered, "s"),
+      stats("data down for one client", &self.down, "B/s"),
+      stats("data up for one client", &self.up, "B/s"),
+    ]
+  }
+}
+
 impl fmt::Display for Report {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let queued = self.queue.waiting;
@@ -417,13 +492,7 @@ impl fmt::Display for Report {
       self.bots.saturating_sub(self.played + queued)
     )];
     lines.extend(self.faults.iter().map(|(fault, bots)| format!("  {bots} bots: {fault}")));
-    lines.extend([
-      stats("place in the queue at login", &self.position, "place"),
-      stats("wait from login to session", &self.waited, "s"),
-      stats("wait from login to the first snapshot", &self.entered, "s"),
-      stats("data down for one client", &self.down, "B/s"),
-      stats("data up for one client", &self.up, "B/s"),
-    ]);
+    lines.extend(self.stat_lines());
     let Ticks { total, p50, p99, max, slow, late } = &self.ticks;
     lines.push(format!(
       "snapshots {}, refused by the world {}, largest {} bytes",
@@ -436,6 +505,7 @@ impl fmt::Display for Report {
     }
     lines.extend(self.crossing.line());
     lines.extend(self.sight().into_iter().chain(self.unjoined()));
+    lines.extend(self.drain.line());
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -468,6 +538,7 @@ impl fmt::Display for Report {
     }
     lines.extend(self.crossing.budget().into_iter().map(line));
     lines.extend(self.sight_budget().map(line));
+    lines.extend(self.drain.budget().into_iter().flatten().map(line));
     writeln!(f, "{}", lines.join("\n"))
   }
 }
@@ -482,7 +553,7 @@ mod tests {
   use tokio::time::Instant;
 
   use super::{Queue, Report, Stats, Ticks};
-  use crate::bot::Outcome;
+  use crate::bot::{End, Outcome, Role};
   use crate::layers::{Players, Seen, Shard};
 
   fn played(wait: u64, enter: u64, up: usize, down: usize, largest: usize) -> Outcome {
@@ -504,7 +575,8 @@ mod tests {
 
   /// A shard of cap `cap`, with the layers `(number, players now, most players)`.
   fn shard(cap: u32, layers: &[(u32, u32, u32)]) -> Shard {
-    let layers = layers.iter().map(|&(number, now, most)| (number, Players { now, most }));
+    let layers =
+      layers.iter().map(|&(number, now, most)| (number, Players { now: Some(now), most }));
     Shard { cap, layers: layers.collect() }
   }
 
@@ -615,7 +687,7 @@ mod tests {
   #[test]
   fn the_report_counts_the_crossers_that_entered_the_next_zone() {
     let layer = |zone, number| Layer { zone: ZoneId(zone), number };
-    let one = |crossings| Outcome { crosser: true, crossings, ..played(1, 2, 0, 0, 0) };
+    let one = |crossings| Outcome { role: Role::Crosser, crossings, ..played(1, 2, 0, 0, 0) };
     let crossed = one(vec![(layer(1, 3), layer(2, 1))]);
     let moved = one(vec![(layer(1, 3), layer(1, 4))]);
     let report = |outcomes: &[Outcome]| {
@@ -767,6 +839,47 @@ mod tests {
     )
     .to_string();
     assert!(ok.contains("budget each bot played again within 4 s: ok"), "{ok}");
+  }
+
+  #[test]
+  fn the_report_fails_a_drain_whose_bots_left_stop_or_whose_layers_stay_empty_or_sparse() {
+    let stays = |end| Outcome { end, ..played(1, 2, 1, 1, 1) };
+    let leaves = |end| Outcome { role: Role::Leaver, end, ..played(1, 2, 1, 1, 1) };
+    let text = |outcomes: &[Outcome], mut shard: Shard| {
+      shard.layers.insert(9, Players { now: None, most: 20 });
+      let seen = Seen::from([(1, shard)]);
+      let zero = Duration::ZERO;
+      Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
+    };
+    let good =
+      text(&[leaves(End::LoggedOut), stays(End::Playing)], shard(20, &[(1, 17, 20), (3, 5, 13)]));
+    let lines = [
+      "drain: 1 of 1 bots logged out, 1 of 1 bots left play, 0 layers stand empty, 0 sparse layers fit in the others",
+      "budget each bot left plays: ok",
+      "budget no layer stands empty: ok",
+      "budget no layer of a quarter of its cap or fewer fits in the other layers: ok",
+    ];
+    assert!(good.contains("players on each layer: 17 5 closed\n"), "{good}");
+    for line in lines {
+      assert!(good.contains(line), "{good} lacks {line}");
+    }
+    let bad = text(
+      &[leaves(End::Playing), stays(End::Unseen)],
+      shard(20, &[(1, 16, 16), (2, 0, 3), (3, 4, 4)]),
+    );
+    let lines = [
+      "drain: 0 of 1 bots logged out, 0 of 1 bots left play, 1 layers stand empty, 1 sparse layers fit in the others",
+      "budget each bot left plays: over",
+      "budget no layer stands empty: over",
+      "budget no layer of a quarter of its cap or fewer fits in the other layers: over",
+    ];
+    for line in lines {
+      assert!(bad.contains(line), "{bad} lacks {line}");
+    }
+    let gone = text(&[leaves(End::LoggedOut), stays(End::LoggedOut)], shard(20, &[(1, 17, 20)]));
+    assert!(gone.contains("budget each bot left plays: over"), "{gone}");
+    let none = text(&[stays(End::Playing)], shard(20, &[(1, 1, 1)]));
+    assert!(!none.contains("drain") && !none.contains("bot left"), "{none}");
   }
 
   #[test]

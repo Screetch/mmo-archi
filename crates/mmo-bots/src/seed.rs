@@ -121,6 +121,7 @@ mod tests {
       bots,
       waiting: 0,
       crossers: 0,
+      leavers: 0,
       town,
       ramp: 1,
       join: Duration::ZERO,

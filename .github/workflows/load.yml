@@ -12,7 +12,9 @@ name: load
 # fails when a bot saw a bot of the other shard, or when a crosser did not enter the layer with its number in the next zone.
 # It runs stage 4 too, 300 bots on a shard of cap 200, of which 100 wait in the queue. Last it runs stage 6 on the head
 # alone, with 200 bots and one fault for each run: the stop of the layer writer of their layer, of the gateway and of
-# the keeper, as `script/faults.sh` says. Stage 5 waits for the drain and the move, which main does not hold yet.
+# the keeper, as `script/faults.sh` says. Before it, it runs stage 5 on the head alone, since a base below the drain
+# cannot pass it: 200 bots on layers of cap 20, of which 150 log out once each plays, and the measure of 150 s that
+# follows shows each layer that they emptied drained and closed.
 on:
   workflow_dispatch:
   pull_request:
@@ -22,6 +24,7 @@ on:
       - crates/mmo-collide/**
       - crates/mmo-gateway/**
       - crates/mmo-protocol/**
+      - crates/mmo-store/**
       - crates/mmo-zone/**
       - script/local.sh
       - script/report.sh
@@ -39,7 +42,7 @@ jobs:
   load:
     name: the load
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,9 +160,27 @@ jobs:
               stage "${tree%%:*}" "${tree##*:}" $bots
             done
           done
-          # Stage 6, on the head: a new stack for each fault, since a stack keeps the players of the run before.
+          # Stage 5, on the head: the 150 leavers empty most of the 10 layers, and the measure of 150 s that starts at
+          # their logouts covers 60 s before a drain, the moves and 30 s before a close.
           broken=
-          export MMO_LOCAL_SHARDS=1 MMO_LOCAL_SHARD_CAP=200 MMO_LOCAL_LAYER_CAP=20
+          export MMO_LOCAL_SHARDS=1 MMO_LOCAL_SHARD_CAP=200 MMO_LOCAL_LAYER_CAP=20 MMO_LOCAL_ZONES=1 MMO_BOTS_CROSSERS=0
+          echo "$(date +%T) head: stage 5"
+          dir=$out/head-drain
+          mkdir -p "$dir"
+          export MMO_LOCAL_DIR=$dir/stack
+          sh script/local.sh start >"$dir/start.log"
+          if ! MMO_BOTS_LEAVERS=150 MMO_BOTS_PLAY_SECONDS=150 timeout 600 sh script/local.sh bots 200 >"$dir/bots.log" 2>&1 ||
+            ! sh script/report.sh "$dir/bots.log" 200 1 0 0 0 150; then
+            broken="$broken drain"
+          fi
+          sh script/local.sh stop >/dev/null
+          {
+            echo "### head: stage 5, 200 bots of which 150 log out"
+            echo '```'
+            tail -n 30 "$dir/bots.log"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          # Stage 6, on the head: a new stack for each fault, since a stack keeps the players of the run before.
           for fault in writer gateway keeper; do
             echo "$(date +%T) head: stage 6, $fault"
             dir=$out/head-faults-$fault
@@ -176,7 +197,7 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
           done
           [ -z "$failed" ] || echo "::error::the bots of the head failed in the stages of$failed bots"
-          [ -z "$broken" ] || echo "::error::the bots of the head failed in the stage 6 for the faults of$broken"
+          [ -z "$broken" ] || echo "::error::the bots of the head failed in the stages 5 and 6 for$broken"
           [ -z "$failed$broken" ] || exit 1
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
