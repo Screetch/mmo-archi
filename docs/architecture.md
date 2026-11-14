@@ -670,12 +670,12 @@ new login waits.
 - The layer writer renews the presence of each of its players, so the script keeps their slots. A logout removes the
   account from the admitted set at once.
 
-The queue is fair. The order is the order of entry, and the time comes from Redis and not from a server. Accounts that
-entered in the same millisecond keep the fixed order that Redis gives them. Many copies of the script can run, since
-each run is atomic and checks the free slots again. A restart of a login service or of a gateway loses no place, since
-the queue is in Redis. The client logs in again within 120 s with its `resume:{token}`, and needs no new check of its
-password. The limit of 100 admissions each second spreads the loads of characters over time. After a restart of a
-realm, 5000 players enter in 50 s.
+The queue is fair. The order is the order of entry, and the time comes from Redis and not from a server. An account that
+enters stands behind each account that entered before it, even in the same millisecond or after the clock of Redis went
+back. Many copies of the script can run, since each run is atomic and checks the free slots again. A restart of a login
+service or of a gateway loses no place, since the queue is in Redis. The client logs in again within 120 s with its
+`resume:{token}`, and needs no new check of its password. The limit of 100 admissions each second spreads the loads of
+characters over time. After a restart of a realm, 5000 players enter in 50 s.
 
 ## 9. The persistence
 
