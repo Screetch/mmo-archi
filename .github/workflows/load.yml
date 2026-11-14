@@ -185,7 +185,7 @@ jobs:
             echo "$(date +%T) head: stage 6, $fault"
             dir=$out/head-faults-$fault
             mkdir -p "$dir"
-            export MMO_LOCAL_DIR=$dir/stack
+            export MMO_LOCAL_DIR=$dir/stack MMO_LOCAL_REALMS=1 MMO_LOCAL_REALM_CAP=200 MMO_LOCAL_LAYER_CAP=20
             sh script/local.sh start >"$dir/start.log"
             sh script/faults.sh "$fault" 200 "$dir/bots.log" >"$dir/faults.log" 2>&1 || broken="$broken $fault"
             sh script/local.sh stop >/dev/null

@@ -211,12 +211,12 @@ fix what your change broke, and report what was broken before.
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
-  `MMO_LOCAL_REALMS` (1) sets the count of realms, `MMO_LOCAL_REALM_CAP` (100) the cap of each realm and
-  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, `MMO_LOCAL_ZONES` (1) the count of zones, each on the next square
-  of one row of the map, and `MMO_LOCAL_ATTRIBUTES` the attributes of each realm, one word `region:language:rules` for
-  each in its order, as `Europe:French:normal America:English:role-play` (a realm with no word takes
-  `Europe:French:normal`). The stack runs a login service and a pool of layer writers for each realm, the writers on the
-  ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the realms, and their report
+  `MMO_LOCAL_REALMS` (1) sets the count of realms, `MMO_LOCAL_REALM_CAP` (20) the cap of each realm and
+  `MMO_LOCAL_LAYER_CAP` (5, the least) the cap of a layer, `MMO_LOCAL_ZONES` (1) the count of zones, each on the next
+  square of one row of the map, and `MMO_LOCAL_ATTRIBUTES` the attributes of each realm, one word
+  `region:language:rules` for each in its order, as `Europe:French:normal America:English:role-play` (a realm with no
+  word takes `Europe:French:normal`). The stack runs a login service and a pool of layer writers for each realm, the
+  writers on the ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the realms, and their report
   gives the layers that opened in each realm and the players on each. Set the same `MMO_LOCAL_REALMS` for `bots` as for
   `start`. `sh script/report.sh <report> <count> <realms> [<waiting> [<recover>]]` reads that report and fails on a bot
   that did not play or wait in the queue, on a layer over its cap, on a realm with too few layers, on a queue that
