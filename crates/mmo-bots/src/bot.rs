@@ -8,7 +8,7 @@ use std::time::Duration;
 use mmo_client::{Account, Down, Fault, Gap, Place, Play, Predictor, Trust, Up, World, enter};
 use mmo_collide::{Terrain, ground};
 use mmo_protocol::{
-  Angle, CharacterId, Intents, Layer, Refusal, Snapshot, ToClient, Token, ZoneId, encode,
+  Angle, CharacterId, Intents, Layer, Refusal, Snapshot, ToClient, Token, encode,
 };
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
@@ -32,7 +32,6 @@ const RETRY: Duration = Duration::from_millis(200);
 pub(crate) struct Shared {
   pub(crate) trust: Trust,
   pub(crate) gateway: String,
-  pub(crate) zone: ZoneId,
   pub(crate) seed: u64,
   /// The count of the bots that play, or that failed before they played.
   pub(crate) ready: AtomicUsize,
@@ -157,9 +156,10 @@ impl Outcome {
 /// The body of the player, and what it knows of the world.
 struct Walk {
   character: CharacterId,
-  /// The layer of the player, which the gateway names first, before the snapshot that shows the
-  /// player and so before the first datagram of the bot.
-  layer: Layer,
+  /// The layer of the player, which the gateway names on the stream. It is `None` until the bot
+  /// reads that message: a datagram can reach the bot before it, so a snapshot can show the player
+  /// first, and the bot sends no intents until it knows the layer that they name.
+  layer: Option<Layer>,
   /// True when the bot walks east and never turns.
   crosser: bool,
   rng: Rng,
@@ -170,7 +170,7 @@ struct Walk {
   /// The time of the last snapshot.
   last: Option<Instant>,
   /// The time of the last snapshot before a loss of the link, and the layer that the bot held.
-  lost: Option<(Instant, Layer)>,
+  lost: Option<(Instant, Option<Layer>)>,
 }
 
 #[expect(
@@ -184,10 +184,9 @@ fn terrain() -> Terrain {
 impl Walk {
   fn new(shared: &Shared, bot: &Bot) -> Self {
     let rng = Rng::new(shared.seed.wrapping_mul(0x9e37_79b9) ^ u64::from(bot.index));
-    let layer = Layer { zone: shared.zone, number: 0 };
     Self {
       character: bot.character,
-      layer,
+      layer: None,
       crosser: bot.crosser,
       rng,
       world: World::default(),
@@ -262,17 +261,18 @@ impl Walk {
   /// the walk forgets the world and its body, as a client does, since the next writer sends the
   /// world in full.
   fn moved(&mut self, to: Layer, out: &mut Outcome) {
-    if self.layer.number != 0 && self.layer != to {
-      out.crossings.push((self.layer, to));
+    if let Some(from) = self.layer.filter(|from| *from != to) {
+      out.crossings.push((from, to));
       self.world.clear();
       self.body = None;
     }
-    self.layer = to;
+    self.layer = Some(to);
   }
 
   /// Runs one tick of the walk, and gives the datagram of the inputs. A bot sends nothing before
   /// the first snapshot that shows its player.
   fn tick(&mut self) -> Option<Intents> {
+    let Layer { zone, number: layer } = self.layer?;
     let body = self.body.as_mut()?;
     if self.crosser {
       self.heading = Some(Angle(0));
@@ -281,7 +281,6 @@ impl Walk {
     }
     self.ticks += 1;
     body.step(self.heading, self.heading.unwrap_or(Angle(0)));
-    let Layer { zone, number: layer } = self.layer;
     body.recent().map(|inputs| Intents { zone, layer, ack: self.world.ack(), inputs })
   }
 }
@@ -515,7 +514,6 @@ mod tests {
     Shared {
       trust: Trust::from_pem(&path).expect("a trust"),
       gateway: gateway.address.clone(),
-      zone: ZoneId(1),
       seed: 1,
       ready: AtomicUsize::new(0),
       reconnect: false,
@@ -814,7 +812,7 @@ mod tests {
     let world = World::default();
     Walk {
       character,
-      layer,
+      layer: Some(layer),
       crosser: false,
       rng,
       world,
@@ -842,7 +840,7 @@ mod tests {
     walk.found(&mut out);
     assert_eq!((out.recoveries.len(), out.relocated, out.away), (1, 0, false));
     walk.lose(&mut out);
-    walk.layer = Layer { zone: ZoneId(1), number: 2 };
+    walk.layer = Some(Layer { zone: ZoneId(1), number: 2 });
     walk.found(&mut out);
     assert_eq!((out.recoveries.len(), out.relocated, out.away), (2, 1, false));
   }
@@ -939,15 +937,15 @@ mod tests {
       crosser.tick();
       assert_eq!(crosser.heading, Some(Angle(0)));
     }
-    let (from, next) = (crosser.layer, Layer { zone: ZoneId(2), number: 1 });
+    let (from, next) = (Layer { zone: ZoneId(1), number: 1 }, Layer { zone: ZoneId(2), number: 1 });
     crosser.moved(next, &mut out);
     assert_eq!(out.crossings, [(from, next)]);
     assert!(crosser.body.is_none() && crosser.world.entity(CharacterId(42)).is_none());
     crosser.moved(next, &mut out);
     assert_eq!(out.crossings.len(), 1);
-    let mut fresh = Walk { layer: Layer { zone: ZoneId(1), number: 0 }, ..walk() };
+    let mut fresh = Walk { layer: None, ..walk() };
     fresh.moved(Layer { zone: ZoneId(1), number: 2 }, &mut out);
-    assert_eq!((out.crossings.len(), fresh.layer.number), (1, 2));
+    assert_eq!((out.crossings.len(), fresh.layer.map(|layer| layer.number)), (1, Some(2)));
   }
 
   #[test]
@@ -986,6 +984,24 @@ mod tests {
   fn a_walk_sends_nothing_before_it_sees_its_player() {
     let mut walk = walk();
     assert_eq!((walk.tick(), walk.ticks), (None, 0));
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_walk_that_sees_its_player_before_the_gateway_names_its_layer_sends_nothing() {
+    let login = login_service("Brom", 42);
+    let idle = Fake::start(hold);
+    let shared = shared_by(&login, &idle);
+    let mut walk = Walk::new(&shared, &bot(&login));
+    let mut out = Outcome::default();
+    // The snapshot is a datagram and the name of the layer is a message of the stream: when both
+    // wait, the bot reads the datagram first, so its player shows before its layer is known.
+    assert_eq!(walk.hear(&snapshot(10, None, vec![entity(42)])).ok(), Some(true));
+    assert!(walk.tick().is_none());
+    walk.moved(Layer { zone: ZoneId(1), number: 2 }, &mut out);
+    assert!(out.crossings.is_empty() && walk.body.is_some());
+    let intents = walk.tick().expect("the inputs of a tick");
+    assert_eq!((intents.zone, intents.layer), (ZoneId(1), 2));
   }
 
   #[test]

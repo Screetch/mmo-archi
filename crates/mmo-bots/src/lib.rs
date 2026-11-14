@@ -180,7 +180,6 @@ fn shared(config: &Config, trust: Trust, bots: &[Bot], leave: watch::Receiver<bo
   Shared {
     trust,
     gateway: config.gateway.clone(),
-    zone: config.zone,
     seed: config.seed,
     ready: AtomicUsize::new(0),
     reconnect: !config.recover.is_zero(),
