@@ -67,6 +67,17 @@ pub(crate) const BUILD: u32 = {
 /// or no writer takes the layer that the placement gave.
 const RETRY: Duration = Duration::from_secs(1);
 
+/// The tries of the load of a character that joins. A stack that starts opens many connections
+/// to PostgreSQL at once, and a pool that waits on a full database fails a try that a later one
+/// passes.
+const LOADS: u32 = 5;
+
+/// Whether `error` passes with time: the pool found no free connection, or the link to the database
+/// broke.
+fn passing(error: &mmo_store::Error) -> bool {
+  matches!(error, mmo_store::Error::Database(sqlx::Error::PoolTimedOut | sqlx::Error::Io(_)))
+}
+
 /// The code with which the layer writer closes the link of a gateway after a fault. The reason of
 /// the close holds the text of the fault.
 const FAULT: VarInt = VarInt::from_u32(1);
@@ -450,12 +461,22 @@ impl Writer {
     self.send_to(gateway, framed(&encode(message)));
   }
 
-  /// Loads the last save of `character`.
+  /// Loads the last save of `character`. A try that the database fails for a while, as a pool
+  /// with no free connection does, goes again after `RETRY`, up to `LOADS` tries.
   fn load(&self, gateway: Gateway, link: Link, account: AccountId, character: CharacterId) {
     let store = self.store.clone();
     self.later(async move {
-      let found = store.load(&[character]).await;
-      Event::Loaded { gateway, link, account, found }
+      let mut tries = 1;
+      loop {
+        match store.load(&[character]).await {
+          Err(why) if tries < LOADS && passing(&why) => {
+            eprintln!("the layer writer loads the character {} again: {why}", character.0);
+            tries += 1;
+            time::sleep(RETRY).await;
+          }
+          found => return Event::Loaded { gateway, link, account, found },
+        }
+      }
     });
   }
 
@@ -1069,6 +1090,37 @@ mod tests {
     endpoint.close(0u32.into(), b"");
     assert_eq!(zone.await.expect("serve ends").to_string(), "the endpoint of the links closed");
     Ok(())
+  }
+
+  #[test]
+  fn a_load_goes_again_only_when_the_database_fails_for_a_while() {
+    let timed_out = mmo_store::Error::Database(sqlx::Error::PoolTimedOut);
+    let broken = mmo_store::Error::Database(sqlx::Error::Io(std::io::Error::other("reset")));
+    let behind = mmo_store::Error::Behind { version: 1 };
+    assert_eq!([&timed_out, &broken, &behind].map(super::passing), [true, true, false]);
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_join_waits_for_a_free_connection_of_the_database_and_takes_its_player(pool: PgPool) {
+    let meadow = Meadow::new(pool.clone()).await;
+    let (mut writer, mut heard) = meadow.writer().await;
+    let (_peer, _endpoint, _frames) = meadow.open(&mut writer, GATE).await;
+    // A pool of one connection, which the test holds for a while, as a full database does.
+    let small = sqlx::postgres::PgPoolOptions::new()
+      .max_connections(1)
+      .acquire_timeout(Duration::from_millis(200))
+      .connect_lazy_with(pool.connect_options().as_ref().clone());
+    writer.store = Store::open(small.clone()).await.expect("a store");
+    let held = small.acquire().await.expect("a connection");
+    tokio::spawn(async move {
+      time::sleep(Duration::from_millis(500)).await;
+      drop(held);
+    });
+    let join = ToZone::Join { link: Link(1), account: meadow.account, character: meadow.character };
+    assert!(writer.hear(Event::Message(GATE, join)).is_none());
+    let loaded = |_: &Writer, event: &Event| matches!(event, Event::Loaded { .. });
+    assert_eq!(hear(&mut writer, &mut heard, loaded).await, None);
+    assert_eq!(writer.zone.count(), 1);
   }
 
   #[sqlx::test(migrations = false)]
