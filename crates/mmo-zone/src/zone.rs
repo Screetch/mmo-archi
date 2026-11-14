@@ -76,7 +76,7 @@ pub(crate) struct Zone {
   /// The entities that the layer with the same number in each zone across a border sent last, with
   /// the tick of the message, which this zone shows as entities that it does not own.
   edge: BTreeMap<i32, (Tick, Vec<Entity>)>,
-  /// The most players of the layer, which the writer read from its shard when it claimed it.
+  /// The most players of the layer, which the writer read from its realm when it claimed it.
   cap: usize,
   /// True once the directory put the layer in drain.
   draining: bool,
@@ -595,7 +595,7 @@ mod tests {
   };
   const FOREST: ZoneId = ZoneId(2);
   const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
-  /// The cap of a layer at the start of a shard.
+  /// The cap of a layer at the start of a realm.
   const CAP: usize = 500;
   const ACCOUNT: AccountId = AccountId(3);
   const GATE: Gateway = Gateway(1);

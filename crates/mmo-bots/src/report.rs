@@ -9,7 +9,7 @@ use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 use tokio::time::Instant;
 
 use crate::bot::{End, Outcome, Role};
-use crate::layers::{Seen, Shard};
+use crate::layers::{Realm, Seen};
 use crate::ticks::Counts;
 
 /// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
@@ -242,7 +242,7 @@ impl Crossing {
 
   /// The lines of the budget, when some bots cross. A crossing keeps the number of its layer when
   /// the layer with that number is open in the next zone and has room: the stage that runs it
-  /// holds each crosser of a shard on one layer, which the next zone opens with the first crosser.
+  /// holds each crosser of a realm on one layer, which the next zone opens with the first crosser.
   fn budget(&self) -> Vec<(&'static str, bool)> {
     let crossed = ("each crosser entered the next zone", self.crossed >= self.crossers);
     let kept =
@@ -264,19 +264,19 @@ struct Drain {
   /// The layers that stand with no player at the last look.
   empty: usize,
   /// The layers that hold a quarter of their cap or fewer at the last look, while the other layers
-  /// of their shard have room for their players.
+  /// of their realm have room for their players.
   sparse: usize,
 }
 
 impl Drain {
   fn new(outcomes: &[Outcome], layers: &Seen) -> Self {
     let (mut empty, mut sparse) = (0, 0);
-    for shard in layers.values() {
-      let counts: Vec<u32> = shard.layers.values().filter_map(|layer| layer.now).collect();
-      let room: u32 = counts.iter().map(|players| shard.cap.saturating_sub(*players)).sum();
-      let fits = |players: u32| room - shard.cap.saturating_sub(players) >= players;
+    for realm in layers.values() {
+      let counts: Vec<u32> = realm.layers.values().filter_map(|layer| layer.now).collect();
+      let room: u32 = counts.iter().map(|players| realm.cap.saturating_sub(*players)).sum();
+      let fits = |players: u32| room - realm.cap.saturating_sub(players) >= players;
       empty += counts.iter().filter(|players| **players == 0).count();
-      let low = |players: &&u32| **players > 0 && **players * 4 <= shard.cap;
+      let low = |players: &&u32| **players > 0 && **players * 4 <= realm.cap;
       sparse += counts.iter().filter(low).filter(|players| fits(**players)).count();
     }
     let staying: Vec<&Outcome> = outcomes.iter().filter(|out| out.role != Role::Leaver).collect();
@@ -319,7 +319,7 @@ pub(crate) struct Report {
   queue: Queue,
   recovery: Recovery,
   crossing: Crossing,
-  /// The bots of another shard that the bots saw, each counted once for each bot that saw it.
+  /// The bots of another realm that the bots saw, each counted once for each bot that saw it.
   strangers: usize,
   /// The bots that the end of the measure found before their first snapshot, by their phase: a
   /// bot that waits in the queue is one of them.
@@ -336,9 +336,9 @@ pub(crate) struct Report {
   gaps: u64,
   ticks: Ticks,
   layers: Seen,
-  /// The bots that played, by their shard.
-  shards: BTreeMap<u32, usize>,
-  /// The bots that played and never left their zone, by their shard: the players that its layers
+  /// The bots that played, by their realm.
+  realms: BTreeMap<u32, usize>,
+  /// The bots that played and never left their zone, by their realm: the players that its layers
   /// of the zone must hold.
   stayed: BTreeMap<u32, usize>,
   window: Duration,
@@ -375,14 +375,14 @@ impl Report {
     for fault in outcomes.iter().filter_map(|out| out.fault.clone()) {
       *faults.entry(fault).or_default() += 1;
     }
-    let mut shards = BTreeMap::new();
+    let mut realms = BTreeMap::new();
     for out in outcomes.iter().filter(|out| out.joined.is_some()) {
-      *shards.entry(out.shard).or_default() += 1;
+      *realms.entry(out.realm).or_default() += 1;
     }
     let mut stayed = BTreeMap::new();
     let left = |out: &Outcome| out.crossings.iter().any(|(from, to)| from.zone != to.zone);
     for out in outcomes.iter().filter(|out| out.joined.is_some() && !left(out)) {
-      *stayed.entry(out.shard).or_default() += 1;
+      *stayed.entry(out.realm).or_default() += 1;
     }
     let mut unjoined = BTreeMap::new();
     for out in outcomes.iter().filter(|out| out.joined.is_none() && out.fault.is_none()) {
@@ -414,7 +414,7 @@ impl Report {
       ticks: Ticks::new(ticks),
       drain: Drain::new(outcomes, &layers),
       layers,
-      shards,
+      realms,
       stayed,
       window,
     }
@@ -437,10 +437,10 @@ fn millis(d: Duration) -> f64 {
 }
 
 impl Report {
-  /// The line of the report on one shard: its layers and the players on each, zone by zone.
-  fn shard_line(&self, id: u32, shard: &Shard) -> String {
+  /// The line of the report on one realm: its layers and the players on each, zone by zone.
+  fn realm_line(&self, id: u32, realm: &Realm) -> String {
     let mut zones: BTreeMap<i32, Vec<String>> = BTreeMap::new();
-    for ((zone, _), players) in &shard.layers {
+    for ((zone, _), players) in &realm.layers {
       zones
         .entry(*zone)
         .or_default()
@@ -449,24 +449,24 @@ impl Report {
     let players: Vec<String> =
       zones.iter().map(|(zone, now)| format!(" of zone {zone}: {}", now.join(" "))).collect();
     format!(
-      "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer{}",
-      shard.layers.len(),
-      shard.cap,
-      self.shards.get(&id).copied().unwrap_or_default(),
+      "realm {id}: {} layers of cap {} opened, {} bots played, players on each layer{}",
+      realm.layers.len(),
+      realm.cap,
+      self.realms.get(&id).copied().unwrap_or_default(),
       players.join(",")
     )
   }
 }
 
 impl Report {
-  /// Whether bots of more than one shard played, so that a bot could see a bot of another.
+  /// Whether bots of more than one realm played, so that a bot could see a bot of another.
   fn sighted(&self) -> bool {
-    self.shards.len() > 1
+    self.realms.len() > 1
   }
 
-  /// The line of the report on the bots of another shard that a bot saw, when two shards play.
+  /// The line of the report on the bots of another realm that a bot saw, when two realms play.
   fn sight(&self) -> Option<String> {
-    self.sighted().then(|| format!("sight: {} bots of another shard seen", self.strangers))
+    self.sighted().then(|| format!("sight: {} bots of another realm seen", self.strangers))
   }
 
   /// The line of the report on the bots that stopped before their first snapshot, and where each
@@ -480,9 +480,9 @@ impl Report {
     })
   }
 
-  /// The line of the budget on that sight: a shard is a world of its own, so none is seen.
+  /// The line of the budget on that sight: a realm is a world of its own, so none is seen.
   fn sight_budget(&self) -> Option<(&'static str, bool)> {
-    self.sighted().then_some(("no bot saw a bot of another shard", self.strangers == 0))
+    self.sighted().then_some(("no bot saw a bot of another realm", self.strangers == 0))
   }
 }
 
@@ -529,11 +529,11 @@ impl fmt::Display for Report {
       millis(*p99),
       millis(*max),
     ));
-    lines.extend(self.layers.iter().map(|(id, shard)| self.shard_line(*id, shard)));
+    lines.extend(self.layers.iter().map(|(id, realm)| self.realm_line(*id, realm)));
     let capped =
-      self.layers.values().all(|shard| shard.layers.values().all(|l| l.most <= shard.cap));
-    let opened = self.layers.iter().all(|(id, shard)| {
-      shard.layers.len() >= needed(self.stayed.get(id).copied().unwrap_or_default(), shard.cap)
+      self.layers.values().all(|realm| realm.layers.values().all(|l| l.most <= realm.cap));
+    let opened = self.layers.iter().all(|(id, realm)| {
+      realm.layers.len() >= needed(self.stayed.get(id).copied().unwrap_or_default(), realm.cap)
     });
     let budget = [
       ("tick p99 at most 25 ms", *total > 0 && *p99 <= BUDGET),
@@ -544,7 +544,7 @@ impl fmt::Display for Report {
       ("no datagram over 1100 bytes", self.largest <= DATAGRAM),
       ("each bot played or waits in the queue", self.played + queued == self.bots),
       ("no layer over its cap", capped),
-      ("each shard opened the layers that its players need", opened),
+      ("each realm opened the layers that its players need", opened),
     ];
     let line = |(label, holds): (&str, bool)| format!("budget {label}: {}", verdict(holds));
     lines.extend(budget.map(line));
@@ -570,7 +570,7 @@ mod tests {
 
   use super::{Queue, Report, Stats, Ticks};
   use crate::bot::{End, Outcome, Role};
-  use crate::layers::{Players, Seen, Shard};
+  use crate::layers::{Players, Realm, Seen};
 
   fn played(wait: u64, enter: u64, up: usize, down: usize, largest: usize) -> Outcome {
     Outcome {
@@ -578,7 +578,7 @@ mod tests {
       waited: Some(Duration::from_secs(wait)),
       entered: Some(Duration::from_secs(enter)),
       joined: Some(Instant::now()),
-      shard: 1,
+      realm: 1,
       played: Duration::from_secs(10),
       up,
       down,
@@ -589,12 +589,12 @@ mod tests {
     }
   }
 
-  /// A shard of cap `cap`, with the layers `(zone, number, players now, most players)`.
-  fn shard(cap: u32, layers: &[(i32, u32, u32, u32)]) -> Shard {
+  /// A realm of cap `cap`, with the layers `(zone, number, players now, most players)`.
+  fn realm(cap: u32, layers: &[(i32, u32, u32, u32)]) -> Realm {
     let layers = layers
       .iter()
       .map(|&(zone, number, now, most)| ((zone, number), Players { now: Some(now), most }));
-    Shard { cap, layers: layers.collect() }
+    Realm { cap, layers: layers.collect() }
   }
 
   /// A bot that entered the queue at the places `(ms, position)`, in a queue of `length`, and that
@@ -662,7 +662,7 @@ mod tests {
       failed("the link fails"),
     ];
     let counts = BTreeMap::from([(10, 90), (60, 9), (120, 1)]);
-    let seen = Seen::from([(1, shard(1, &[(1, 1, 1, 1), (1, 2, 1, 2)]))]);
+    let seen = Seen::from([(1, realm(1, &[(1, 1, 1, 1), (1, 2, 1, 2)]))]);
     let report =
       Report::new(3, 0, Duration::ZERO, &outcomes, &counts, seen, Duration::from_secs(30));
     let lines = [
@@ -676,7 +676,7 @@ mod tests {
       "snapshots 200, refused by the world 2, largest 900 bytes",
       "queue: 0 bots wait of 0 that must, the longest time without a place 0.0 s",
       "ticks of the writers in 30 s: 100, p50 2.75 ms, p99 15.25 ms, max 30.25 ms, 1 over 25 ms, 0 over 50 ms",
-      "shard 1: 2 layers of cap 1 opened, 2 bots played, players on each layer of zone 1: 1 1",
+      "realm 1: 2 layers of cap 1 opened, 2 bots played, players on each layer of zone 1: 1 1",
       "budget tick p99 at most 25 ms: ok",
       "budget no tick of 50 ms or more: ok",
       "budget data down, mean at most 5000 B/s: ok",
@@ -685,7 +685,7 @@ mod tests {
       "budget no datagram over 1100 bytes: ok",
       "budget each bot played or waits in the queue: over",
       "budget no layer over its cap: over",
-      "budget each shard opened the layers that its players need: ok",
+      "budget each realm opened the layers that its players need: ok",
       "budget the queue holds the bots that must wait: ok",
       "budget the queue admits in the order of entry: ok",
       "budget each waiting bot holds the place of its order of entry: ok",
@@ -745,9 +745,9 @@ mod tests {
   }
 
   #[test]
-  fn the_report_counts_the_bots_of_another_shard_that_a_bot_saw_when_two_shards_play() {
-    let on = |shard, seen: &[i64]| Outcome {
-      shard,
+  fn the_report_counts_the_bots_of_another_realm_that_a_bot_saw_when_two_realms_play() {
+    let on = |realm, seen: &[i64]| Outcome {
+      realm,
       strangers: seen.iter().copied().collect(),
       ..played(1, 2, 0, 0, 0)
     };
@@ -756,17 +756,17 @@ mod tests {
       Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
     let text = report(&[on(1, &[]), on(2, &[])]);
-    assert!(text.contains("sight: 0 bots of another shard seen\n"), "{text}");
-    assert!(text.ends_with("budget no bot saw a bot of another shard: ok\n"), "{text}");
+    assert!(text.contains("sight: 0 bots of another realm seen\n"), "{text}");
+    assert!(text.ends_with("budget no bot saw a bot of another realm: ok\n"), "{text}");
     let text = report(&[on(1, &[7, 8]), on(2, &[9])]);
-    assert!(text.contains("sight: 3 bots of another shard seen\n"), "{text}");
-    assert!(text.ends_with("budget no bot saw a bot of another shard: over\n"), "{text}");
+    assert!(text.contains("sight: 3 bots of another realm seen\n"), "{text}");
+    assert!(text.ends_with("budget no bot saw a bot of another realm: over\n"), "{text}");
     let text = report(&[on(1, &[7]), on(1, &[])]);
-    assert!(!text.contains("sight") && !text.contains("another shard"), "{text}");
+    assert!(!text.contains("sight") && !text.contains("another realm"), "{text}");
   }
 
   #[test]
-  fn a_shard_needs_layers_for_the_bots_that_stayed_in_its_zone_alone() {
+  fn a_realm_needs_layers_for_the_bots_that_stayed_in_its_zone_alone() {
     let layer = |zone, number| Layer { zone: ZoneId(zone), number };
     let gone = Outcome {
       role: Role::Crosser,
@@ -775,11 +775,11 @@ mod tests {
     };
     let outcomes = [played(1, 2, 0, 0, 0), played(1, 2, 0, 0, 0), gone];
     let text = |layers| {
-      let seen = Seen::from([(1, shard(2, layers))]);
+      let seen = Seen::from([(1, realm(2, layers))]);
       let zero = Duration::ZERO;
       Report::new(3, 0, zero, &outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
-    let opened = "budget each shard opened the layers that its players need: ";
+    let opened = "budget each realm opened the layers that its players need: ";
     assert!(text(&[(1, 1, 2, 2)]).contains(&format!("{opened}ok")));
     assert!(text(&[]).contains(&format!("{opened}over")));
   }
@@ -881,15 +881,15 @@ mod tests {
   fn the_report_fails_a_drain_whose_bots_left_stop_or_whose_layers_stay_empty_or_sparse() {
     let stays = |end| Outcome { end, ..played(1, 2, 1, 1, 1) };
     let leaves = |end| Outcome { role: Role::Leaver, end, ..played(1, 2, 1, 1, 1) };
-    let text = |outcomes: &[Outcome], mut shard: Shard| {
-      shard.layers.insert((1, 9), Players { now: None, most: 20 });
-      let seen = Seen::from([(1, shard)]);
+    let text = |outcomes: &[Outcome], mut realm: Realm| {
+      realm.layers.insert((1, 9), Players { now: None, most: 20 });
+      let seen = Seen::from([(1, realm)]);
       let zero = Duration::ZERO;
       Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
     let good = text(
       &[leaves(End::LoggedOut), stays(End::Playing)],
-      shard(20, &[(1, 1, 17, 20), (1, 3, 5, 13)]),
+      realm(20, &[(1, 1, 17, 20), (1, 3, 5, 13)]),
     );
     let lines = [
       "drain: 1 of 1 bots logged out, 1 of 1 bots left play, 0 layers stand empty, 0 sparse layers fit in the others",
@@ -903,7 +903,7 @@ mod tests {
     }
     let bad = text(
       &[leaves(End::Playing), stays(End::Unseen)],
-      shard(20, &[(1, 1, 16, 16), (1, 2, 0, 3), (1, 3, 4, 4)]),
+      realm(20, &[(1, 1, 16, 16), (1, 2, 0, 3), (1, 3, 4, 4)]),
     );
     let lines = [
       "drain: 0 of 1 bots logged out, 0 of 1 bots left play, 1 layers stand empty, 1 sparse layers fit in the others",
@@ -914,31 +914,31 @@ mod tests {
     for line in lines {
       assert!(bad.contains(line), "{bad} lacks {line}");
     }
-    let gone = text(&[leaves(End::LoggedOut), stays(End::LoggedOut)], shard(20, &[(1, 1, 17, 20)]));
+    let gone = text(&[leaves(End::LoggedOut), stays(End::LoggedOut)], realm(20, &[(1, 1, 17, 20)]));
     assert!(gone.contains("budget each bot left plays: over"), "{gone}");
-    let none = text(&[stays(End::Playing)], shard(20, &[(1, 1, 1, 1)]));
+    let none = text(&[stays(End::Playing)], realm(20, &[(1, 1, 1, 1)]));
     assert!(!none.contains("drain") && !none.contains("bot left"), "{none}");
   }
 
   #[test]
-  fn the_report_fails_a_layer_over_its_cap_and_a_shard_that_opens_too_few_layers() {
+  fn the_report_fails_a_layer_over_its_cap_and_a_realm_that_opens_too_few_layers() {
     let outcomes = [played(1, 2, 1, 1, 1), played(1, 2, 1, 1, 1)];
-    let text = |shard| {
-      let seen = Seen::from([(1, shard)]);
+    let text = |realm| {
+      let seen = Seen::from([(1, realm)]);
       Report::new(2, 0, Duration::ZERO, &outcomes, &BTreeMap::new(), seen, Duration::from_secs(1))
         .to_string()
     };
     let capped = "budget no layer over its cap: ";
-    let opened = "budget each shard opened the layers that its players need: ";
-    let fits = text(shard(2, &[(1, 1, 2, 2)]));
+    let opened = "budget each realm opened the layers that its players need: ";
+    let fits = text(realm(2, &[(1, 1, 2, 2)]));
     assert!(fits.contains(&format!("{capped}ok\n{opened}ok")), "{fits}");
-    let few = text(shard(1, &[(1, 1, 1, 1)]));
+    let few = text(realm(1, &[(1, 1, 1, 1)]));
     assert!(few.contains(&format!("{capped}ok\n{opened}over")), "{few}");
-    let none = text(Shard::default());
+    let none = text(Realm::default());
     assert!(none.contains(&format!("{capped}ok\n{opened}over")), "{none}");
-    let over = text(shard(1, &[(1, 1, 1, 1), (1, 2, 2, 2)]));
+    let over = text(realm(1, &[(1, 1, 1, 1), (1, 2, 2, 2)]));
     assert!(over.contains(&format!("{capped}over\n{opened}ok")), "{over}");
-    let crossed = text(shard(1, &[(1, 1, 1, 1), (2, 1, 1, 1)]));
+    let crossed = text(realm(1, &[(1, 1, 1, 1), (2, 1, 1, 1)]));
     let zones = "players on each layer of zone 1: 1, of zone 2: 1\n";
     assert!(crossed.contains(zones), "{crossed}");
     assert!(crossed.contains(&format!("{capped}ok\n{opened}ok")), "{crossed}");

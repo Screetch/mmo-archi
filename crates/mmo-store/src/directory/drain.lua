@@ -1,14 +1,14 @@
 -- The drain of a layer, which Redis runs as one atomic step: the layer drains only when the other open layers of its
 -- zone have room for all its players together, after the players of the layers of the zone that drain already.
--- KEYS: the layers, the draining layers and the caps of the shard.
--- ARGV: the zone and the number of the layer, the prefix of the writers of the shard, the channel of the directory,
--- the shard, and the prefix of the places of the shard.
+-- KEYS: the layers, the draining layers and the caps of the realm.
+-- ARGV: the zone and the number of the layer, the prefix of the writers of the realm, the channel of the directory,
+-- the realm, and the prefix of the places of the realm.
 -- The count of a layer is the count of its writer and each place that a placement gave and its writer did not take yet,
 -- as for the placement, so the players that a placement sends to a layer need room too.
 -- It gives 1 when the layer drains, also when it drained already, and else 0.
 local cap = tonumber(redis.call('HGET', KEYS[3], 'layer_cap'))
 if not cap then
-  return redis.error_reply('NOCAP shard ' .. ARGV[5] .. ' has no layer_cap')
+  return redis.error_reply('NOCAP realm ' .. ARGV[5] .. ' has no layer_cap')
 end
 local own = ARGV[1] .. ':' .. ARGV[2]
 if redis.call('SISMEMBER', KEYS[2], own) == 1 then

@@ -1,5 +1,5 @@
--- The place of one account in the queue of its world, which Redis runs as one atomic step.
--- KEYS: the queue and the admissions of the world, and the queued mark, the admit mark, the resume mark and the
+-- The place of one account in the queue of its realm, which Redis runs as one atomic step.
+-- KEYS: the queue and the admissions of the realm, and the queued mark, the admit mark, the resume mark and the
 -- presence of the account.
 -- ARGV: the account, 1 to enter the queue when the account has no place, the life of the marks in seconds, and the
 -- window of the admissions in milliseconds.

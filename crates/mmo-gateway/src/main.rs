@@ -381,8 +381,8 @@ mod tests {
     let meadow = world.zone(1).await;
     let forest = world.zone(2).await;
     let address = world.gateway().await;
-    let first = async |character, shard| {
-      world.presence(11, character, shard, 2).await;
+    let first = async |character, realm| {
+      world.presence(11, character, realm, 2).await;
       world.announced(address, world.session(11, 42, 1).await).await
     };
     let join = |link| ToZone::Join { link, account: AccountId(11), character: CharacterId(42) };
@@ -391,7 +391,7 @@ mod tests {
     assert_eq!(said, in_meadow, "the presence of another character of the account");
     let mut one = meadow.accept().await;
     let (elsewhere, said) = first(42, 2).await;
-    assert_eq!(said, in_meadow, "the presence of the character in another shard");
+    assert_eq!(said, in_meadow, "the presence of the character in another realm");
     let links = [link_at(&other, &one).await, link_at(&elsewhere, &one).await];
     let joins = [one.message::<ToZone>().await, one.message::<ToZone>().await];
     for link in links {

@@ -8,12 +8,12 @@
 //! accounts and the characters in PostgreSQL, with `mmo-store` as the login service does, and then
 //! each bot logs in through the login service. The tick times come from the hash that the writer
 //! of each layer of each zone keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads them before
-//! and after the measure and takes the difference. The bots go round the shards: the bot
-//! with the index `i` plays in the shard `i % n + 1`, through the login service of that shard. Each
-//! second of the measure, [`run`] reads the directory of each shard, `mmo_store::keys::layers`, and
-//! the report tells the layers that opened in each zone of each shard and the players on each,
-//! and fails when a layer passes its cap or a shard opens fewer layers than its players need. When
-//! two shards play, it also counts the bots of another shard that a snapshot gave to a bot, and
+//! and after the measure and takes the difference. The bots go round the realms: the bot
+//! with the index `i` plays in the realm `i % n + 1`, through the login service of that realm. Each
+//! second of the measure, [`run`] reads the directory of each realm, `mmo_store::keys::layers`, and
+//! the report tells the layers that opened in each zone of each realm and the players on each,
+//! and fails when a layer passes its cap or a realm opens fewer layers than its players need. When
+//! two realms play, it also counts the bots of another realm that a snapshot gave to a bot, and
 //! fails when one did. The bytes are the sizes of the datagrams, with no header of IP, UDP or QUIC,
 //! which add about 60 bytes to each datagram.
 //!
@@ -23,7 +23,7 @@
 //!   gateway.
 //! - `MMO_BOTS_LOGIN` and `MMO_BOTS_GATEWAY`: their addresses, as `host:port`. Each host is the
 //!   name that its certificate must hold. `MMO_BOTS_LOGIN` holds the address of the login service
-//!   of each shard, with commas between them, so the bots play in as many shards as it names.
+//!   of each realm, with commas between them, so the bots play in as many realms as it names.
 //! - `DATABASE_URL` and `REDIS_URL`: the database and the Redis of the game.
 //! - `MMO_BOTS_ZONE` and `MMO_BOTS_COUNT`: the zone where the characters stand, which the table
 //!   `zones` holds, and the count of bots, which is at most 500, since no test runs more.
@@ -34,8 +34,8 @@
 //!   is 0.
 //! - `MMO_BOTS_CROSSERS`: how many of the first bots start within 30 m of the east border of the
 //!   zone and walk east, which makes each of them cross it, as `40`. The other bots log in after
-//!   each of them played, so the crossers stand on the first layer of their shard. Give at most
-//!   as many crossers to a shard as a layer holds. The report fails when a crosser did not enter
+//!   each of them played, so the crossers stand on the first layer of their realm. Give at most
+//!   as many crossers to a realm as a layer holds. The report fails when a crosser did not enter
 //!   the next zone, and when one entered a layer with another number than its own. The default
 //!   is 0.
 //! - `MMO_BOTS_LEAVERS`: how many of the first bots log out once each bot plays, before the
@@ -140,7 +140,7 @@ async fn look_during(
 ) -> redis::RedisResult<()> {
   let end = Instant::now() + config.play;
   loop {
-    layers::look(redis, config.shards(), seen).await?;
+    layers::look(redis, config.realms(), seen).await?;
     let left = end.saturating_duration_since(Instant::now());
     if left.is_zero() {
       return Ok(());
@@ -165,11 +165,11 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
   let reconnect = !config.recover.is_zero();
   let crossers = usize::try_from(config.crossers).unwrap_or(usize::MAX);
-  let shards = bots.iter().map(|bot| (bot.character.0, bot.shard)).collect();
+  let realms = bots.iter().map(|bot| (bot.character.0, bot.realm)).collect();
   let (leaving, leave) = watch::channel(false);
   let leavers = config.leavers;
   let base =
-    Shared { trust, gateway, zone, seed, ready, reconnect, crossers, shards, leavers, leave };
+    Shared { trust, gateway, zone, seed, ready, reconnect, crossers, realms, leavers, leave };
   let shared = Arc::new(base);
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
@@ -183,10 +183,10 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   }
   settle(&shared, tasks.len().saturating_sub(config.waiting as usize), config.join).await;
   leaving.send_replace(true);
-  let before = ticks::read(&mut redis, config.shards()).await;
+  let before = ticks::read(&mut redis, config.realms()).await;
   let mut opened = Seen::new();
   let looked = look_during(&mut redis, config, &mut opened).await;
-  let after = ticks::read(&mut redis, config.shards()).await;
+  let after = ticks::read(&mut redis, config.realms()).await;
   stop.send_replace(true);
   let mut outcomes: Vec<Outcome> = Vec::new();
   while let Some(done) = tasks.join_next().await {

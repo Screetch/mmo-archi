@@ -819,7 +819,7 @@ mod tests {
     Relayed, SAVES, Save, State, TICKS_PER_SECOND, Tick, ToZone, ZoneId, frame,
   };
   use mmo_protocol::{Entity, Frames, FromNeighbour, ToClient, ToNeighbour, Velocity, decode};
-  use mmo_protocol::{Epoch, Layer, ShardId};
+  use mmo_protocol::{Epoch, Layer, RealmId};
   use mmo_store::testing::Redis;
   use mmo_store::{Directory, Lease, Leased, NewCharacter, Saved, Square, Store, keys};
   use quinn::{ConnectionError, Endpoint, TransportErrorCode};
@@ -839,7 +839,7 @@ mod tests {
   use crate::zone::Zone;
 
   const MEADOW: ZoneId = ZoneId(1);
-  const SHARD: ShardId = ShardId(1);
+  const REALM: RealmId = RealmId(1);
   const LAYER: Layer = Layer { zone: MEADOW, number: 1 };
   const GATE: Gateway = Gateway(1);
   const FOREST: ZoneId = ZoneId(2);
@@ -883,7 +883,7 @@ mod tests {
       store.add_zone(RIDGE, "ridge").await.expect("a zone");
       store.place_zone(RIDGE, Square { column: 0, row: 1 }).await.expect("a square");
       let account = store.create_account("alice", Password("one".to_owned())).await.expect("one");
-      let brom = NewCharacter { account, shard: SHARD, name: "Brom", zone: MEADOW, state };
+      let brom = NewCharacter { account, realm: REALM, name: "Brom", zone: MEADOW, state };
       let character = store.create_character(&brom).await.expect("Brom");
       let world = World::new();
       let keeper = Keeper::start(&world, store.clone());
@@ -909,13 +909,13 @@ mod tests {
       let dial = Dial { endpoint: endpoint.clone(), client: config.client.clone(), ipv4: true };
       let mut keeper = keeper::Keeper::new(endpoint.clone(), config.client, config.keeper, true);
       let mut admin = self.admin().await;
-      let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, 500).await.expect("a cap");
-      let () = admin.hset(keys::layers(SHARD), keys::field(layer), 0).await.expect("a layer");
-      let () = admin.del(keys::writer(SHARD, layer)).await.expect("no lease");
+      let () = admin.hset(keys::realm(REALM), keys::LAYER_CAP, 500).await.expect("a cap");
+      let () = admin.hset(keys::layers(REALM), keys::field(layer), 0).await.expect("a layer");
+      let () = admin.del(keys::writer(REALM, layer)).await.expect("no lease");
       let url = self.redis.url();
-      let taken = Taken::wait(&url, SHARD, address(&endpoint)).await.expect("a layer");
+      let taken = Taken::wait(&url, REALM, address(&endpoint)).await.expect("a layer");
       assert_eq!(taken.layer, layer);
-      let epoch = keeper.claim(SHARD, taken.layer).await.expect("an epoch");
+      let epoch = keeper.claim(REALM, taken.layer).await.expect("an epoch");
       let across = self.store.neighbours(taken.layer.zone).await.expect("the neighbours");
       let zone = Zone::new(taken.layer, taken.cap).beside(across);
       let claim = taken.hold(epoch);
@@ -930,7 +930,7 @@ mod tests {
 
     /// Leases the layer to a writer of `epoch`, as a newer writer does.
     async fn supersede(&self, epoch: i64) {
-      let directory = Directory { shard: SHARD };
+      let directory = Directory { realm: REALM };
       let lease =
         Lease { layer: LAYER, epoch: Epoch(epoch), address: "z:1", players: 0, taken: &[] };
       let newer = directory.lease(&mut self.admin().await, &lease).await;
@@ -1224,7 +1224,7 @@ mod tests {
     let meadow = Meadow::new(pool).await;
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
-    meadow.store.claim(SHARD, LAYER).await.expect("a newer epoch");
+    meadow.store.claim(REALM, LAYER).await.expect("a newer epoch");
     walk(&mut writer, 1, SAVE_EVERY);
     let fault = hear(&mut writer, &mut heard, saved_event).await;
     assert_eq!(
@@ -1249,7 +1249,7 @@ mod tests {
     meadow.join(&mut writer).await;
     let entries = |_: &Writer, event: &Event| matches!(event, Event::Entries(_));
     let present = BTreeMap::from(
-      [("character", "1"), ("shard", "1"), ("zone", "1"), ("layer", "1"), ("epoch", "1")]
+      [("character", "1"), ("realm", "1"), ("zone", "1"), ("layer", "1"), ("epoch", "1")]
         .map(|(k, v)| (k.into(), v.into())),
     );
     assert_eq!(hear(&mut writer, &mut heard, joined(3)).await, None);
@@ -1556,9 +1556,9 @@ mod tests {
   async fn a_player_waits_when_the_lease_of_the_next_layer_names_no_address_to_dial(pool: PgPool) {
     let meadow = Meadow::at(pool, BORDER).await;
     let mut admin = meadow.admin().await;
-    let () = admin.hset(keys::layers(SHARD), keys::field(FOREST_LAYER), 0).await.expect("a layer");
+    let () = admin.hset(keys::layers(REALM), keys::field(FOREST_LAYER), 0).await.expect("a layer");
     let lease = [(keys::ADDRESS, "[::1]:4433"), (keys::EPOCH, "1")];
-    let () = admin.hset_multiple(keys::writer(SHARD, FOREST_LAYER), &lease).await.expect("a lease");
+    let () = admin.hset_multiple(keys::writer(REALM, FOREST_LAYER), &lease).await.expect("a lease");
     let mut at_border = border(&meadow).await;
     at_border.cross();
     at_border.waits().await;
@@ -1568,7 +1568,7 @@ mod tests {
   async fn a_player_waits_when_redis_refuses_the_placement(pool: PgPool) {
     let meadow = Meadow::at(pool, BORDER).await;
     let mut at_border = border(&meadow).await;
-    let () = meadow.admin().await.hdel(keys::shard(SHARD), keys::LAYER_CAP).await.expect("no cap");
+    let () = meadow.admin().await.hdel(keys::realm(REALM), keys::LAYER_CAP).await.expect("no cap");
     at_border.cross();
     at_border.waits().await;
   }
@@ -1655,7 +1655,7 @@ mod tests {
     let meadow = Meadow::at(pool, near(SIDE_CM - 300)).await;
     let cael = NewCharacter {
       account: meadow.account,
-      shard: SHARD,
+      realm: REALM,
       name: "Cael",
       zone: FOREST,
       state: near(300),
@@ -1691,11 +1691,11 @@ mod tests {
   /// The cap of a layer in the tests of the drain: a layer of 1 player holds a quarter of it.
   const SMALL: usize = 4;
 
-  /// Gives the layers of the shard the cap [`SMALL`], in the directory and in `claimed`, which
+  /// Gives the layers of the realm the cap [`SMALL`], in the directory and in `claimed`, which
   /// holds `layer`.
   async fn small(meadow: &Meadow, claimed: &mut Claimed, layer: Layer) {
     let mut admin = meadow.admin().await;
-    let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, SMALL).await.expect("a cap");
+    let () = admin.hset(keys::realm(REALM), keys::LAYER_CAP, SMALL).await.expect("a cap");
     let across = meadow.store.neighbours(layer.zone).await.expect("the neighbours");
     claimed.zone = Zone::new(layer, SMALL).beside(across);
   }
@@ -1727,7 +1727,7 @@ mod tests {
   }
 
   async fn draining(meadow: &Meadow) -> Vec<String> {
-    meadow.admin().await.smembers(keys::draining(SHARD)).await.expect("a set")
+    meadow.admin().await.smembers(keys::draining(REALM)).await.expect("a set")
   }
 
   #[sqlx::test(migrations = false)]
@@ -1782,16 +1782,16 @@ mod tests {
     assert_eq!(hear(&mut source.writer, &mut source.heard, drained).await, None);
     assert!(source.writer.zone.low(), "no other layer has room for Brom");
     let mut admin = meadow.admin().await;
-    let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), 0).await.expect("a layer");
+    let () = admin.hset(keys::layers(REALM), keys::field(LAYER), 0).await.expect("a layer");
     let lease = [(keys::ADDRESS, "[::1]:4433"), (keys::EPOCH, "1")];
-    let () = admin.hset_multiple(keys::writer(SHARD, LAYER), &lease).await.expect("a lease");
+    let () = admin.hset_multiple(keys::writer(REALM, LAYER), &lease).await.expect("a lease");
     idle(&mut source.writer, ANNOUNCE_EVERY);
     assert_eq!(hear(&mut source.writer, &mut source.heard, drained).await, None);
     assert_eq!(draining(&meadow).await, ["1:2"]);
     idle(&mut source.writer, ANNOUNCE_EVERY);
     assert_eq!(hear(&mut source.writer, &mut source.heard, stayed).await, None);
     assert_eq!(source.writer.zone.count(), 1, "no address of the lease of layer 1 answers");
-    let () = admin.hset(keys::layers(SHARD), keys::field(LAYER), SMALL).await.expect("a count");
+    let () = admin.hset(keys::layers(REALM), keys::field(LAYER), SMALL).await.expect("a count");
     idle(&mut source.writer, ANNOUNCE_EVERY);
     assert_eq!(hear(&mut source.writer, &mut source.heard, stayed).await, None);
     assert_eq!(source.writer.zone.count(), 1, "layer 1 is full");

@@ -80,7 +80,7 @@ impl World {
     redis: &str,
   ) -> Vec<(&'static str, String)> {
     vec![
-      ("ZONE_SHARD", "1".to_owned()),
+      ("ZONE_REALM", "1".to_owned()),
       ("ZONE_ADDRESS", address.to_owned()),
       ("ZONE_PUBLIC", "zone-1:4433".to_owned()),
       ("DATABASE_URL", database.to_owned()),
@@ -195,8 +195,8 @@ async fn answer(incoming: Incoming, store: Store, ends: UnboundedSender<()>) {
   writer.next().await;
   while let Some(payload) = writer.next().await {
     let answer = match decode(&payload).expect("a message of this version") {
-      ToKeeper::Claim { shard, layer } => {
-        store.claim(shard, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
+      ToKeeper::Claim { realm, layer } => {
+        store.claim(realm, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
       }
       ToKeeper::Save(batch) => {
         store.save(&batch).await.map(|written| FromKeeper::Saved { written: written.characters })

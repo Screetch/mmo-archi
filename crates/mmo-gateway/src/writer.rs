@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  AccountId, CharacterId, DATAGRAM, FromClient, Layer, Link, Relayed, ShardId, ToClient, ToZone,
+  AccountId, CharacterId, DATAGRAM, FromClient, Layer, Link, RealmId, Relayed, ToClient, ToZone,
   decode, encode, frame, unrelayed,
 };
 use mmo_store::Serving;
@@ -17,7 +17,7 @@ use crate::link::{FAULT, Fault, Stream, framed, greet};
 /// The link to the writer of one layer. Each clone sends on the same link.
 #[derive(Clone)]
 pub(crate) struct Writer {
-  pub(crate) shard: ShardId,
+  pub(crate) realm: RealmId,
   pub(crate) layer: Layer,
   entry: Serving,
   connection: Connection,
@@ -102,11 +102,11 @@ impl Writer {
   }
 }
 
-/// Greets the writer of a layer of a shard on `connection`, and relays the link in a task of its
+/// Greets the writer of a layer of a realm on `connection`, and relays the link in a task of its
 /// own until a fault ends it.
 pub(crate) async fn open(
   gateway: Arc<Gateway>,
-  (shard, layer): (ShardId, Layer),
+  (realm, layer): (RealmId, Layer),
   entry: Serving,
   connection: Connection,
 ) -> Result<Writer, Fault> {
@@ -114,8 +114,8 @@ pub(crate) async fn open(
   let (orders, heard) = unbounded_channel();
   let relay =
     Relay { connection: connection.clone(), send, stream, orders: heard, routes: BTreeMap::new() };
-  tokio::spawn(relay.run(gateway, shard, layer));
-  Ok(Writer { shard, layer, entry, connection, orders })
+  tokio::spawn(relay.run(gateway, realm, layer));
+  Ok(Writer { realm, layer, entry, connection, orders })
 }
 
 /// The task of a link: it writes the orders of the clients, and relays each message of the writer
@@ -129,14 +129,14 @@ struct Relay {
 }
 
 impl Relay {
-  async fn run(mut self, gateway: Arc<Gateway>, shard: ShardId, layer: Layer) {
+  async fn run(mut self, gateway: Arc<Gateway>, realm: RealmId, layer: Layer) {
     let fault = self.relay().await;
     eprintln!("the link to the writer of layer {}:{} ends: {fault}", layer.zone.0, layer.number);
     // A close after the close of the writer would hide why the writer closed from the clients.
     if self.connection.close_reason().is_none() {
       self.connection.close(FAULT, fault.to_string().as_bytes());
     }
-    gateway.forget(shard, layer, self.connection.stable_id()).await;
+    gateway.forget(realm, layer, self.connection.stable_id()).await;
   }
 
   async fn relay(&mut self) -> Fault {

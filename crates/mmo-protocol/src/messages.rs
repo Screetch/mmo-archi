@@ -1,7 +1,7 @@
 use bitcode::{Decode, Encode};
 
 use crate::{
-  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, ShardId,
+  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, RealmId,
   TICKS_PER_SECOND, Tick, Token, Velocity, ZoneId,
 };
 
@@ -33,7 +33,7 @@ pub enum ToLogin {
   /// Says that the client still waits in the queue, and asks for its place. A queued client sends
   /// it each 5 s, and the login service removes from the queue a client that sends none for 120 s.
   Wait,
-  /// Makes a character of the admitted account at the start of the world, and gets the list of
+  /// Makes a character of the admitted account at the start of the realm, and gets the list of
   /// [`FromLogin::Characters`] again. The name holds 3 to 16 letters of ASCII, and the login
   /// service writes it with its first letter in upper case and the rest in lower case. An account
   /// holds 8 characters at most.
@@ -53,7 +53,7 @@ pub enum ToLogin {
 pub enum FromLogin {
   /// The login service refuses the last message of the client.
   Refused(Refusal),
-  /// The account waits in the queue of the world. Each login enters the queue, also when the world
+  /// The account waits in the queue of the realm. Each login enters the queue, also when the realm
   /// has a free slot, so no login passes an account that waits.
   Queued {
     /// The place of the account: the first account of the queue is at 0.
@@ -65,7 +65,7 @@ pub enum FromLogin {
     /// The token that brings the account back to its place with [`ToLogin::Resume`].
     resume: Token,
   },
-  /// The account has a slot in the world for 60 s, and holds these characters.
+  /// The account has a slot in the realm for 60 s, and holds these characters.
   Characters(Vec<Character>),
   /// The session of the selected character, which the client gives to a gateway in [`Attach`].
   Session {
@@ -91,7 +91,7 @@ pub enum Refusal {
   Online,
   /// The account holds no character with this id.
   Character,
-  /// The place in the queue or the slot in the world ended, so the client logs in again.
+  /// The place in the queue or the slot in the realm ended, so the client logs in again.
   Expired,
   /// The password of [`ToLogin::NewAccount`] holds fewer than 8 characters, or more than 128
   /// bytes.
@@ -373,8 +373,8 @@ pub struct Save {
 /// characters sends more batches.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Batch {
-  /// The shard of the writer.
-  pub shard: ShardId,
+  /// The realm of the writer.
+  pub realm: RealmId,
   /// The layer of the writer.
   pub layer: Layer,
   /// The epoch that the writer claimed with [`ToKeeper::Claim`].
@@ -395,8 +395,8 @@ pub enum ToKeeper {
   /// Asks for the next epoch of a layer. The writer claims it before it renews the lease of the
   /// layer in the directory with it.
   Claim {
-    /// The shard of the layer.
-    shard: ShardId,
+    /// The realm of the layer.
+    realm: RealmId,
     /// The layer that the writer takes.
     layer: Layer,
   },
@@ -449,7 +449,7 @@ mod tests {
     ToKeeper, ToLogin, ToNeighbour, ToZone,
   };
   use crate::{
-    AccountId, Angle, CharacterId, Epoch, FRAME, Layer, Link, Offset, Password, Position, ShardId,
+    AccountId, Angle, CharacterId, Epoch, FRAME, Layer, Link, Offset, Password, Position, RealmId,
     Tick, Token, Velocity, ZoneId, datagram, decode, encode,
   };
 
@@ -633,15 +633,15 @@ mod tests {
       Save { character: CharacterId(i64::MAX), state: STILL, version: 0 },
     ];
     round_trip(&[
-      ToKeeper::Claim { shard: ShardId(2), layer: Layer { zone: ZoneId(7), number: 3 } },
+      ToKeeper::Claim { realm: RealmId(2), layer: Layer { zone: ZoneId(7), number: 3 } },
       ToKeeper::Save(Batch {
-        shard: ShardId(2),
+        realm: RealmId(2),
         layer: Layer { zone: ZoneId(7), number: 3 },
         epoch: Epoch(3),
         saves,
       }),
       ToKeeper::Save(Batch {
-        shard: ShardId(u32::MAX),
+        realm: RealmId(u32::MAX),
         layer: Layer { zone: ZoneId(-1), number: u32::MAX },
         epoch: Epoch(0),
         saves: vec![],
@@ -667,7 +667,7 @@ mod tests {
     let bytes = |count: usize| {
       let saves = ends.into_iter().cycle().take(count).collect();
       let layer = Layer { zone: ZoneId(i32::MIN), number: u32::MAX };
-      let batch = Batch { shard: ShardId(u32::MAX), layer, epoch: Epoch(i64::MAX), saves };
+      let batch = Batch { realm: RealmId(u32::MAX), layer, epoch: Epoch(i64::MAX), saves };
       encode(&ToKeeper::Save(batch)).len()
     };
     assert_eq!([bytes(SAVES), bytes(SAVES + 1)], [FRAME - 16, FRAME + 18]);

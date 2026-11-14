@@ -30,7 +30,7 @@ pub use messages::{
   ToKeeper, ToLogin, ToNeighbour, ToZone,
 };
 pub use values::{
-  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, ShardId,
+  AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, RealmId,
   TICKS_PER_SECOND, Tick, Token, Velocity, ZoneId,
 };
 

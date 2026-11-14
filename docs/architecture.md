@@ -715,14 +715,14 @@ CREATE INDEX characters_account ON characters (account_id);
 A migration adds the realm of each character and the epoch of each layer, which replaces the epoch of `zones`:
 
 ```sql
-ALTER TABLE characters ADD COLUMN shard_id integer NOT NULL DEFAULT 1;
+ALTER TABLE characters ADD COLUMN realm_id integer NOT NULL DEFAULT 1;
 
 CREATE TABLE layers (
-  shard_id integer NOT NULL,
+  realm_id integer NOT NULL,
   zone_id integer NOT NULL REFERENCES zones (id),
   number integer NOT NULL CHECK (number > 0),
   epoch bigint NOT NULL DEFAULT 0,
-  PRIMARY KEY (shard_id, zone_id, number)
+  PRIMARY KEY (realm_id, zone_id, number)
 );
 ```
 
@@ -735,14 +735,14 @@ ALTER TABLE zones ADD COLUMN map_column integer, ADD COLUMN map_row integer;
 ALTER TABLE zones ADD CONSTRAINT zones_square UNIQUE (map_column, map_row);
 ```
 
-The migration of the layers gave the column of the realm the first name of the realm, `shard_id`. A later migration
+The migration of the layers gave the column of the realm the first name of the realm, `realm_id`. A later migration
 gives it its name in both tables. A rename stops each process that reads the old name, so it goes in a change that needs
 a restart of the game (section 4):
 
 ```sql
-ALTER TABLE characters RENAME COLUMN shard_id TO realm_id;
+ALTER TABLE characters RENAME COLUMN realm_id TO realm_id;
 
-ALTER TABLE layers RENAME COLUMN shard_id TO realm_id;
+ALTER TABLE layers RENAME COLUMN realm_id TO realm_id;
 ```
 
 The id of a realm is the number that the operator gives it in the config of the login service. The first realm is 1,

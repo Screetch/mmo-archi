@@ -1,9 +1,9 @@
-//! The times of the ticks of the writers of the layers of each shard, from the hash that each
+//! The times of the ticks of the writers of the layers of each realm, from the hash that each
 //! keeps in Redis.
 
 use std::collections::BTreeMap;
 
-use mmo_protocol::{Layer, ShardId, ZoneId};
+use mmo_protocol::{Layer, RealmId, ZoneId};
 use mmo_store::keys;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
@@ -13,17 +13,17 @@ use crate::layers;
 /// The count of ticks in each bucket of `keys::ticks`.
 pub(crate) type Counts = BTreeMap<u32, u64>;
 
-/// The ticks of each layer of each zone in the directory of each of the `shards` first shards, as
+/// The ticks of each layer of each zone in the directory of each of the `realms` first realms, as
 /// they stand now, added up in each bucket.
 pub(crate) async fn read(
   redis: &mut MultiplexedConnection,
-  shards: u32,
+  realms: u32,
 ) -> redis::RedisResult<Counts> {
   let mut counts = Counts::new();
-  for shard in 1..=shards {
-    for (zone, number) in layers::read(redis, shard).await?.into_keys() {
+  for realm in 1..=realms {
+    for (zone, number) in layers::read(redis, realm).await?.into_keys() {
       let layer = Layer { zone: ZoneId(zone), number };
-      let layer: Counts = redis.hgetall(keys::ticks(ShardId(shard), layer)).await?;
+      let layer: Counts = redis.hgetall(keys::ticks(RealmId(realm), layer)).await?;
       for (bucket, count) in layer {
         *counts.entry(bucket).or_default() += count;
       }
@@ -63,8 +63,8 @@ mod tests {
     let redis = Redis::start().await;
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut connection = client.get_multiplexed_async_connection().await.expect("a connection");
-    let shards = 1;
-    assert_eq!(read(&mut connection, shards).await.expect("a read"), BTreeMap::new());
+    let realms = 1;
+    assert_eq!(read(&mut connection, realms).await.expect("a read"), BTreeMap::new());
     for field in ["1:1", "1:2", "2:1", "strange"] {
       let () = connection.hset("layers:1", field, 0).await.expect("a layer");
     }
@@ -74,7 +74,7 @@ mod tests {
       let () = connection.hincr(key, bucket, count).await.expect("a count");
     }
     assert_eq!(
-      read(&mut connection, shards).await.expect("a read"),
+      read(&mut connection, realms).await.expect("a read"),
       BTreeMap::from([(4, 17), (12, 2)])
     );
     redis::cmd("ACL")
@@ -83,13 +83,13 @@ mod tests {
       .await
       .expect("a user that reads the layers alone");
     let mut denied = client.get_multiplexed_async_connection().await.expect("a connection");
-    assert!(read(&mut denied, shards).await.is_err(), "Redis refuses the hash of a layer");
+    assert!(read(&mut denied, realms).await.is_err(), "Redis refuses the hash of a layer");
     redis::cmd("ACL")
       .arg(&["SETUSER", "default", "-hgetall"])
       .query_async::<()>(&mut denied)
       .await
       .expect("a user with no hgetall");
     let mut denied = client.get_multiplexed_async_connection().await.expect("a connection");
-    assert!(read(&mut denied, shards).await.is_err(), "Redis refuses the layers");
+    assert!(read(&mut denied, realms).await.is_err(), "Redis refuses the layers");
   }
 }

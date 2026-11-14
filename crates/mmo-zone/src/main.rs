@@ -1,10 +1,10 @@
 //! The layer writer of mmo-archi: the one authority of the state of one layer of a zone.
 //!
-//! It starts idle, and runs the claim of the directory of its shard each second, until it takes a
+//! It starts idle, and runs the claim of the directory of its realm each second, until it takes a
 //! layer that a placement opened. Then it runs the layer on a fixed tick of 50 ms. It takes the
 //! links of the gateways on QUIC: each [`ToZone::Join`](mmo_protocol::ToZone) reads the last save
 //! of a character from PostgreSQL with `mmo-store`, and the layer takes the player when the save
-//! is in its zone and the layer holds fewer players than the cap of a layer of its shard. At each
+//! is in its zone and the layer holds fewer players than the cap of a layer of its realm. At each
 //! tick it takes at most one input of each player, moves each body with the step of
 //! `mmo-collide`, and sends to each player a [`Snapshot`](mmo_protocol::Snapshot) of the 64
 //! nearest entities in the 9 cells of 32 m around
@@ -28,7 +28,7 @@
 //! does not take a batch, the writer keeps the last state of each of those players, and sends it
 //! again at the next save. It reads these variables of its environment:
 //!
-//! - `ZONE_SHARD`: the id of the shard of the writer, as `1`.
+//! - `ZONE_REALM`: the id of the realm of the writer, as `1`.
 //! - `ZONE_ADDRESS`: the address and the UDP port of the links, as `0.0.0.0:4434`.
 //! - `ZONE_PUBLIC`: the address that the gateways dial, as `zone-1.internal:4434`.
 //! - `DATABASE_URL`: the database of the game, which the writer only reads, as
@@ -60,7 +60,7 @@ mod zone;
 use std::process::ExitCode;
 use std::{env, io};
 
-use mmo_protocol::ShardId;
+use mmo_protocol::RealmId;
 use mmo_store::Store;
 use quinn::{ClientConfig, Endpoint};
 use sqlx::postgres::PgPoolOptions;
@@ -120,7 +120,7 @@ async fn write(var: impl Fn(&str) -> Option<String>) -> Error {
 }
 
 /// What an idle writer needs to take a layer: its endpoint, the link to the keeper, its stores, its
-/// shard and the address that the gateways dial.
+/// realm and the address that the gateways dial.
 struct Pool {
   endpoint: Endpoint,
   /// True when the endpoint binds an address of IPv4, which dials only an address of IPv4.
@@ -128,19 +128,19 @@ struct Pool {
   client: ClientConfig,
   keeper: String,
   redis: String,
-  shard: ShardId,
+  realm: RealmId,
   public: String,
   store: Store,
 }
 
 impl Pool {
-  /// Waits for a layer of the shard, and claims its epoch from the keeper on a new link.
+  /// Waits for a layer of the realm, and claims its epoch from the keeper on a new link.
   async fn take(&self) -> Result<Claimed, Error> {
     let ipv4 = self.ipv4;
     let mut keeper =
       Keeper::new(self.endpoint.clone(), self.client.clone(), self.keeper.clone(), ipv4);
-    let taken = Taken::wait(&self.redis, self.shard, self.public.clone()).await?;
-    let epoch = keeper.claim(taken.shard, taken.layer).await?;
+    let taken = Taken::wait(&self.redis, self.realm, self.public.clone()).await?;
+    let epoch = keeper.claim(taken.realm, taken.layer).await?;
     let zone =
       Zone::new(taken.layer, taken.cap).beside(self.store.neighbours(taken.layer.zone).await?);
     let dial = Dial { endpoint: self.endpoint.clone(), client: self.client.clone(), ipv4 };
@@ -156,8 +156,8 @@ async fn open(var: impl Fn(&str) -> Option<String>) -> Result<Pool, Error> {
   let store = Store::open(pool).await?;
   let endpoint = Endpoint::server(config.server, config.address)?;
   let ipv4 = config.address.is_ipv4();
-  let Config { client, keeper, redis, shard, public, .. } = config;
-  Ok(Pool { endpoint, ipv4, client, keeper, redis, shard, public, store })
+  let Config { client, keeper, redis, realm, public, .. } = config;
+  Ok(Pool { endpoint, ipv4, client, keeper, redis, realm, public, store })
 }
 
 #[cfg(test)]
@@ -168,8 +168,8 @@ mod tests {
   use std::time::Duration;
 
   use mmo_protocol::{
-    Angle, CharacterId, Entity, FromClient, Input, Intents, Link, Password, Position, Relayed,
-    ShardId, Snapshot, State, Tick, ToZone, Velocity, ZoneId,
+    Angle, CharacterId, Entity, FromClient, Input, Intents, Link, Password, Position, RealmId,
+    Relayed, Snapshot, State, Tick, ToZone, Velocity, ZoneId,
   };
   use mmo_store::testing::Redis;
   use mmo_store::{Directory, NewCharacter, Placed, Store, keys};
@@ -213,11 +213,11 @@ mod tests {
     view
   }
 
-  /// The Redis of `redis`, with the cap of a layer of shard 1, as the login service writes it.
+  /// The Redis of `redis`, with the cap of a layer of realm 1, as the login service writes it.
   async fn opened(redis: &Redis) -> MultiplexedConnection {
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
-    let () = admin.hset(keys::shard(ShardId(1)), keys::LAYER_CAP, 20).await.expect("a cap");
+    let () = admin.hset(keys::realm(RealmId(1)), keys::LAYER_CAP, 20).await.expect("a cap");
     admin
   }
 
@@ -251,7 +251,7 @@ mod tests {
     let state =
       |x| State { position: Position { x, y: 0, z: 50_000 }, yaw: Angle(0), hit_points: 100 };
     let new =
-      |name, zone, x| NewCharacter { account, shard: ShardId(1), name, zone, state: state(x) };
+      |name, zone, x| NewCharacter { account, realm: RealmId(1), name, zone, state: state(x) };
     let brom = store.create_character(&new("Brom", ZoneId(1), 49_000)).await?;
     let cael = store.create_character(&new("Cael", ZoneId(1), 48_000)).await?;
     let dara = store.create_character(&new("Dara", ZoneId(2), 48_000)).await?;
@@ -259,7 +259,7 @@ mod tests {
     let address = free();
     let redis = Redis::start().await;
     let mut admin = opened(&redis).await;
-    let placed = Directory { shard: ShardId(1) }.place(&mut admin, account, ZoneId(1), None).await;
+    let placed = Directory { realm: RealmId(1) }.place(&mut admin, account, ZoneId(1), None).await;
     assert_eq!(placed.expect("a placement"), Placed::Wait);
     let keeper = Keeper::start(&world, store.clone());
     let mut vars = world.vars(&address, connect.to_url_lossy().as_str(), &redis.url());
@@ -301,13 +301,13 @@ mod tests {
     assert_eq!((&entry["epoch"], &entry["address"]), (&"1".to_owned(), &"zone-1:4433".to_owned()));
     assert_eq!(hash(&redis, "layers:1").await["1:1"], "2");
     let presence = hash(&redis, &format!("presence:{}", account.0)).await;
-    assert_eq!([&presence["shard"], &presence["zone"], &presence["layer"]], ["1", "1", "1"]);
+    assert_eq!([&presence["realm"], &presence["zone"], &presence["layer"]], ["1", "1", "1"]);
 
     let say = FromClient::Say { channel: "world".to_owned(), text: "hi".to_owned() };
     peer.tell(&ToZone::Client(Relayed { link: Link(2), message: say })).await;
     let mut lock = pool.begin().await?;
     let layer =
-      "SELECT epoch FROM layers WHERE shard_id = 1 AND zone_id = 1 AND number = 1 FOR UPDATE";
+      "SELECT epoch FROM layers WHERE realm_id = 1 AND zone_id = 1 AND number = 1 FOR UPDATE";
     sqlx::query(layer).execute(&mut *lock).await?;
     peer.tell(&ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout })).await;
     peer.tell(&ToZone::Leave { link: Link(2) }).await;
@@ -355,7 +355,7 @@ mod tests {
     let keeper = Keeper::start(&world, store.clone());
     let redis = Redis::start().await;
     let mut admin = opened(&redis).await;
-    let () = admin.hset(keys::layers(ShardId(1)), "1:1", 0).await.expect("a layer");
+    let () = admin.hset(keys::layers(RealmId(1)), "1:1", 0).await.expect("a layer");
     let claim = async |url: &str| {
       let mut vars = world.vars(&free(), database.as_str(), url);
       vars.insert(0, ("ZONE_KEEPER", keeper.address()));
@@ -376,7 +376,7 @@ mod tests {
     let missing = "the database refuses the layer writer: error returned from database: relation \"zones\" does not exist";
     assert!(gone.starts_with(missing), "{gone}");
     let unset = write(var(Vec::new())).await.to_string();
-    assert_eq!(unset, "the variable ZONE_SHARD is not set");
+    assert_eq!(unset, "the variable ZONE_REALM is not set");
     Ok(())
   }
 }

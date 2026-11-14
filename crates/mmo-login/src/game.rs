@@ -3,7 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, Epoch, FromLogin, Password, Position, ShardId, State, ToLogin,
+  AccountId, Angle, CharacterId, Epoch, FromLogin, Password, Position, RealmId, State, ToLogin,
   ZoneId,
 };
 use mmo_store::testing::Redis;
@@ -12,12 +12,12 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 
-use crate::{Client, Login, Start, World};
+use crate::{Client, Login, Realm, Start};
 
 pub(crate) const START: State =
   State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
 
-/// The start of the new characters of world 1, in the zone that [`Game::new`] adds.
+/// The start of the new characters of realm 1, in the zone that [`Game::new`] adds.
 pub(crate) const MEADOW: Start =
   Start { zone: ZoneId(7), position: Position { x: 1200, y: -300, z: 50 } };
 
@@ -53,15 +53,15 @@ impl Game {
     ConnectionManager::new(client).await.expect("Redis accepts the user")
   }
 
-  /// A copy of the login service of world 1 with a cap of `cap` accounts.
+  /// A copy of the login service of realm 1 with a cap of `cap` accounts.
   pub(crate) fn copy(&self, cap: u32) -> Login {
-    self.world(1, cap)
+    self.realm(1, cap)
   }
 
-  /// A copy of the login service of the world `id`, whose shard is `id`, with a cap of `cap`
+  /// A copy of the login service of the realm `id`, with a cap of `cap`
   /// accounts.
-  pub(crate) fn world(&self, id: u32, cap: u32) -> Login {
-    Login::new(self.store.clone(), self.redis.clone(), World { id, cap, layer_cap: 20 }, MEADOW)
+  pub(crate) fn realm(&self, id: u32, cap: u32) -> Login {
+    Login::new(self.store.clone(), self.redis.clone(), Realm { id, cap, layer_cap: 20 }, MEADOW)
   }
 
   /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
@@ -69,7 +69,7 @@ impl Game {
     let user = format!("denied{denied}");
     self.deny(&user, denied).await;
     let redis = Self::connect(self.server.port(), &user).await;
-    Login::new(self.store.clone(), redis, World { id: 1, cap: 1, layer_cap: 20 }, MEADOW)
+    Login::new(self.store.clone(), redis, Realm { id: 1, cap: 1, layer_cap: 20 }, MEADOW)
   }
 
   /// Takes from `user` of Redis the commands that the rule of ACL `denied` names.
@@ -86,12 +86,12 @@ impl Game {
     self.server.url()
   }
 
-  /// Opens a layer of `zone` in `shard` with a writer, as a placement and a layer writer do, so a
+  /// Opens a layer of `zone` in `realm` with a writer, as a placement and a layer writer do, so a
   /// selection in that zone gets it.
-  pub(crate) async fn layer(&self, shard: ShardId, zone: ZoneId) {
+  pub(crate) async fn layer(&self, realm: RealmId, zone: ZoneId) {
     let mut redis = self.redis.clone();
-    let directory = Directory { shard };
-    let () = redis.hset(keys::shard(shard), keys::LAYER_CAP, 20).await.expect("a cap");
+    let directory = Directory { realm };
+    let () = redis.hset(keys::realm(realm), keys::LAYER_CAP, 20).await.expect("a cap");
     directory.place(&mut redis, AccountId(0), zone, None).await.expect("a placement");
     let layer = directory.claim(&mut redis, "w").await.expect("a claim").expect("a layer");
     let lease = Lease { layer, epoch: Epoch(1), address: "w", players: 0, taken: &[] };
@@ -102,14 +102,14 @@ impl Game {
     self.store.create_account(name, secret()).await.expect("a free name")
   }
 
-  /// Makes the character `name` of `account` in `shard`, at `START` in the meadow.
+  /// Makes the character `name` of `account` in `realm`, at `START` in the meadow.
   pub(crate) async fn character(
     &self,
     account: AccountId,
-    shard: ShardId,
+    realm: RealmId,
     name: &str,
   ) -> CharacterId {
-    let new = NewCharacter { account, shard, name, zone: MEADOW.zone, state: START };
+    let new = NewCharacter { account, realm, name, zone: MEADOW.zone, state: START };
     self.store.create_character(&new).await.expect("a free name")
   }
 

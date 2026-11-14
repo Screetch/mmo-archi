@@ -1,7 +1,7 @@
 -- The close of a layer, which Redis runs as one atomic step: it removes the layer and its lease when the layer holds
 -- no player and its lease holds the epoch of the writer, so the number of the layer is free again.
 -- A layer that holds the place of a player that a placement gave does not close.
--- KEYS: the layers and the draining layers of the shard, and the lease and the places of the layer.
+-- KEYS: the layers and the draining layers of the realm, and the lease and the places of the layer.
 -- ARGV: the field of the layer, the epoch of the writer, the channel of the directory and the name of the layer on it.
 -- It gives 1 when it closed the layer, and else 0.
 local time = redis.call('TIME')

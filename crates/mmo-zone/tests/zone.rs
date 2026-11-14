@@ -10,6 +10,6 @@ fn the_layer_writer_stops_at_once_on_a_variable_that_is_not_set() {
     .expect("the layer writer runs");
   assert_eq!(
     (output.status.code(), String::from_utf8_lossy(&output.stderr).into_owned()),
-    (Some(1), "the layer writer stops: the variable ZONE_SHARD is not set\n".to_owned())
+    (Some(1), "the layer writer stops: the variable ZONE_REALM is not set\n".to_owned())
   );
 }

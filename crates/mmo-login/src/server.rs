@@ -16,12 +16,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sqlx::PgPool;
 use tokio::time::interval;
 
-use crate::{Client, Login, Start, World};
+use crate::{Client, Login, Realm, Start};
 
 /// The signal on which a copy of the login service stops, as the end of `tokio::signal::ctrl_c`.
 pub type Stop = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
-/// The pace of the admission of the world, and of the check of the slot of each queued client.
+/// The pace of the admission of the realm, and of the check of the slot of each queued client.
 const TICK: Duration = Duration::from_secs(1);
 
 /// The build of the login service in its [`Hello`], for the logs of the operator.
@@ -87,7 +87,7 @@ struct Config {
   key: PathBuf,
   database: String,
   redis: String,
-  world: World,
+  realm: Realm,
   start: Start,
 }
 
@@ -101,9 +101,9 @@ impl Config {
       key: text("MMO_LOGIN_KEY")?.into(),
       database: text("DATABASE_URL")?,
       redis: text("REDIS_URL")?,
-      world: World {
-        id: parsed("MMO_WORLD", &text("MMO_WORLD")?)?,
-        cap: parsed("MMO_WORLD_CAP", &text("MMO_WORLD_CAP")?)?,
+      realm: Realm {
+        id: parsed("MMO_REALM", &text("MMO_REALM")?)?,
+        cap: parsed("MMO_REALM_CAP", &text("MMO_REALM_CAP")?)?,
         layer_cap: layer_cap(&text("MMO_LAYER_CAP")?)?,
       },
       start: Start {
@@ -122,7 +122,7 @@ impl Config {
     let store = Store::open(pool).await?;
     let redis = ConnectionManager::new(redis::Client::open(self.redis)?).await?;
     let endpoint = Endpoint::server(tls, self.address)?;
-    Ok((endpoint, Login::new(store, redis, self.world, self.start)))
+    Ok((endpoint, Login::new(store, redis, self.realm, self.start)))
   }
 }
 
@@ -159,15 +159,15 @@ fn parsed<T: FromStr<Err: Display>>(name: &'static str, text: &str) -> Result<T,
 /// - `MMO_LOGIN_CERTIFICATE` and `MMO_LOGIN_KEY`: the files of PEM of the chain of the
 ///   certificate of TLS and of its key.
 /// - `DATABASE_URL` and `REDIS_URL`: the stores of the game. The keeper migrates the database.
-/// - `MMO_WORLD` and `MMO_WORLD_CAP`: the id of the world and the most accounts that it admits.
-/// - `MMO_LAYER_CAP`: the most players of each layer of the world, 5 at least.
+/// - `MMO_REALM` and `MMO_REALM_CAP`: the id of the realm and the most accounts that it admits.
+/// - `MMO_LAYER_CAP`: the most players of each layer of the realm, 5 at least.
 /// - `MMO_START_ZONE` and `MMO_START_POSITION`: the zone, and the point of the zone as `x,y,z` in
 ///   centimetres, where each new character starts.
 ///
 /// Each client opens one stream, sends its [`Hello`] in a frame, then each [`ToLogin`] in a frame.
 /// The copy answers with its hello, then with a `FromLogin` for each message, and with the
 /// characters of a queued account as soon as the admission gives it a slot. Each second, the copy
-/// runs the admission of the world.
+/// runs the admission of the realm.
 pub async fn run(read: &dyn Fn(&str) -> Option<String>, stop: Stop) -> Result<(), Fault> {
   let (endpoint, login) = Config::read(read)?.open().await?;
   serve(endpoint.clone(), login, stop).await?;
@@ -195,7 +195,7 @@ async fn admit(login: Login) {
   loop {
     each.tick().await;
     if let Err(fault) = login.admit().await {
-      eprintln!("the admission of the world fails, and runs again in 1 s: {fault}");
+      eprintln!("the admission of the realm fails, and runs again in 1 s: {fault}");
     }
   }
 }
@@ -276,7 +276,7 @@ mod tests {
   use std::sync::Arc;
 
   use mmo_protocol::{
-    Character, FRAME, Frames, FromLogin, Hello, PROTOCOL, ShardId, ToLogin, ZoneId, decode, encode,
+    Character, FRAME, Frames, FromLogin, Hello, PROTOCOL, RealmId, ToLogin, ZoneId, decode, encode,
     frame,
   };
   use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig};
@@ -285,7 +285,7 @@ mod tests {
 
   use super::{Config, Fault, run, serve};
   use crate::game::{Game, MEADOW, login};
-  use crate::{Login, World};
+  use crate::{Login, Realm};
 
   /// A certificate of TLS for `localhost`, and its files of PEM in a folder of the test alone.
   struct Tls {
@@ -407,7 +407,7 @@ mod tests {
   ) -> Result<(), Fault> {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
-    let brom = game.character(ada, ShardId(1), "Brom").await;
+    let brom = game.character(ada, RealmId(1), "Brom").await;
     let tls = Tls::new();
     let address = tls.serve(game.copy(1));
     let mut peer = Peer::new(address, &tls).await;
@@ -418,7 +418,7 @@ mod tests {
     assert_eq!((position, length), (0, 1));
     let characters = vec![Character { id: brom, name: "Brom".to_owned() }];
     assert_eq!(peer.answer().await, FromLogin::Characters(characters));
-    game.layer(ShardId(1), ZoneId(7)).await;
+    game.layer(RealmId(1), ZoneId(7)).await;
     let session = peer.ask(&ToLogin::Select { character: brom }).await;
     assert!(matches!(session, FromLogin::Session { .. }), "a session, and not {session:?}");
     peer.send.finish().expect("the stream ends");
@@ -540,8 +540,8 @@ mod tests {
       ("MMO_LOGIN_KEY", tls.file("key.pem")),
       ("DATABASE_URL", database),
       ("REDIS_URL", "redis://127.0.0.1:1".to_owned()),
-      ("MMO_WORLD", "1".to_owned()),
-      ("MMO_WORLD_CAP", "5000".to_owned()),
+      ("MMO_REALM", "1".to_owned()),
+      ("MMO_REALM_CAP", "5000".to_owned()),
       ("MMO_LAYER_CAP", "500".to_owned()),
       ("MMO_START_ZONE", "7".to_owned()),
       ("MMO_START_POSITION", "1200,-300,50".to_owned()),
@@ -555,8 +555,8 @@ mod tests {
   /// A value of a variable that the configuration refuses.
   const WRONGS: [(&str, &str); 8] = [
     ("MMO_LOGIN_ADDRESS", "-1"),
-    ("MMO_WORLD", "-1"),
-    ("MMO_WORLD_CAP", "-1"),
+    ("MMO_REALM", "-1"),
+    ("MMO_REALM_CAP", "-1"),
     ("MMO_LAYER_CAP", "4"),
     ("MMO_LAYER_CAP", "-1"),
     ("MMO_START_ZONE", "z"),
@@ -577,7 +577,7 @@ mod tests {
         key: tls.folder.join("key.pem"),
         database: full["DATABASE_URL"].clone(),
         redis: "redis://127.0.0.1:1".to_owned(),
-        world: World { id: 1, cap: 5000, layer_cap: 500 },
+        realm: Realm { id: 1, cap: 5000, layer_cap: 500 },
         start: MEADOW,
       })
     );
@@ -604,15 +604,15 @@ mod tests {
         "the variable MMO_LOGIN_ADDRESS is not set",
         "the variable MMO_LOGIN_CERTIFICATE is not set",
         "the variable MMO_LOGIN_KEY is not set",
+        "the variable MMO_REALM holds no valid value: invalid digit found in string",
+        "the variable MMO_REALM is not set",
+        "the variable MMO_REALM_CAP holds no valid value: invalid digit found in string",
+        "the variable MMO_REALM_CAP is not set",
         "the variable MMO_START_POSITION holds no valid value: a position is x,y,z in whole centimetres",
         "the variable MMO_START_POSITION holds no valid value: invalid digit found in string",
         "the variable MMO_START_POSITION is not set",
         "the variable MMO_START_ZONE holds no valid value: invalid digit found in string",
         "the variable MMO_START_ZONE is not set",
-        "the variable MMO_WORLD holds no valid value: invalid digit found in string",
-        "the variable MMO_WORLD is not set",
-        "the variable MMO_WORLD_CAP holds no valid value: invalid digit found in string",
-        "the variable MMO_WORLD_CAP is not set",
         "the variable REDIS_URL is not set",
       ]
       .map(|text| Some(text.to_owned()))

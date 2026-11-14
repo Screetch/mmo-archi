@@ -1,4 +1,4 @@
-use mmo_protocol::{AccountId, Angle, Character, CharacterId, Position, ShardId, State, ZoneId};
+use mmo_protocol::{AccountId, Angle, Character, CharacterId, Position, RealmId, State, ZoneId};
 
 use crate::{Error, Store, taken};
 
@@ -16,14 +16,14 @@ pub struct Saved {
   pub version: i64,
 }
 
-/// A character to make: the account that holds it, the shard that it belongs to, its name, and the
+/// A character to make: the account that holds it, the realm that it belongs to, its name, and the
 /// zone and the state where it starts.
 #[derive(Clone, Copy, Debug)]
 pub struct NewCharacter<'a> {
   /// The account that holds the character.
   pub account: AccountId,
-  /// The shard of the character, the one shard where it plays.
-  pub shard: ShardId,
+  /// The realm of the character, the one realm where it plays.
+  pub realm: RealmId,
   /// The name of the character.
   pub name: &'a str,
   /// The zone where the character starts.
@@ -68,14 +68,14 @@ impl Store {
   /// Makes `new` with the version 0. The table counts the characters of the account while it holds
   /// the row of the account, so two makers of one account never pass the count together. It gives
   /// [`Error::Full`] when the account holds [`CHARACTERS`](crate::CHARACTERS) already, over all
-  /// the shards.
+  /// the realms.
   pub async fn create_character(&self, new: &NewCharacter<'_>) -> Result<CharacterId, Error> {
     sqlx::query_scalar(
-      "INSERT INTO characters (account_id, shard_id, name, zone_id, x, y, z, yaw, hit_points) \
+      "INSERT INTO characters (account_id, realm_id, name, zone_id, x, y, z, yaw, hit_points) \
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
     )
     .bind(new.account.0)
-    .bind(i64::from(new.shard.0))
+    .bind(i64::from(new.realm.0))
     .bind(new.name)
     .bind(new.zone.0)
     .bind(new.state.position.x)
@@ -94,17 +94,17 @@ impl Store {
     })
   }
 
-  /// The characters of `account` in `shard`, in the order of their ids.
+  /// The characters of `account` in `realm`, in the order of their ids.
   pub async fn characters(
     &self,
     account: AccountId,
-    shard: ShardId,
+    realm: RealmId,
   ) -> Result<Vec<Character>, Error> {
     let rows: Vec<(i64, String)> = sqlx::query_as(
-      "SELECT id, name FROM characters WHERE account_id = $1 AND shard_id = $2 ORDER BY id",
+      "SELECT id, name FROM characters WHERE account_id = $1 AND realm_id = $2 ORDER BY id",
     )
     .bind(account.0)
-    .bind(i64::from(shard.0))
+    .bind(i64::from(realm.0))
     .fetch_all(&self.pool)
     .await?;
     Ok(rows.into_iter().map(|(id, name)| Character { id: CharacterId(id), name }).collect())
@@ -127,7 +127,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    AccountId, Angle, Character, CharacterId, Password, Position, ShardId, State, ZoneId,
+    AccountId, Angle, Character, CharacterId, Password, Position, RealmId, State, ZoneId,
   };
   use sqlx::PgPool;
 
@@ -137,13 +137,13 @@ mod tests {
   const START: State =
     State { position: Position { x: 120, y: 0, z: -4500 }, yaw: Angle(u16::MAX), hit_points: 100 };
 
-  /// A new character of `account` in shard 1, at `START` in the meadow.
+  /// A new character of `account` in realm 1, at `START` in the meadow.
   const fn meadow(account: AccountId, name: &str) -> NewCharacter<'_> {
-    NewCharacter { account, shard: ShardId(1), name, zone: ZoneId(3), state: START }
+    NewCharacter { account, realm: RealmId(1), name, zone: ZoneId(3), state: START }
   }
 
   #[sqlx::test(migrations = false)]
-  async fn an_account_lists_its_characters_of_each_shard_and_a_writer_loads_their_last_save(
+  async fn an_account_lists_its_characters_of_each_realm_and_a_writer_loads_their_last_save(
     pool: PgPool,
   ) -> Result<(), Error> {
     let store = Store::migrate(pool).await?;
@@ -152,13 +152,13 @@ mod tests {
     let other = store.create_account("bob", Password("two".to_owned())).await?;
     let brom = store.create_character(&meadow(account, "Brom")).await?;
     let away = State { position: Position { x: i32::MIN, y: i32::MAX, z: 0 }, ..START };
-    let far = NewCharacter { shard: ShardId(2), state: away, ..meadow(account, "Cael") };
+    let far = NewCharacter { realm: RealmId(2), state: away, ..meadow(account, "Cael") };
     let cael = store.create_character(&far).await?;
     let eda = store.create_character(&meadow(account, "Eda")).await?;
     store.create_character(&meadow(other, "Dara")).await?;
     let mut lists = Vec::new();
-    for shard in [ShardId(1), ShardId(2), ShardId(3)] {
-      lists.push(store.characters(account, shard).await?);
+    for realm in [RealmId(1), RealmId(2), RealmId(3)] {
+      lists.push(store.characters(account, realm).await?);
     }
     let character = |id, name: &str| Character { id, name: name.to_owned() };
     assert_eq!(
@@ -195,8 +195,8 @@ mod tests {
       refused[0].to_string(),
       format!("the account {} holds 8 characters already", account.0)
     );
-    assert_eq!(store.characters(account, ShardId(1)).await?.len(), CHARACTERS);
-    let full = NewCharacter { shard: ShardId(2), ..meadow(account, "Kira") };
+    assert_eq!(store.characters(account, RealmId(1)).await?.len(), CHARACTERS);
+    let full = NewCharacter { realm: RealmId(2), ..meadow(account, "Kira") };
     assert!(matches!(store.create_character(&full).await, Err(Error::Full { .. })));
     store.create_character(&meadow(other, "Jade")).await?;
     Ok(())

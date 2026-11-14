@@ -137,8 +137,8 @@ fn framed(payload: &[u8]) -> Vec<u8> {
 
 async fn answered(store: &Store, message: ToKeeper) -> FromKeeper {
   let done = match message {
-    ToKeeper::Claim { shard, layer } => {
-      store.claim(shard, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
+    ToKeeper::Claim { realm, layer } => {
+      store.claim(realm, layer).await.map(|epoch| FromKeeper::Claimed { epoch })
     }
     ToKeeper::Save(batch) => store.save(&batch).await.map(|written| {
       if !written.strangers.is_empty() {
@@ -150,8 +150,8 @@ async fn answered(store: &Store, message: ToKeeper) -> FromKeeper {
   done.unwrap_or_else(|error| FromKeeper::Refused(refusal(&error)))
 }
 
-/// The characters of a batch that no row of its shard holds. The login service places a character
-/// only in its own shard, so a writer that plays one of them shows a defect, and its play is lost.
+/// The characters of a batch that no row of its realm holds. The login service places a character
+/// only in its own realm, so a writer that plays one of them shows a defect, and its play is lost.
 struct Strangers<'a> {
   batch: &'a Batch,
   characters: &'a [CharacterId],
@@ -159,17 +159,17 @@ struct Strangers<'a> {
 
 impl Display for Strangers<'_> {
   fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
-    let Batch { shard, layer, .. } = self.batch;
+    let Batch { realm, layer, .. } = self.batch;
     let ids: Vec<String> =
       self.characters.iter().map(|character| character.0.to_string()).collect();
     write!(
       out,
-      "the keeper writes no save of the characters {} of a batch of layer {}:{} of shard {}, since \
-       no character of that shard holds their ids",
+      "the keeper writes no save of the characters {} of a batch of layer {}:{} of realm {}, since \
+       no character of that realm holds their ids",
       ids.join(", "),
       layer.zone.0,
       layer.number,
-      shard.0
+      realm.0
     )
   }
 }
@@ -185,7 +185,7 @@ fn refusal(error: &mmo_store::Error) -> KeeperRefusal {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    Batch, CharacterId, Epoch, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId,
+    Batch, CharacterId, Epoch, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, RealmId,
     ToKeeper, ZoneId, frame,
   };
   use mmo_store::Store;
@@ -229,7 +229,7 @@ mod tests {
     let mut gone = Writer::link(&writers, address).await;
     gone.greet().await;
     let nowhere = Layer { zone: ZoneId(9), number: 1 };
-    let refused = gone.ask(&ToKeeper::Claim { shard: ShardId(1), layer: nowhere }).await;
+    let refused = gone.ask(&ToKeeper::Claim { realm: RealmId(1), layer: nowhere }).await;
     gone.send.reset(7u32.into()).expect("an open stream");
     let mut reasons = Vec::new();
     for writer in [other, large, wrong, deaf, gone] {
@@ -267,14 +267,14 @@ mod tests {
   }
 
   #[test]
-  fn the_fault_of_a_batch_names_each_stranger_with_its_layer_and_its_shard() {
+  fn the_fault_of_a_batch_names_each_stranger_with_its_layer_and_its_realm() {
     let layer = Layer { zone: ZoneId(1), number: 3 };
-    let batch = Batch { shard: ShardId(2), layer, epoch: Epoch(1), saves: vec![] };
+    let batch = Batch { realm: RealmId(2), layer, epoch: Epoch(1), saves: vec![] };
     let strangers = Strangers { batch: &batch, characters: &[CharacterId(4), CharacterId(9)] };
     assert_eq!(
       strangers.to_string(),
-      "the keeper writes no save of the characters 4, 9 of a batch of layer 1:3 of shard 2, since \
-       no character of that shard holds their ids"
+      "the keeper writes no save of the characters 4, 9 of a batch of layer 1:3 of realm 2, since \
+       no character of that realm holds their ids"
     );
   }
 
@@ -284,9 +284,9 @@ mod tests {
   ) -> Result<(), mmo_store::Error> {
     let store = Store::migrate(pool.clone()).await?;
     pool.close().await;
-    let (shard, layer) = (ShardId(1), Layer { zone: ZoneId(1), number: 1 });
-    let batch = Batch { shard, layer, epoch: Epoch(1), saves: vec![] };
-    let claim = answered(&store, ToKeeper::Claim { shard, layer }).await;
+    let (realm, layer) = (RealmId(1), Layer { zone: ZoneId(1), number: 1 });
+    let batch = Batch { realm, layer, epoch: Epoch(1), saves: vec![] };
+    let claim = answered(&store, ToKeeper::Claim { realm, layer }).await;
     let save = answered(&store, ToKeeper::Save(batch)).await;
     assert_eq!([claim, save], [FromKeeper::Refused(KeeperRefusal::Unavailable); 2]);
     Ok(())

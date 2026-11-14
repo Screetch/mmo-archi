@@ -1,11 +1,11 @@
-//! The claim of a layer: the layer that an idle writer takes from the directory of its shard, and
+//! The claim of a layer: the layer that an idle writer takes from the directory of its realm, and
 //! the entries that its writer keeps in Redis: the lease of the layer with its count of players,
 //! and the presence of each of its players.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, Save, ShardId, ZoneId};
+use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, RealmId, Save, ZoneId};
 use mmo_store::{Directory, Lease, Leased, Placed, Serving, keys};
 use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
@@ -30,8 +30,8 @@ pub(crate) enum Error {
     own.0
   )]
   Superseded { layer: Layer, held: i64, own: Epoch },
-  #[error("shard {} holds no cap of a layer, which the login service writes", .0.0)]
-  NoCap(ShardId),
+  #[error("realm {} holds no cap of a layer, which the login service writes", .0.0)]
+  NoCap(RealmId),
   #[error("layer {}:{} closed", .0.zone.0, .0.number)]
   Closed(Layer),
   #[error("layer {}:{} has no writer that serves it", .0.zone.0, .0.number)]
@@ -54,45 +54,45 @@ pub(crate) enum Entry {
   Absent(Vec<AccountId>),
 }
 
-/// The layer that a writer holds, in its shard, with the epoch that the keeper gave it.
+/// The layer that a writer holds, in its realm, with the epoch that the keeper gave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Held {
-  pub(crate) shard: ShardId,
+  pub(crate) realm: RealmId,
   pub(crate) layer: Layer,
   pub(crate) epoch: Epoch,
 }
 
-/// A layer that an idle writer took from the directory, with the cap of its shard, before the
+/// A layer that an idle writer took from the directory, with the cap of its realm, before the
 /// keeper gives it its epoch.
 pub(crate) struct Taken {
   redis: ConnectionManager,
   address: String,
-  pub(crate) shard: ShardId,
+  pub(crate) realm: RealmId,
   pub(crate) layer: Layer,
   pub(crate) cap: usize,
 }
 
 impl Taken {
-  /// Runs the claim of the directory of `shard` each second, until it gives a layer to the writer
-  /// at `address`, which the gateways dial, and reads the cap of a layer of the shard.
-  pub(crate) async fn wait(url: &str, shard: ShardId, address: String) -> Result<Self, Error> {
+  /// Runs the claim of the directory of `realm` each second, until it gives a layer to the writer
+  /// at `address`, which the gateways dial, and reads the cap of a layer of the realm.
+  pub(crate) async fn wait(url: &str, realm: RealmId, address: String) -> Result<Self, Error> {
     let mut redis = ConnectionManager::new(redis::Client::open(url)?).await?;
-    let directory = Directory { shard };
+    let directory = Directory { realm };
     let layer = loop {
       if let Some(layer) = directory.claim(&mut redis, &address).await? {
         break layer;
       }
       time::sleep(IDLE).await;
     };
-    let cap: Option<usize> = redis.hget(keys::shard(shard), keys::LAYER_CAP).await?;
-    let cap = cap.ok_or(Error::NoCap(shard))?;
-    Ok(Self { redis, address, shard, layer, cap })
+    let cap: Option<usize> = redis.hget(keys::realm(realm), keys::LAYER_CAP).await?;
+    let cap = cap.ok_or(Error::NoCap(realm))?;
+    Ok(Self { redis, address, realm, layer, cap })
   }
 
   /// The claim of the layer with `epoch`, which the keeper gave. The layer opens at the first
   /// lease of the writer with that epoch.
   pub(crate) fn hold(self, epoch: Epoch) -> Claim {
-    let held = Held { shard: self.shard, layer: self.layer, epoch };
+    let held = Held { realm: self.realm, layer: self.layer, epoch };
     Claim { redis: self.redis, held, address: self.address }
   }
 }
@@ -109,15 +109,15 @@ impl Claim {
   /// Closes the layer when it holds no player and no place, and gives whether it did. The writer
   /// is then idle again.
   pub(crate) async fn close(&self) -> Result<bool, Error> {
-    let Held { shard, layer, epoch } = self.held;
-    Ok((Directory { shard }).close(&mut self.redis.clone(), layer, epoch).await?)
+    let Held { realm, layer, epoch } = self.held;
+    Ok((Directory { realm }).close(&mut self.redis.clone(), layer, epoch).await?)
   }
 
   /// Puts the layer in drain when the other open layers of its zone have room for its players, and
   /// gives whether it drains.
   pub(crate) async fn drain(&self) -> Result<bool, Error> {
-    let Held { shard, layer, .. } = self.held;
-    Ok((Directory { shard }).drain(&mut self.redis.clone(), layer).await?)
+    let Held { realm, layer, .. } = self.held;
+    Ok((Directory { realm }).drain(&mut self.redis.clone(), layer).await?)
   }
 
   /// The layer of `zone` that the player of `account` enters when it crosses a border out of this
@@ -136,30 +136,30 @@ impl Claim {
   }
 
   async fn place(&self, account: AccountId, zone: ZoneId) -> Result<Placed, Error> {
-    let Held { shard, layer, .. } = self.held;
-    Ok((Directory { shard }).place(&mut self.redis.clone(), account, zone, Some(layer)).await?)
+    let Held { realm, layer, .. } = self.held;
+    Ok((Directory { realm }).place(&mut self.redis.clone(), account, zone, Some(layer)).await?)
   }
 
-  /// The lease of `layer` in the directory of the shard of this writer, which a placement gave.
+  /// The lease of `layer` in the directory of the realm of this writer, which a placement gave.
   pub(crate) async fn serving(&self, layer: Layer) -> Result<Serving, Error> {
-    let shard = self.held.shard;
-    let lease = (Directory { shard }).serving(&mut self.redis.clone(), layer).await?;
+    let realm = self.held.realm;
+    let lease = (Directory { realm }).serving(&mut self.redis.clone(), layer).await?;
     lease.ok_or(Error::Unserved(layer))
   }
 
   /// The batch of `saves` for the keeper, with the layer and the epoch of this writer.
   pub(crate) fn batch(&self, saves: Vec<Save>) -> Batch {
-    Batch { shard: self.held.shard, layer: self.held.layer, epoch: self.held.epoch, saves }
+    Batch { realm: self.held.realm, layer: self.held.layer, epoch: self.held.epoch, saves }
   }
 
   pub(crate) async fn write(&self, entry: Entry) -> Result<(), Error> {
     let mut redis = self.redis.clone();
-    let Held { shard, layer, epoch } = self.held;
+    let Held { realm, layer, epoch } = self.held;
     match entry {
       Entry::Layer { players, taken } => {
         let players = u32::try_from(players).unwrap_or(u32::MAX);
         let lease = Lease { layer, epoch, address: &self.address, players, taken: &taken };
-        match (Directory { shard }).lease(&mut redis, &lease).await? {
+        match (Directory { realm }).lease(&mut redis, &lease).await? {
           Leased::Held => Ok(()),
           Leased::Newer(held) => Err(Error::Superseded { layer, held: held.0, own: epoch }),
           Leased::Closed => Err(Error::Closed(layer)),
@@ -169,7 +169,7 @@ impl Claim {
       Entry::Present(players) if players.is_empty() => Ok(()),
       Entry::Absent(accounts) if accounts.is_empty() => Ok(()),
       Entry::Ticks(counts) => {
-        let key = keys::ticks(shard, layer);
+        let key = keys::ticks(realm, layer);
         let mut batch = redis::pipe();
         for (bucket, count) in counts {
           batch.hincr(&key, bucket, count).ignore();
@@ -183,7 +183,7 @@ impl Claim {
           let key = keys::presence(account);
           let fields = [
             (keys::CHARACTER, character.0),
-            (keys::SHARD, i64::from(shard.0)),
+            (keys::REALM, i64::from(realm.0)),
             (keys::ZONE, i64::from(layer.zone.0)),
             (keys::LAYER, i64::from(layer.number)),
             (keys::EPOCH, epoch.0),
@@ -205,7 +205,7 @@ mod tests {
   use std::collections::BTreeMap;
 
   use futures_util::StreamExt;
-  use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, ShardId, ZoneId};
+  use mmo_protocol::{AccountId, Batch, CharacterId, Epoch, Layer, RealmId, ZoneId};
   use mmo_store::testing::Redis;
   use mmo_store::{Directory, Placed, Serving, keys};
   use redis::AsyncCommands;
@@ -214,22 +214,22 @@ mod tests {
   use super::{Claim, Entry, Error, Taken};
   use crate::peer::{hash, life};
 
-  const SHARD: ShardId = ShardId(1);
+  const REALM: RealmId = RealmId(1);
   const MEADOW: Layer = Layer { zone: ZoneId(1), number: 1 };
 
-  /// Gives the shard a cap of a layer and the layer 1 of zone 1 with no writer, as the login
+  /// Gives the realm a cap of a layer and the layer 1 of zone 1 with no writer, as the login
   /// service and a placement do.
   async fn opened(redis: &Redis, cap: Option<u32>) {
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
     if let Some(cap) = cap {
-      let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, cap).await.expect("a cap");
+      let () = admin.hset(keys::realm(REALM), keys::LAYER_CAP, cap).await.expect("a cap");
     }
-    let () = admin.hset(keys::layers(SHARD), keys::field(MEADOW), 0).await.expect("a layer");
+    let () = admin.hset(keys::layers(REALM), keys::field(MEADOW), 0).await.expect("a layer");
   }
 
   async fn taken(url: &str) -> Result<Taken, Error> {
-    Taken::wait(url, SHARD, "zone-1:4433".to_owned()).await
+    Taken::wait(url, REALM, "zone-1:4433".to_owned()).await
   }
 
   /// The claim of a writer of `epoch` on the layer, after its first lease.
@@ -251,16 +251,16 @@ mod tests {
     let redis = Redis::start().await;
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
-    let () = admin.hset(keys::shard(SHARD), keys::LAYER_CAP, 20).await.expect("a cap");
+    let () = admin.hset(keys::realm(REALM), keys::LAYER_CAP, 20).await.expect("a cap");
     let mut channel = client.get_async_pubsub().await.expect("a connection");
     channel.subscribe(keys::DIRECTORY).await.expect("a channel");
     let url = redis.url();
     let idle = tokio::spawn(async move { taken(&url).await });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let placed = Directory { shard: SHARD }.place(&mut admin, AccountId(5), ZoneId(1), None).await;
+    let placed = Directory { realm: REALM }.place(&mut admin, AccountId(5), ZoneId(1), None).await;
     assert_eq!(placed.expect("a placement"), Placed::Wait);
     let taken = idle.await.expect("a writer").expect("a layer");
-    assert_eq!((taken.shard, taken.layer, taken.cap), (SHARD, MEADOW, 20));
+    assert_eq!((taken.realm, taken.layer, taken.cap), (REALM, MEADOW, 20));
     let claim = taken.hold(Epoch(1));
     claim.write(Entry::Layer { players: 0, taken: Vec::new() }).await.expect("a lease");
     let mut messages = channel.on_message();
@@ -280,20 +280,20 @@ mod tests {
     let places: Vec<i64> = admin.zrange("placed:1:1:1", 0, -1).await.expect("the places");
     assert_eq!(places, [9], "the writer took the player of the place of 5");
     assert!((1..=3000).contains(&life(&redis, "writer:1:1:1").await));
-    let batch = Batch { shard: SHARD, layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
+    let batch = Batch { realm: REALM, layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
     assert_eq!(claim.batch(Vec::new()), batch);
   }
 
   #[sqlx::test(migrations = false)]
-  async fn a_writer_stops_when_the_lease_holds_a_newer_epoch_or_its_shard_holds_no_cap(_: PgPool) {
+  async fn a_writer_stops_when_the_lease_holds_a_newer_epoch_or_its_realm_holds_no_cap(_: PgPool) {
     let redis = Redis::start().await;
     let newer = claim(&redis, 9).await;
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
-    let () = admin.del(keys::writer(SHARD, MEADOW)).await.expect("an end of the lease");
+    let () = admin.del(keys::writer(REALM, MEADOW)).await.expect("an end of the lease");
     let older = taken(&redis.url()).await.expect("a layer");
     let () = admin
-      .hset(keys::writer(SHARD, MEADOW), keys::EPOCH, 9)
+      .hset(keys::writer(REALM, MEADOW), keys::EPOCH, 9)
       .await
       .expect("the lease of the newer writer");
     let older = older.hold(Epoch(4)).write(Entry::Layer { players: 0, taken: Vec::new() }).await;
@@ -306,13 +306,13 @@ mod tests {
       .write(Entry::Layer { players: 1, taken: Vec::new() })
       .await
       .expect("the newest epoch writes");
-    let () = admin.hdel(keys::layers(SHARD), keys::field(MEADOW)).await.expect("a close");
+    let () = admin.hdel(keys::layers(REALM), keys::field(MEADOW)).await.expect("a close");
     let closed = newer.write(Entry::Layer { players: 0, taken: Vec::new() }).await;
     assert_eq!(closed.err().map(|error| error.to_string()).as_deref(), Some("layer 1:1 closed"));
     let other = Redis::start().await;
     opened(&other, None).await;
     let no_cap = taken(&other.url()).await.err().map(|error| error.to_string());
-    let held = "shard 1 holds no cap of a layer, which the login service writes";
+    let held = "realm 1 holds no cap of a layer, which the login service writes";
     assert_eq!(no_cap.as_deref(), Some(held));
     let bad = taken("nope").await.err();
     assert!(matches!(bad, Some(Error::Redis(_))), "{bad:?}");
@@ -331,7 +331,7 @@ mod tests {
     let present = |character| {
       fields([
         ("character", character),
-        ("shard", "1"),
+        ("realm", "1"),
         ("zone", "1"),
         ("layer", "1"),
         ("epoch", "2"),
@@ -403,7 +403,7 @@ mod tests {
     assert!(faults.iter().all(|fault| matches!(fault, Some(Error::Redis(_)))), "{faults:?}");
     let client = redis::Client::open(redis.url()).expect("a URL");
     let mut admin = client.get_multiplexed_async_connection().await.expect("a connection");
-    let () = admin.del(keys::writer(SHARD, MEADOW)).await.expect("an end of the lease");
+    let () = admin.del(keys::writer(REALM, MEADOW)).await.expect("an end of the lease");
 
     let present = vec![(AccountId(5), CharacterId(7))];
     let url = user(&redis, "noexpire", &["-expire"]).await;
@@ -413,7 +413,7 @@ mod tests {
     let ticks = BTreeMap::from([(3, 1)]);
     let refused = claim.write(Entry::Ticks(ticks)).await.err();
     assert!(matches!(refused, Some(Error::Redis(_))), "{refused:?}");
-    let () = admin.del(keys::writer(SHARD, MEADOW)).await.expect("an end of the lease");
+    let () = admin.del(keys::writer(REALM, MEADOW)).await.expect("an end of the lease");
     let url = user(&redis, "nodel", &["-del"]).await;
     let claim = taken(&url).await.expect("a layer").hold(Epoch(2));
     let refused = claim.write(Entry::Absent(vec![AccountId(5)])).await.err();

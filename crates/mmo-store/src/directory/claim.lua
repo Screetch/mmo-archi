@@ -1,7 +1,7 @@
 -- The claim of an idle writer, which Redis runs as one atomic step, so two writers never take one layer.
--- KEYS: the layers of the shard.
--- ARGV: the prefix of the writers of the shard, the address of the writer, the life of its lease in milliseconds,
--- the channel of the directory and the shard.
+-- KEYS: the layers of the realm.
+-- ARGV: the prefix of the writers of the realm, the address of the writer, the life of its lease in milliseconds,
+-- the channel of the directory and the realm.
 -- It gives the zone and the number of the layer with no writer that has the lowest zone, then the lowest number, and
 -- writes the lease of that layer with the address and the epoch 0, which the epoch of the keeper then replaces. It
 -- gives nil when each layer has a writer.
