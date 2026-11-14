@@ -113,6 +113,8 @@ jobs:
             # The head fails too when its report shows a layer over its cap, a shard with too few layers, a bot that saw another shard, or a crosser that stayed or changed its layer number.
             if [ "$2" != base ] && ! sh "$GITHUB_WORKSPACE/script/report.sh" "$dir/bots.log" "$3" "$5" "${8:-0}" 0 "${9:-0}"; then
               failed="$failed $3"
+              # The log of the job keeps the report, since the summary is not in it.
+              tail -n 45 "$dir/bots.log"
             fi
             total=0
             for file in "$dir"/zone*.cpu; do

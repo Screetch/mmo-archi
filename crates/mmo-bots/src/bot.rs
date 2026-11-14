@@ -311,7 +311,7 @@ async fn play(
         Down::Message(ToClient::Moved { zone, layer }) => {
           walk.moved(Layer { zone, number: layer }, out);
         }
-        Down::Message(ToClient::Line { .. }) => {}
+        Down::Message(ToClient::Line { .. } | ToClient::Full { .. }) => {}
         Down::Message(other) => return Err(Error::Message(other)),
         },
       },
@@ -409,6 +409,7 @@ mod tests {
     let gateway = Fake::start(move |mut peer| async move {
       assert_eq!(peer.read::<Attach>().await, Attach { session: Token([5; 32]) });
       peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 2 }).await;
+      peer.write(&ToClient::Full { zone: ZoneId(2) }).await;
       let line = ToClient::Line {
         channel: "world".to_owned(),
         from: "Ada".to_owned(),
