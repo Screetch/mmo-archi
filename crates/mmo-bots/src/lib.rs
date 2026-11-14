@@ -7,15 +7,15 @@
 //! The login service makes only 5 new accounts an hour for one address, so [`run`] first makes the
 //! accounts and the characters in PostgreSQL, with `mmo-store` as the login service does, and then
 //! each bot logs in through the login service. The tick times come from the hash that the writer
-//! of each layer of the zone keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads them before
+//! of each layer of each zone keeps in Redis, `mmo_store::keys::ticks`: [`run`] reads them before
 //! and after the measure and takes the difference. The bots go round the shards: the bot
 //! with the index `i` plays in the shard `i % n + 1`, through the login service of that shard. Each
 //! second of the measure, [`run`] reads the directory of each shard, `mmo_store::keys::layers`, and
-//! the report tells the layers that opened in each shard and the players on each, and fails when a
-//! layer passes its cap or a shard opens fewer layers than its players need. When two shards play,
-//! it also counts the bots of another shard that a snapshot gave to a bot, and fails when one did.
-//! The bytes are the sizes of the datagrams, with no header of IP, UDP or QUIC, which add about 60
-//! bytes to each datagram.
+//! the report tells the layers that opened in each zone of each shard and the players on each,
+//! and fails when a layer passes its cap or a shard opens fewer layers than its players need. When
+//! two shards play, it also counts the bots of another shard that a snapshot gave to a bot, and
+//! fails when one did. The bytes are the sizes of the datagrams, with no header of IP, UDP or QUIC,
+//! which add about 60 bytes to each datagram.
 //!
 //! [`run`] reads these variables of its environment:
 //!
@@ -140,7 +140,7 @@ async fn look_during(
 ) -> redis::RedisResult<()> {
   let end = Instant::now() + config.play;
   loop {
-    layers::look(redis, config.shards(), config.zone, seen).await?;
+    layers::look(redis, config.shards(), seen).await?;
     let left = end.saturating_duration_since(Instant::now());
     if left.is_zero() {
       return Ok(());
@@ -183,10 +183,10 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   }
   settle(&shared, tasks.len().saturating_sub(config.waiting as usize), config.join).await;
   leaving.send_replace(true);
-  let before = ticks::read(&mut redis, config.shards(), config.zone).await;
+  let before = ticks::read(&mut redis, config.shards()).await;
   let mut opened = Seen::new();
   let looked = look_during(&mut redis, config, &mut opened).await;
-  let after = ticks::read(&mut redis, config.shards(), config.zone).await;
+  let after = ticks::read(&mut redis, config.shards()).await;
   stop.send_replace(true);
   let mut outcomes: Vec<Outcome> = Vec::new();
   while let Some(done) = tasks.join_next().await {

@@ -773,7 +773,7 @@ and the report counts the bots of another shard that a bot saw, which must be no
 Each layer writer reports the time of each tick in `ticks:{s}:{z}:{l}` (section 3), and each bot reports its bytes up
 and down and its shard. The bots go round the shards, each through the login service of its shard. Each second of the
 play, the program of the bots reads `shard:{s}` and `layers:{s}` of each shard, so its report gives, for each shard, the
-count of layers that opened with the cap of a layer, and the players on each layer. Two lines of the budget of the
+count of layers that opened in all its zones with the cap of a layer, and the players on each layer, zone by zone. Two lines of the budget of the
 report read them: no layer held more players than its cap, and each shard opened at least as many layers as its players
 need at that cap. The test keeps each report with the commit that it ran.
 
