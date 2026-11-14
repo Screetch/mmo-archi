@@ -38,8 +38,8 @@ pub(crate) struct Shared {
   pub(crate) reconnect: bool,
   /// The count of the bots that cross a border. Each other bot logs in after each of them played.
   pub(crate) crossers: usize,
-  /// The shard of each character of the bots, by its id.
-  pub(crate) shards: HashMap<i64, u32>,
+  /// The realm of each character of the bots, by its id.
+  pub(crate) realms: HashMap<i64, u32>,
   /// The count of the first bots that log out when `leave` changes.
   pub(crate) leavers: u32,
   /// The signal for the leavers to log out.
@@ -68,14 +68,14 @@ pub(crate) struct Outcome {
   /// The time from the start of the login to the first snapshot that shows the player.
   pub(crate) entered: Option<Duration>,
   pub(crate) joined: Option<Instant>,
-  /// The shard that the bot plays in.
-  pub(crate) shard: u32,
+  /// The realm that the bot plays in.
+  pub(crate) realm: u32,
   pub(crate) role: Role,
   pub(crate) end: End,
   /// Each move of the bot to another layer, which the gateway tells it, from the layer that it
   /// left to the layer that it entered.
   pub(crate) crossings: Vec<(Layer, Layer)>,
-  /// The characters of another shard that a snapshot gave to the bot.
+  /// The characters of another realm that a snapshot gave to the bot.
   pub(crate) strangers: HashSet<i64>,
   /// What the bot did last: it waited for the crossers, logged in, attached to the gateway, or
   /// waited for the first snapshot that shows its player.
@@ -126,11 +126,11 @@ enum Error {
 }
 
 impl Outcome {
-  /// Notes each entity of the `snapshot` that is the character of a bot of another shard: a shard
+  /// Notes each entity of the `snapshot` that is the character of a bot of another realm: a realm
   /// is a world of its own, so no snapshot may show one.
-  fn note_strangers(&mut self, shards: &HashMap<i64, u32>, snapshot: &Snapshot) {
+  fn note_strangers(&mut self, realms: &HashMap<i64, u32>, snapshot: &Snapshot) {
     let others = snapshot.entered.iter().map(|entity| entity.id.0);
-    let others = others.filter(|id| shards.get(id).is_some_and(|shard| *shard != self.shard));
+    let others = others.filter(|id| realms.get(id).is_some_and(|realm| *realm != self.realm));
     self.strangers.extend(others);
   }
 }
@@ -186,7 +186,7 @@ impl Walk {
     let size = encode(snapshot).len();
     (out.snapshots, out.down, out.largest) =
       (out.snapshots + 1, out.down + size, out.largest.max(size));
-    out.note_strangers(&shared.shards, snapshot);
+    out.note_strangers(&shared.realms, snapshot);
     match self.hear(snapshot) {
       Ok(true) => {
         if out.joined.is_none() {
@@ -326,7 +326,7 @@ async fn play(
   mut stop: watch::Receiver<bool>,
   out: &mut Outcome,
 ) -> Result<bool, Error> {
-  // The crossers log in first: they fill the first layer of their shard, so a crosser enters the
+  // The crossers log in first: they fill the first layer of their realm, so a crosser enters the
   // layer with its number in the next zone, which the first crossing opens.
   if !after_crossers(shared, bot, &mut stop, out).await {
     return Ok(false);
@@ -397,7 +397,7 @@ pub(crate) async fn run(shared: &Shared, bot: &Bot, stop: watch::Receiver<bool>)
     (false, true) => Role::Crosser,
     (false, false) => Role::Walker,
   };
-  let mut out = Outcome { shard: bot.shard, role, ..Outcome::default() };
+  let mut out = Outcome { realm: bot.realm, role, ..Outcome::default() };
   let ended = play(shared, bot, stop, &mut out).await;
   out.queued = matches!(ended, Ok(true));
   out.fault = ended.err().map(|error| error.to_string());
@@ -439,7 +439,7 @@ mod tests {
     };
     Bot {
       index: 0,
-      shard: 1,
+      realm: 1,
       login: login.address.clone(),
       account,
       character: CharacterId(42),
@@ -457,7 +457,7 @@ mod tests {
       ready: AtomicUsize::new(0),
       reconnect: false,
       crossers: 0,
-      shards: HashMap::new(),
+      realms: HashMap::new(),
       leavers: 0,
       leave: watch::channel(false).1,
     }
@@ -759,12 +759,12 @@ mod tests {
   }
 
   #[test]
-  fn an_outcome_notes_each_character_of_another_shard_that_a_snapshot_gives() {
-    let shards = HashMap::from([(42, 1), (43, 2), (44, 2)]);
-    let mut out = Outcome { shard: 1, ..Outcome::default() };
+  fn an_outcome_notes_each_character_of_another_realm_that_a_snapshot_gives() {
+    let realms = HashMap::from([(42, 1), (43, 2), (44, 2)]);
+    let mut out = Outcome { realm: 1, ..Outcome::default() };
     let seen = snapshot(10, None, vec![entity(42), entity(43), entity(45)]);
-    out.note_strangers(&shards, &seen);
-    out.note_strangers(&shards, &snapshot(11, None, vec![entity(43), entity(44)]));
+    out.note_strangers(&realms, &seen);
+    out.note_strangers(&realms, &snapshot(11, None, vec![entity(43), entity(44)]));
     assert_eq!(out.strangers.len(), 2);
     assert!(out.strangers.contains(&43) && out.strangers.contains(&44));
   }

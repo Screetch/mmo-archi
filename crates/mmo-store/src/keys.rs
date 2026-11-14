@@ -10,14 +10,14 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, Layer, ShardId, Token};
+use mmo_protocol::{AccountId, Layer, RealmId, Token};
 
 /// The channel of the directory of the layers. Each script of
 /// [`Directory`](crate::Directory) names on it each layer that it opened, closed, put in drain or
 /// gave a writer, as [`layer`] names it.
 pub const DIRECTORY: &str = "directory";
 
-/// The fields of [`shard`], which the login service writes: the name of the shard, the most
+/// The fields of [`realm`], which the login service writes: the name of the realm, the most
 /// accounts that it admits, and the most players of each of its layers. The scripts of the
 /// directory read [`LAYER_CAP`] by this name.
 pub const NAME: &str = "name";
@@ -34,10 +34,10 @@ pub const EPOCH: &str = "epoch";
 /// [`EPOCH`].
 pub const ACCOUNT: &str = "account";
 
-/// The fields of [`presence`], besides [`EPOCH`]: the character of the account, its shard, its
+/// The fields of [`presence`], besides [`EPOCH`]: the character of the account, its realm, its
 /// zone and its layer. The scripts of the directory read them by these names.
 pub const CHARACTER: &str = "character";
-pub const SHARD: &str = "shard";
+pub const REALM: &str = "realm";
 pub const ZONE: &str = "zone";
 pub const LAYER: &str = "layer";
 
@@ -50,7 +50,7 @@ pub const QUEUED: &str = "queued:";
 /// The prefix of [`admit`].
 pub const ADMIT: &str = "admit:";
 
-/// The session of `token`, a hash of the account, the character, the shard, the zone and the
+/// The session of `token`, a hash of the account, the character, the realm, the zone and the
 /// layer.
 pub fn session(token: &Token) -> String {
   format!("session:{}", hex(token))
@@ -61,19 +61,19 @@ pub fn presence(account: AccountId) -> String {
   format!("{PRESENCE}{}", account.0)
 }
 
-/// The caps of `shard`, a hash of its [`NAME`], its [`CAP`] and its [`LAYER_CAP`].
-pub fn shard(shard: ShardId) -> String {
-  format!("shard:{}", shard.0)
+/// The caps of `realm`, a hash of its [`NAME`], its [`CAP`] and its [`LAYER_CAP`].
+pub fn realm(realm: RealmId) -> String {
+  format!("realm:{}", realm.0)
 }
 
-/// The layers of `shard`, a hash from the [`field`] of each layer to its count of players.
-pub fn layers(shard: ShardId) -> String {
-  format!("layers:{}", shard.0)
+/// The layers of `realm`, a hash from the [`field`] of each layer to its count of players.
+pub fn layers(realm: RealmId) -> String {
+  format!("layers:{}", realm.0)
 }
 
-/// The layers of `shard` that drain, a set of the [`field`] of each.
-pub fn draining(shard: ShardId) -> String {
-  format!("draining:{}", shard.0)
+/// The layers of `realm` that drain, a set of the [`field`] of each.
+pub fn draining(realm: RealmId) -> String {
+  format!("draining:{}", realm.0)
 }
 
 /// The field of `layer` in [`layers`] and [`draining`]: its zone and its number.
@@ -81,41 +81,41 @@ pub fn field(layer: Layer) -> String {
   format!("{}:{}", layer.zone.0, layer.number)
 }
 
-/// The name of `layer` of `shard` in the keys of a layer and on the channel [`DIRECTORY`].
-pub fn layer(shard: ShardId, layer: Layer) -> String {
-  format!("{}:{}", shard.0, field(layer))
+/// The name of `layer` of `realm` in the keys of a layer and on the channel [`DIRECTORY`].
+pub fn layer(realm: RealmId, layer: Layer) -> String {
+  format!("{}:{}", realm.0, field(layer))
 }
 
-/// The prefix of the [`writer`] of each layer of `shard`, before the [`field`] of the layer.
-pub fn writers(shard: ShardId) -> String {
-  format!("writer:{}:", shard.0)
+/// The prefix of the [`writer`] of each layer of `realm`, before the [`field`] of the layer.
+pub fn writers(realm: RealmId) -> String {
+  format!("writer:{}:", realm.0)
 }
 
-/// The lease of the writer of `layer` of `shard`, a hash of its [`ADDRESS`] and its [`EPOCH`].
+/// The lease of the writer of `layer` of `realm`, a hash of its [`ADDRESS`] and its [`EPOCH`].
 /// A layer whose lease ended has no writer.
-pub fn writer(shard: ShardId, layer: Layer) -> String {
-  format!("{}{}", writers(shard), field(layer))
+pub fn writer(realm: RealmId, layer: Layer) -> String {
+  format!("{}{}", writers(realm), field(layer))
 }
 
-/// The prefix of the [`placed`] of each layer of `shard`, before the [`field`] of the layer.
-pub fn places(shard: ShardId) -> String {
-  format!("placed:{}:", shard.0)
+/// The prefix of the [`placed`] of each layer of `realm`, before the [`field`] of the layer.
+pub fn places(realm: RealmId) -> String {
+  format!("placed:{}:", realm.0)
 }
 
-/// The places that placements gave in `layer` of `shard`, a sorted set of the accounts by the
+/// The places that placements gave in `layer` of `realm`, a sorted set of the accounts by the
 /// time in milliseconds when each place ends. The writer of the layer takes a place away when it
 /// takes its player.
-pub fn placed(shard: ShardId, layer: Layer) -> String {
-  format!("{}{}", places(shard), field(layer))
+pub fn placed(realm: RealmId, layer: Layer) -> String {
+  format!("{}{}", places(realm), field(layer))
 }
 
-/// The ticks of the writer of `layer` of `shard`, a hash from the number of a bucket to the
+/// The ticks of the writer of `layer` of `realm`, a hash from the number of a bucket to the
 /// count of ticks in it. Bucket `n` holds each tick that took from `n` times [`TICK_BUCKET`] up to
 /// the next bucket, and the last bucket holds each longer tick. The writer adds to it and never
 /// resets it, so a reader that wants the ticks of a run reads the hash before and after, and takes
 /// the difference.
-pub fn ticks(shard: ShardId, layer: Layer) -> String {
-  format!("ticks:{}", self::layer(shard, layer))
+pub fn ticks(realm: RealmId, layer: Layer) -> String {
+  format!("ticks:{}", self::layer(realm, layer))
 }
 
 /// The time that one bucket of [`ticks`] spans.
@@ -131,22 +131,22 @@ pub fn tick_bucket(elapsed: Duration) -> u32 {
   bucket.map_or(TICK_BUCKETS - 1, |bucket| bucket.min(TICK_BUCKETS - 1))
 }
 
-/// The queue of `world`, a sorted set of the queued accounts by the time in milliseconds when each
+/// The queue of `realm`, a sorted set of the queued accounts by the time in milliseconds when each
 /// entered.
-pub fn queue(world: u32) -> String {
-  format!("world:{world}:queue")
+pub fn queue(realm: u32) -> String {
+  format!("realm:{realm}:queue")
 }
 
-/// The admitted accounts of `world`, a sorted set by the time in milliseconds when the slot of
+/// The admitted accounts of `realm`, a sorted set by the time in milliseconds when the slot of
 /// each ends.
-pub fn admitted(world: u32) -> String {
-  format!("world:{world}:admitted")
+pub fn admitted(realm: u32) -> String {
+  format!("realm:{realm}:admitted")
 }
 
-/// The admissions of `world`, a sorted set of the accounts by the time in milliseconds when each
+/// The admissions of `realm`, a sorted set of the accounts by the time in milliseconds when each
 /// was admitted, from which a queued client gets an estimate of its wait.
-pub fn admissions(world: u32) -> String {
-  format!("world:{world}:admissions")
+pub fn admissions(realm: u32) -> String {
+  format!("realm:{realm}:admissions")
 }
 
 /// The mark that `account` still waits in a queue.
@@ -154,7 +154,7 @@ pub fn queued(account: AccountId) -> String {
   format!("{QUEUED}{}", account.0)
 }
 
-/// The mark that `account` has a slot in its world.
+/// The mark that `account` has a slot in its realm.
 pub fn admit(account: AccountId) -> String {
   format!("{ADMIT}{}", account.0)
 }
@@ -206,11 +206,11 @@ mod tests {
   use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
   use std::time::Duration;
 
-  use mmo_protocol::{AccountId, Layer, ShardId, Token, ZoneId};
+  use mmo_protocol::{AccountId, Layer, RealmId, Token, ZoneId};
 
   use super::{
     DIRECTORY, TICK_BUCKETS, admissions, admit, admitted, chat, created, draining, failed, field,
-    guessed, layer, layers, placed, places, presence, queue, queued, resume, session, shard,
+    guessed, layer, layers, placed, places, presence, queue, queued, realm, resume, session,
     tick_bucket, ticks, writer, writers,
   };
 
@@ -247,9 +247,9 @@ mod tests {
         "presence:9223372036854775807".to_owned(),
         "queued:9223372036854775807".to_owned(),
         "admit:9223372036854775807".to_owned(),
-        "world:1:queue".to_owned(),
-        "world:1:admitted".to_owned(),
-        "world:4294967295:admissions".to_owned(),
+        "realm:1:queue".to_owned(),
+        "realm:1:admitted".to_owned(),
+        "realm:4294967295:admissions".to_owned(),
         "failed:192.0.2.1:alice".to_owned(),
         "failed:2001:db8:1:2::/64:bob".to_owned(),
         "guessed:192.0.2.1".to_owned(),
@@ -263,23 +263,23 @@ mod tests {
   }
 
   #[test]
-  fn each_key_of_the_directory_of_a_shard_has_the_name_that_section_3_gives() {
+  fn each_key_of_the_directory_of_a_realm_has_the_name_that_section_3_gives() {
     let far = Layer { zone: ZoneId(-3), number: u32::MAX };
     assert_eq!(
       [
-        shard(ShardId(2)),
-        layers(ShardId(2)),
-        draining(ShardId(2)),
+        realm(RealmId(2)),
+        layers(RealmId(2)),
+        draining(RealmId(2)),
         field(far),
-        layer(ShardId(2), far),
-        writers(ShardId(2)),
-        writer(ShardId(u32::MAX), far),
-        ticks(ShardId(2), far),
-        places(ShardId(2)),
-        placed(ShardId(2), far),
+        layer(RealmId(2), far),
+        writers(RealmId(2)),
+        writer(RealmId(u32::MAX), far),
+        ticks(RealmId(2), far),
+        places(RealmId(2)),
+        placed(RealmId(2), far),
       ],
       [
-        "shard:2",
+        "realm:2",
         "layers:2",
         "draining:2",
         "-3:4294967295",

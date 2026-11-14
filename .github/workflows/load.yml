@@ -6,11 +6,11 @@ name: load
 # below it as its base, so each layer shows what it changes. A runner of Linux has 4 cores, which
 # the bots, the gateway and the layer writers share, so a number of this job compares with the other column of the
 # same run, and not with a run on another machine. It runs stage 2, 500 bots with half in a town on one layer of cap
-# 500, and the shards and the layers of stage 3, 500 bots in 2 shards of cap 250 with layers of cap 20, since no test
+# 500, and the realms and the layers of stage 3, 500 bots in 2 realms of cap 250 with layers of cap 20, since no test
 # runs more than 500 bots. In stage 3, 40 bots start near the east border of their zone and walk east, so this run
-# proves the hand-over to the next zone too: they log in first, so each shard holds them on its first layer, and the report
-# fails when a bot saw a bot of the other shard, or when a crosser did not enter the layer with its number in the next zone.
-# It runs stage 4 too, 300 bots on a shard of cap 200, of which 100 wait in the queue. Last it runs stage 6 on the head
+# proves the hand-over to the next zone too: they log in first, so each realm holds them on its first layer, and the report
+# fails when a bot saw a bot of the other realm, or when a crosser did not enter the layer with its number in the next zone.
+# It runs stage 4 too, 300 bots on a realm of cap 200, of which 100 wait in the queue. Last it runs stage 6 on the head
 # alone, with 200 bots and one fault for each run: the stop of the layer writer of their layer, of the gateway and of
 # the keeper, as `script/faults.sh` says. Before it, it runs stage 5 on the head alone, since a base below the drain
 # cannot pass it: 200 bots on layers of cap 20, of which 150 log out once each plays, and the measure of 150 s that
@@ -83,14 +83,14 @@ jobs:
             tail -n 23 "$1" | head -n 21 | awk -v hz="$(getconf CLK_TCK)" \
               'NR == 1 { t = $1; c = $2 } END { printf "%.2f", ($2 - c) / hz / ($1 - t) }'
           }
-          # stage <tree> <name> <bots> <town> <shards> <cap of a shard> <cap of a layer> [<bots that must wait in the queue> [<crossers>]]
+          # stage <tree> <name> <bots> <town> <realms> <cap of a realm> <cap of a layer> [<bots that must wait in the queue> [<crossers>]]
           stage() {
             dir=$out/$2-$3-$4-$5
             mkdir -p "$dir"
             # The crossers walk into a second zone, so a stage with crossers runs two zones.
             zones=1
             [ "${9:-0}" -eq 0 ] || zones=2
-            export MMO_LOCAL_DIR=$dir/stack MMO_LOCAL_SHARDS=$5 MMO_LOCAL_SHARD_CAP=$6 MMO_LOCAL_LAYER_CAP=$7
+            export MMO_LOCAL_DIR=$dir/stack MMO_LOCAL_REALMS=$5 MMO_LOCAL_REALM_CAP=$6 MMO_LOCAL_LAYER_CAP=$7
             export MMO_LOCAL_ZONES=$zones MMO_BOTS_CROSSERS=${9:-0}
             (cd "$1" && sh script/local.sh start) >"$dir/start.log"
             # The pool of layer writers: an idle writer takes no CPU, so their sum is the cores of the layers.
@@ -113,7 +113,7 @@ jobs:
               echo "::warning::the bots of $2 failed in the stage of $3 bots"
               [ "$2" = base ] || failed="$failed $3"
             fi
-            # The head fails too when its report shows a layer over its cap, a shard with too few layers, a bot that saw another shard, or a crosser that stayed or changed its layer number.
+            # The head fails too when its report shows a layer over its cap, a realm with too few layers, a bot that saw another realm, or a crosser that stayed or changed its layer number.
             if [ "$2" != base ] && ! sh "$GITHUB_WORKSPACE/script/report.sh" "$dir/bots.log" "$3" "$5" "${8:-0}" 0 "${9:-0}"; then
               failed="$failed $3"
               # The log of the job keeps the report, since the summary is not in it.
@@ -141,7 +141,7 @@ jobs:
                 name="$name" "$dir/$name.syms" >>"$dir/bots.log"
             done
             {
-              echo "### $2: $3 bots, $4 in town, $5 shards of cap $6, layers of cap $7${8:+, $8 wait in the queue}"
+              echo "### $2: $3 bots, $4 in town, $5 realms of cap $6, layers of cap $7${8:+, $8 wait in the queue}"
               echo '```'
               tail -n 30 "$dir/bots.log"
               echo '```'
@@ -156,14 +156,14 @@ jobs:
           for tree in "$RUNNER_TEMP/base:base" "$GITHUB_WORKSPACE:head"; do
             for bots in "500 250 1 500 500" "500 0 2 250 20 0 40" "300 0 1 200 20 100"; do
               echo "$(date +%T) ${tree##*:}: $bots"
-              # shellcheck disable=SC2086 # the count of bots, the count in town, the shards and their caps
+              # shellcheck disable=SC2086 # the count of bots, the count in town, the realms and their caps
               stage "${tree%%:*}" "${tree##*:}" $bots
             done
           done
           # Stage 5, on the head: the 150 leavers empty most of the 10 layers, and the measure of 150 s that starts at
           # their logouts covers 60 s before a drain, the moves and 30 s before a close.
           broken=
-          export MMO_LOCAL_SHARDS=1 MMO_LOCAL_SHARD_CAP=200 MMO_LOCAL_LAYER_CAP=20 MMO_LOCAL_ZONES=1 MMO_BOTS_CROSSERS=0
+          export MMO_LOCAL_REALMS=1 MMO_LOCAL_REALM_CAP=200 MMO_LOCAL_LAYER_CAP=20 MMO_LOCAL_ZONES=1 MMO_BOTS_CROSSERS=0
           echo "$(date +%T) head: stage 5"
           dir=$out/head-drain
           mkdir -p "$dir"

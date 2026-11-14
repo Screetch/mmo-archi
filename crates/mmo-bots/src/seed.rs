@@ -5,7 +5,7 @@
 use futures_util::future::try_join_all;
 use mmo_client::Account;
 use mmo_collide::SIDE_CM;
-use mmo_protocol::{Angle, CharacterId, Password, Position, ShardId, State};
+use mmo_protocol::{Angle, CharacterId, Password, Position, RealmId, State};
 use mmo_store::{NewCharacter, Store};
 
 use crate::Failure;
@@ -24,8 +24,8 @@ const HIT_POINTS: i32 = 100;
 /// A player of the load test: its account, and the character that the account holds.
 pub(crate) struct Bot {
   pub(crate) index: u32,
-  /// The shard that the bot plays in, and the address of the login service of that shard.
-  pub(crate) shard: u32,
+  /// The realm that the bot plays in, and the address of the login service of that realm.
+  pub(crate) realm: u32,
   pub(crate) login: String,
   pub(crate) account: Account,
   pub(crate) character: CharacterId,
@@ -45,7 +45,7 @@ pub(crate) fn letters(mut n: u64, width: usize) -> String {
 }
 
 /// The first `crossers` bots cross the east border of the zone. They log in before the others, so
-/// they stand on the first layer of their shard.
+/// they stand on the first layer of their realm.
 fn crosser(config: &Config, index: u32) -> bool {
   index < config.crossers
 }
@@ -72,15 +72,15 @@ async fn make(store: &Store, config: &Config, index: u32) -> Result<Bot, Failure
     (format!("bot{run}{index}"), format!("B{run}{}", letters(index.into(), 4)));
   let id = store.create_account(&name, Password(PASSWORD.to_owned())).await?;
   let state = start(config, index);
-  let (shard, login) = config.shard(index);
+  let (realm, login) = config.realm(index);
   let new =
-    NewCharacter { account: id, shard: ShardId(shard), name: &character, zone: config.zone, state };
+    NewCharacter { account: id, realm: RealmId(realm), name: &character, zone: config.zone, state };
   let saved = store.create_character(&new).await?;
   let password = Password(PASSWORD.to_owned());
   let account = Account { name, password, character, create: false };
   Ok(Bot {
     index,
-    shard,
+    realm,
     login: login.to_owned(),
     account,
     character: saved,
@@ -103,7 +103,7 @@ mod tests {
   use std::time::Duration;
 
   use mmo_collide::SIDE_CM;
-  use mmo_protocol::{Password, Position, ShardId, ZoneId};
+  use mmo_protocol::{Password, Position, RealmId, ZoneId};
   use mmo_store::Store;
   use sqlx::PgPool;
 
@@ -143,13 +143,13 @@ mod tests {
     assert_eq!(names.first(), Some(&(0, "botabc0")));
     assert_eq!(names.last(), Some(&(9, "botabc9")));
     assert_eq!(bots[1].account.character, "Babcbaaa");
-    let shards: Vec<_> = bots.iter().take(3).map(|bot| (bot.shard, bot.login.as_str())).collect();
-    assert_eq!(shards, [(1, "a:1"), (2, "b:2"), (1, "a:1")]);
+    let realms: Vec<_> = bots.iter().take(3).map(|bot| (bot.realm, bot.login.as_str())).collect();
+    assert_eq!(realms, [(1, "a:1"), (2, "b:2"), (1, "a:1")]);
     for bot in bots.iter().take(3) {
       let password = Password("a password of the bots".to_owned());
       let account = store.sign_in(&bot.account.name, password).await.expect("a sign in");
       let account = account.expect("an account");
-      let listed = store.characters(account, ShardId(bot.shard)).await.expect("the characters");
+      let listed = store.characters(account, RealmId(bot.realm)).await.expect("the characters");
       assert_eq!(listed.iter().map(|one| one.id).collect::<Vec<_>>(), [bot.character]);
     }
     let ids: Vec<_> = bots.iter().map(|bot| bot.character).collect();

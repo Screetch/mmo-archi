@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mmo_protocol::{AccountId, CharacterId, Layer, ShardId, Token, ZoneId};
+use mmo_protocol::{AccountId, CharacterId, Layer, RealmId, Token, ZoneId};
 use mmo_store::{Directory, Serving, keys};
 use quinn::{Connection, Endpoint};
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
@@ -28,28 +28,28 @@ pub(crate) struct Gateway {
   endpoint: Endpoint,
   /// The family of the address of the endpoint, which the address of a layer writer must share.
   ipv4: bool,
-  /// The link to the writer of each layer, by its shard, its zone and its number. A client holds
+  /// The link to the writer of each layer, by its realm, its zone and its number. A client holds
   /// the lock while it opens a link, so one gateway never opens two links to one writer.
   writers: Mutex<BTreeMap<(u32, i32, u32), Writer>>,
 }
 
-/// The session of a client, which the login service wrote. A player never changes its shard in a
+/// The session of a client, which the login service wrote. A player never changes its realm in a
 /// session.
 pub(crate) struct Session {
   pub(crate) account: AccountId,
   pub(crate) character: CharacterId,
-  pub(crate) shard: ShardId,
+  pub(crate) realm: RealmId,
   pub(crate) layer: Layer,
 }
 
-/// The account, the character, the shard, the zone and the layer of a session in Redis.
+/// The account, the character, the realm, the zone and the layer of a session in Redis.
 type SessionFields = (Option<i64>, Option<i64>, Option<u32>, Option<i32>, Option<u32>);
 
-/// The character, the shard, the zone and the layer of the presence of an account in Redis.
+/// The character, the realm, the zone and the layer of the presence of an account in Redis.
 type PresenceFields = (Option<i64>, Option<u32>, Option<i32>, Option<u32>);
 
-fn key(shard: ShardId, layer: Layer) -> (u32, i32, u32) {
-  (shard.0, layer.zone.0, layer.number)
+fn key(realm: RealmId, layer: Layer) -> (u32, i32, u32) {
+  (realm.0, layer.zone.0, layer.number)
 }
 
 impl Gateway {
@@ -75,46 +75,46 @@ impl Gateway {
   /// move or a hand-off takes the player out of the layer of its login.
   pub(crate) async fn session(&self, token: &Token) -> Result<Option<Session>, RedisError> {
     let mut redis = self.redis.clone();
-    let fields = [keys::ACCOUNT, keys::CHARACTER, keys::SHARD, keys::ZONE, keys::LAYER];
+    let fields = [keys::ACCOUNT, keys::CHARACTER, keys::REALM, keys::ZONE, keys::LAYER];
     let found: SessionFields = redis.hmget(keys::session(token), &fields).await?;
-    let (Some(account), Some(character), Some(shard), Some(zone), Some(number)) = found else {
+    let (Some(account), Some(character), Some(realm), Some(zone), Some(number)) = found else {
       return Ok(None);
     };
-    let fields = [keys::CHARACTER, keys::SHARD, keys::ZONE, keys::LAYER];
+    let fields = [keys::CHARACTER, keys::REALM, keys::ZONE, keys::LAYER];
     let present: PresenceFields = redis.hmget(keys::presence(AccountId(account)), &fields).await?;
     let layer = match present {
-      (Some(held), Some(at), Some(zone), Some(number)) if held == character && at == shard => {
+      (Some(held), Some(at), Some(zone), Some(number)) if held == character && at == realm => {
         Layer { zone: ZoneId(zone), number }
       }
       _ => Layer { zone: ZoneId(zone), number },
     };
-    let (account, character, shard) = (AccountId(account), CharacterId(character), ShardId(shard));
-    Ok(Some(Session { account, character, shard, layer }))
+    let (account, character, realm) = (AccountId(account), CharacterId(character), RealmId(realm));
+    Ok(Some(Session { account, character, realm, layer }))
   }
 
-  /// The link to the writer of `layer` of `shard`, which the gateway opens when it holds none.
+  /// The link to the writer of `layer` of `realm`, which the gateway opens when it holds none.
   pub(crate) async fn writer(
     self: &Arc<Self>,
-    shard: ShardId,
+    realm: RealmId,
     layer: Layer,
   ) -> Result<Writer, Fault> {
     let mut writers = self.writers.lock().await;
-    if let Some(held) = writers.get(&key(shard, layer)) {
+    if let Some(held) = writers.get(&key(realm, layer)) {
       return Ok(held.clone());
     }
-    let entry = self.entry(shard, layer).await?.ok_or(Fault::NoWriter(layer))?;
+    let entry = self.entry(realm, layer).await?.ok_or(Fault::NoWriter(layer))?;
     let connection = self.connect(&entry.address).await?;
-    let opened = writer::open(Arc::clone(self), (shard, layer), entry, connection).await?;
-    writers.insert(key(shard, layer), opened.clone());
+    let opened = writer::open(Arc::clone(self), (realm, layer), entry, connection).await?;
+    writers.insert(key(realm, layer), opened.clone());
     Ok(opened)
   }
 
-  /// Forgets the link to the writer of `layer` of `shard` when it is the link `id` that ended, so
+  /// Forgets the link to the writer of `layer` of `realm` when it is the link `id` that ended, so
   /// the next client of the layer opens another.
-  pub(crate) async fn forget(&self, shard: ShardId, layer: Layer, id: usize) {
+  pub(crate) async fn forget(&self, realm: RealmId, layer: Layer, id: usize) {
     let mut writers = self.writers.lock().await;
-    if writers.get(&key(shard, layer)).is_some_and(|held| held.id() == id) {
-      writers.remove(&key(shard, layer));
+    if writers.get(&key(realm, layer)).is_some_and(|held| held.id() == id) {
+      writers.remove(&key(realm, layer));
     }
   }
 
@@ -137,7 +137,7 @@ impl Gateway {
     let mut writers = self.writers.lock().await;
     let mut read = BTreeMap::new();
     for (key, held) in writers.iter() {
-      read.insert(*key, self.entry(held.shard, held.layer).await);
+      read.insert(*key, self.entry(held.realm, held.layer).await);
     }
     writers.retain(|key, held| match &read[key] {
       Ok(entry) if entry.as_ref() == Some(held.entry()) => true,
@@ -146,9 +146,9 @@ impl Gateway {
         false
       }
       Err(fault) => {
-        let (shard, zone, number) = key;
+        let (realm, zone, number) = key;
         eprintln!(
-          "the gateway cannot read the lease of layer {zone}:{number} of shard {shard}, and keeps \
+          "the gateway cannot read the lease of layer {zone}:{number} of realm {realm}, and keeps \
            its link: {fault}"
         );
         true
@@ -156,10 +156,10 @@ impl Gateway {
     });
   }
 
-  /// The lease of `layer` of `shard` in the directory, or `None` when no writer holds the layer,
+  /// The lease of `layer` of `realm` in the directory, or `None` when no writer holds the layer,
   /// or when its writer waits for the epoch of the keeper and does not serve it yet.
-  async fn entry(&self, shard: ShardId, layer: Layer) -> Result<Option<Serving>, RedisError> {
-    Directory { shard }.serving(&mut self.redis.clone(), layer).await
+  async fn entry(&self, realm: RealmId, layer: Layer) -> Result<Option<Serving>, RedisError> {
+    Directory { realm }.serving(&mut self.redis.clone(), layer).await
   }
 }
 

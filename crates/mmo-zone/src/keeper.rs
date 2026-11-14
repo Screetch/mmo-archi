@@ -2,7 +2,7 @@
 //! the epoch of its layer on it, and sends its save batches on it.
 
 use mmo_protocol::{
-  Batch, Epoch, FromKeeper, KeeperRefusal, Layer, ShardId, ToKeeper, decode, encode,
+  Batch, Epoch, FromKeeper, KeeperRefusal, Layer, RealmId, ToKeeper, decode, encode,
 };
 use quinn::{ClientConfig, Endpoint};
 
@@ -47,9 +47,9 @@ impl Keeper {
     Self { remote: Remote::new(endpoint, client, address, ipv4, "keeper") }
   }
 
-  /// Asks the keeper for the next epoch of `layer` of `shard`, which it writes in PostgreSQL.
-  pub(crate) async fn claim(&mut self, shard: ShardId, layer: Layer) -> Result<Epoch, Error> {
-    match self.ask(&ToKeeper::Claim { shard, layer }).await? {
+  /// Asks the keeper for the next epoch of `layer` of `realm`, which it writes in PostgreSQL.
+  pub(crate) async fn claim(&mut self, realm: RealmId, layer: Layer) -> Result<Epoch, Error> {
+    match self.ask(&ToKeeper::Claim { realm, layer }).await? {
       FromKeeper::Claimed { epoch } => Ok(epoch),
       answer => Err(Error::Answer(answer)),
     }
@@ -78,7 +78,7 @@ mod tests {
   use std::time::Duration;
 
   use mmo_protocol::{
-    Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, ShardId, ZoneId,
+    Batch, Epoch, Frames, FromKeeper, Hello, KeeperRefusal, Layer, PROTOCOL, RealmId, ZoneId,
     encode, frame,
   };
   use quinn::{Connection, Endpoint, RecvStream, SendStream};
@@ -88,7 +88,7 @@ mod tests {
   use crate::config::Config;
   use crate::peer::{World, var};
 
-  const SHARD: ShardId = ShardId(1);
+  const REALM: RealmId = RealmId(1);
   /// The time that a test of this module waits for a link of the writer: a fault of the writer
   /// fails the test, and never hangs it.
   const WAIT: Duration = Duration::from_secs(30);
@@ -159,7 +159,7 @@ mod tests {
     let keeper = world.keeper();
     let address = format!("localhost:{}", keeper.local_addr().expect("an address").port());
     let mut writer = dialing(&world, &address);
-    let batch = Batch { shard: SHARD, layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
+    let batch = Batch { realm: REALM, layer: MEADOW, epoch: Epoch(1), saves: Vec::new() };
     let answers = [
       FromKeeper::Refused(KeeperRefusal::Unavailable),
       FromKeeper::Refused(KeeperRefusal::NoZone),
@@ -179,12 +179,12 @@ mod tests {
     };
     let ask = async {
       let mut claims =
-        vec![text(writer.claim(SHARD, MEADOW).await), text(writer.claim(SHARD, MEADOW).await)];
+        vec![text(writer.claim(REALM, MEADOW).await), text(writer.claim(REALM, MEADOW).await)];
       let mut saves = vec![text(writer.save(batch.clone()).await)];
       saves.push(text(writer.save(batch.clone()).await));
-      claims.push(text(writer.claim(SHARD, MEADOW).await));
+      claims.push(text(writer.claim(REALM, MEADOW).await));
       saves.push(text(writer.save(batch.clone()).await));
-      claims.push(text(writer.claim(SHARD, MEADOW).await));
+      claims.push(text(writer.claim(REALM, MEADOW).await));
       (claims, saves)
     };
     let ((claims, saves), _side) = tokio::join!(ask, keep);
@@ -271,7 +271,7 @@ mod tests {
       [Script::Foreign, Script::Large, Script::Ended, Script::Garbled, Script::Reset, Script::Deaf];
     for script in scripts {
       let side = async { Side::accept(&keeper).await.play(script).await };
-      faults.push(text(tokio::join!(writer.claim(SHARD, MEADOW), side).0));
+      faults.push(text(tokio::join!(writer.claim(REALM, MEADOW), side).0));
     }
     let foreign = PROTOCOL + 1;
     assert_eq!(
@@ -300,9 +300,9 @@ mod tests {
     let address = format!("localhost:{}", keeper.local_addr().expect("an address").port());
     let refuse = async { keeper.accept().await.expect("a writer").refuse() };
     let mut writer = dialing(&world, &address);
-    let mut faults = vec![text(tokio::join!(writer.claim(SHARD, MEADOW), refuse).0)];
+    let mut faults = vec![text(tokio::join!(writer.claim(REALM, MEADOW), refuse).0)];
     for address in ["127.0.0.1:0", "nope", "[::1]:4433"] {
-      faults.push(text(dialing(&world, address).claim(SHARD, MEADOW).await));
+      faults.push(text(dialing(&world, address).claim(REALM, MEADOW).await));
     }
     assert_eq!(
       faults,

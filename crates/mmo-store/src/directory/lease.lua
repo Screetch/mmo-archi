@@ -1,6 +1,6 @@
 -- The lease of the writer of a layer and its count of players, which Redis runs as one atomic step, unless a writer of
 -- a newer epoch holds the lease.
--- KEYS: the lease of the layer, the layers of the shard and the places of the layer.
+-- KEYS: the lease of the layer, the layers of the realm and the places of the layer.
 -- ARGV: the life of the lease in milliseconds, the epoch and the address of the writer, the field of the layer, its
 -- count of players, and the accounts of the places whose players the writer took. Their places end in the same step
 -- as the count that holds them, so a placement never counts a player twice or not at all.

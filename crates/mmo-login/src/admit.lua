@@ -1,9 +1,9 @@
--- The admission of one world, which Redis runs as one atomic step, so many copies of the login service can run it.
--- KEYS: the queue, the admitted accounts and the admissions of the world, and its caps.
--- ARGV: the cap of the world, the most admissions in one second, the slot and its extension in milliseconds, the
+-- The admission of one realm, which Redis runs as one atomic step, so many copies of the login service can run it.
+-- KEYS: the queue, the admitted accounts and the admissions of the realm, and its caps.
+-- ARGV: the cap of the realm, the most admissions in one second, the slot and its extension in milliseconds, the
 -- window of the admissions in milliseconds, the life of an admit mark in seconds, the prefixes of the presence, of
--- the queued mark and of the admit mark, and the cap of a layer of the world.
--- It writes the caps of the world first, so the directory reads them, and a Redis that lost them holds them again.
+-- the queued mark and of the admit mark, and the cap of a layer of the realm.
+-- It writes the caps of the realm first, so the directory reads them, and a Redis that lost them holds them again.
 redis.call('HSET', KEYS[4], 'cap', ARGV[1], 'layer_cap', ARGV[10])
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)

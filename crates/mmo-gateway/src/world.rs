@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bitcode::{DecodeOwned, Encode};
 use mmo_protocol::{
-  AccountId, Attach, Frames, Hello, Layer, PROTOCOL, Relayed, ShardId, ToClient, Token, ZoneId,
+  AccountId, Attach, Frames, Hello, Layer, PROTOCOL, RealmId, Relayed, ToClient, Token, ZoneId,
   decode, encode, frame, relayed, unrelayed,
 };
 use mmo_store::keys;
@@ -137,7 +137,7 @@ impl World {
     address
   }
 
-  /// Writes the session of a character in the layer 1 of a zone of shard 1, as the login service
+  /// Writes the session of a character in the layer 1 of a zone of realm 1, as the login service
   /// does, and gives its token.
   pub(crate) async fn session(&self, account: i64, character: i64, zone: i32) -> Token {
     let mut bytes = [0; 32];
@@ -146,7 +146,7 @@ impl World {
     let fields = [
       (keys::ACCOUNT, account),
       (keys::CHARACTER, character),
-      (keys::SHARD, 1),
+      (keys::REALM, 1),
       (keys::ZONE, zone.into()),
       (keys::LAYER, 1),
     ];
@@ -155,12 +155,12 @@ impl World {
     token
   }
 
-  /// Writes the presence of `account` with `character` in the layer 1 of `zone` of `shard`, as the
+  /// Writes the presence of `account` with `character` in the layer 1 of `zone` of `realm`, as the
   /// writer of that layer does.
-  pub(crate) async fn presence(&self, account: i64, character: i64, shard: i64, zone: i32) {
+  pub(crate) async fn presence(&self, account: i64, character: i64, realm: i64, zone: i32) {
     let fields = [
       (keys::CHARACTER, character),
-      (keys::SHARD, shard),
+      (keys::REALM, realm),
       (keys::ZONE, zone.into()),
       (keys::LAYER, 1),
       (keys::EPOCH, 1),
@@ -169,18 +169,18 @@ impl World {
     let () = self.redis.clone().hset_multiple(key, &fields).await.expect("a presence");
   }
 
-  /// Writes the lease of the layer 1 of `zone` of shard 1 in the directory, as its writer does.
+  /// Writes the lease of the layer 1 of `zone` of realm 1 in the directory, as its writer does.
   pub(crate) async fn entry(&self, zone: i32, address: &str, epoch: i64) {
     let fields = [(keys::ADDRESS, address.to_owned()), (keys::EPOCH, epoch.to_string())];
     let mut redis = self.redis.clone();
-    let key = keys::writer(ShardId(1), layer(zone));
+    let key = keys::writer(RealmId(1), layer(zone));
     let () = redis.hset_multiple(key, &fields).await.expect("a lease");
   }
 
   /// Says on the channel of the directory that the layer 1 of `zone` changed its writer, as a
   /// script of the directory does.
   pub(crate) async fn publish(&self, zone: i32) {
-    let name = keys::layer(ShardId(1), layer(zone));
+    let name = keys::layer(RealmId(1), layer(zone));
     let () = self.redis.clone().publish(keys::DIRECTORY, name).await.expect("a message");
   }
 

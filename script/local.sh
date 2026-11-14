@@ -2,7 +2,7 @@
 # The whole stack of the game on this machine, with one command each to start it, to check it and to stop it:
 #
 #   sh script/local.sh start    builds the servers, then starts PostgreSQL, Redis, the keeper, one login service and
-#                               one pool of layer writers for each shard, and one gateway, and prints the addresses
+#                               one pool of layer writers for each realm, and one gateway, and prints the addresses
 #                               that a client uses.
 #   sh script/local.sh check    makes an account and a character through the login service, links to the gateway,
 #                               and waits for the first snapshot of the zone, with the headless binary mmo-check.
@@ -11,9 +11,9 @@
 #   sh script/local.sh fault <gateway|keeper|writer> [seconds]
 #                               ends one process with KILL, as a crash does, waits that many seconds (0 by default),
 #                               then starts it again as the process manager does. `writer` ends the writer of the layer
-#                               1 of the zone 1 of the shard 1, which an idle writer of its pool takes over.
-#   sh script/local.sh versions prints the id and the version of the save of each character of the shard 1.
-#   sh script/local.sh players  prints the count of the players that the layers of the zone 1 of the shard 1 hold.
+#                               1 of the zone 1 of the realm 1, which an idle writer of its pool takes over.
+#   sh script/local.sh versions prints the id and the version of the save of each character of the realm 1.
+#   sh script/local.sh players  prints the count of the players that the layers of the zone 1 of the realm 1 hold.
 #
 # The stack lives in one folder, `$TMPDIR/mmo-local` (`MMO_LOCAL_DIR` replaces it): the data of PostgreSQL, the TLS
 # material, and for each process its log and the file of its pid. `stop` reads those pids and ends them alone, as
@@ -22,13 +22,13 @@
 # The stores run on the ports 55432 and 56379, not on the ports of compose.yaml, so a PostgreSQL or a Redis that
 # already runs on this machine keeps its data and its ports. `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`,
 # `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT` and `MMO_LOCAL_GATEWAY_PORT` change a port:
-# the layer writers take the ports from `MMO_LOCAL_ZONE_PORT` up, and the login service of the shard n the port of
-# `MMO_LOCAL_LOGIN_PORT` plus 100 (n - 1). `MMO_LOCAL_SHARDS` sets the count of shards, `MMO_LOCAL_SHARD_CAP` the cap of
-# each shard and `MMO_LOCAL_LAYER_CAP` the cap of a layer, which are small, so that a few bots open many layers.
+# the layer writers take the ports from `MMO_LOCAL_ZONE_PORT` up, and the login service of the realm n the port of
+# `MMO_LOCAL_LOGIN_PORT` plus 100 (n - 1). `MMO_LOCAL_REALMS` sets the count of realms, `MMO_LOCAL_REALM_CAP` the cap of
+# each realm and `MMO_LOCAL_LAYER_CAP` the cap of a layer, which are small, so that a few bots open many layers.
 # `MMO_LOCAL_ZONES` sets the count of zones, 1 by default: the zone n stands in the column n - 1 of the first row of the
 # map, so each zone shares a border with the zone before it and the zone after it. The zone 1 is the meadow, where the
-# new characters start. The pool of each shard holds one writer for each zone, one for each layer that the cap of the
-# shard fills, and 2 more.
+# new characters start. The pool of each realm holds one writer for each zone, one for each layer that the cap of the
+# realm fills, and 2 more.
 # The stores need initdb, postgres, pg_isready, psql, redis-server and redis-cli: `MMO_LOCAL_PG_BIN` names the folder
 # of the programs of PostgreSQL when it is not in the PATH. The TLS material needs openssl.
 set -eu
@@ -43,13 +43,13 @@ login_port=${MMO_LOCAL_LOGIN_PORT:-54434}
 # The layer writers take the ports from this one up, one each.
 zone_port=${MMO_LOCAL_ZONE_PORT:-54440}
 gateway_port=${MMO_LOCAL_GATEWAY_PORT:-54436}
-shards=${MMO_LOCAL_SHARDS:-1}
-shard_cap=${MMO_LOCAL_SHARD_CAP:-100}
+realms=${MMO_LOCAL_REALMS:-1}
+realm_cap=${MMO_LOCAL_REALM_CAP:-100}
 layer_cap=${MMO_LOCAL_LAYER_CAP:-20}
 zones=${MMO_LOCAL_ZONES:-1}
-# The pool of the layer writers of each shard, as section 6 of docs/architecture.md says: one for each zone, one for
-# each layer that the cap of the shard fills, and 2 for the recovery.
-pool=$((zones + (shard_cap + layer_cap - 1) / layer_cap + 2))
+# The pool of the layer writers of each realm, as section 6 of docs/architecture.md says: one for each zone, one for
+# each layer that the cap of the realm fills, and 2 for the recovery.
+pool=$((zones + (realm_cap + layer_cap - 1) / layer_cap + 2))
 # debug or release: the numbers of docs/architecture.md come from release builds.
 profile=${MMO_LOCAL_PROFILE:-debug}
 bin=${CARGO_TARGET_DIR:-$root/target}/$profile
@@ -157,11 +157,11 @@ names() {
   done
 }
 
-# The layer writers of the pool of each shard, zone1 and up, and the login service of each shard.
-writers() { names zone $((pool * shards)) "${1:-}"; }
-logins() { names login "$shards" "${1:-}"; }
+# The layer writers of the pool of each realm, zone1 and up, and the login service of each realm.
+writers() { names zone $((pool * realms)) "${1:-}"; }
+logins() { names login "$realms" "${1:-}"; }
 
-# The port of the login service of the shard $1: the first takes MMO_LOCAL_LOGIN_PORT, and each next one 100 more.
+# The port of the login service of the realm $1: the first takes MMO_LOCAL_LOGIN_PORT, and each next one 100 more.
 login_at() { echo $((login_port + 100 * ($1 - 1))); }
 
 # An authority and one certificate for each server of the stack, for local work only. The certificate holds the names
@@ -214,10 +214,10 @@ launch_gateway() {
     GATEWAY_AUTHORITY="$tls/ca.pem" REDIS_URL="$redis" "$bin/mmo-gateway"
 }
 
-# The layer writer of the pool at the place $1, counted from 0: its shard and its port come from that place.
+# The layer writer of the pool at the place $1, counted from 0: its realm and its port come from that place.
 launch_writer() {
   port=$((zone_port + $1))
-  launch "zone$(($1 + 1))" env ZONE_SHARD=$(($1 / pool + 1)) ZONE_ADDRESS="127.0.0.1:$port" \
+  launch "zone$(($1 + 1))" env ZONE_REALM=$(($1 / pool + 1)) ZONE_ADDRESS="127.0.0.1:$port" \
     ZONE_PUBLIC="localhost:$port" DATABASE_URL="$database" REDIS_URL="$redis" ZONE_KEEPER="localhost:$keeper_port" \
     ZONE_CERTIFICATE="$tls/leaf.pem" ZONE_KEY="$tls/leaf.key" ZONE_AUTHORITY="$tls/ca.pem" "$bin/mmo-zone"
 }
@@ -244,7 +244,7 @@ start() {
   started=1
   [ -d "$state/postgres" ] || initdb -D "$state/postgres" -U postgres --auth=trust -E UTF8 >"$state/initdb.log" 2>&1 ||
     die "initdb failed"
-  # Each layer writer of the pool holds 4 connections, so the default of 100 fails a stack of 2 shards.
+  # Each layer writer of the pool holds 4 connections, so the default of 100 fails a stack of 2 realms.
   launch postgres postgres -D "$state/postgres" -h 127.0.0.1 -p "$pg_port" -c unix_socket_directories= -c max_connections=400
   launch redis redis-server --bind 127.0.0.1 --port "$redis_port" --save "" --appendonly no --dir "$state/redis"
   wait_for "PostgreSQL and Redis" 40 stores_up
@@ -257,8 +257,8 @@ start() {
   for name in $(logins); do
     number=$((number + 1))
     launch "$name" env MMO_LOGIN_ADDRESS="127.0.0.1:$(login_at "$number")" MMO_LOGIN_CERTIFICATE="$tls/leaf.pem" \
-      MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_WORLD="$number" \
-      MMO_WORLD_CAP="$shard_cap" MMO_LAYER_CAP="$layer_cap" MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 \
+      MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_REALM="$number" \
+      MMO_REALM_CAP="$realm_cap" MMO_LAYER_CAP="$layer_cap" MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 \
       "$bin/mmo-login"
   done
   # Each writer of the pool starts idle, and takes a layer that a placement opens.
@@ -275,13 +275,13 @@ start() {
   done
   say "the stack runs. A client uses these addresses, all on QUIC over UDP except the two stores:"
   number=1
-  while [ "$number" -le "$shards" ]; do
-    echo "  login      localhost:$(login_at "$number")  (shard $number, cap $shard_cap, layers of cap $layer_cap, $zones zones)"
+  while [ "$number" -le "$realms" ]; do
+    echo "  login      localhost:$(login_at "$number")  (realm $number, cap $realm_cap, layers of cap $layer_cap, $zones zones)"
     number=$((number + 1))
   done
   echo "  gateway    localhost:$gateway_port"
   echo "  authority  $tls/ca.pem  (the certificate that signs each server)"
-  echo "  keeper     localhost:$keeper_port  $((pool * shards)) layer writers from localhost:$zone_port  (the servers use these)"
+  echo "  keeper     localhost:$keeper_port  $((pool * realms)) layer writers from localhost:$zone_port  (the servers use these)"
   echo "  postgres   $database"
   echo "  redis      $redis"
   echo "  logs       $state/<process>.log"
@@ -305,10 +305,10 @@ bots() {
   for name in $(logins) gateway zone1; do
     alive "$name" || die "$name does not run: run sh script/local.sh start first"
   done
-  # The bots go round the shards, and each shard has its own login service.
+  # The bots go round the realms, and each realm has its own login service.
   address=
   number=1
-  while [ "$number" -le "$shards" ]; do
+  while [ "$number" -le "$realms" ]; do
     address=${address:+$address,}localhost:$(login_at "$number")
     number=$((number + 1))
   done
@@ -345,7 +345,7 @@ fault() {
     gateway | keeper) name=$1 ;;
     writer)
       held=$(redis-cli -p "$redis_port" hget writer:1:1:1 address)
-      [ -n "$held" ] || die "no writer holds the layer 1 of the zone 1 of the shard 1"
+      [ -n "$held" ] || die "no writer holds the layer 1 of the zone 1 of the realm 1"
       name=zone$((${held##*:} - zone_port + 1))
       ;;
     *) die "fault is gateway, keeper or writer" ;;
@@ -364,14 +364,14 @@ fault() {
   say "started $name again"
 }
 
-# The players that the layers of the zone 1 of the shard 1 hold, as the directory counts them.
+# The players that the layers of the zone 1 of the realm 1 hold, as the directory counts them.
 players() {
   redis-cli -p "$redis_port" hvals layers:1 | awk '{ n += $1 } END { print n + 0 }'
 }
 
 versions() {
   psql -q -h 127.0.0.1 -p "$pg_port" -U postgres -d "$game" -AtF ' ' -c \
-    "SELECT id, version FROM characters WHERE shard_id = 1 ORDER BY id"
+    "SELECT id, version FROM characters WHERE realm_id = 1 ORDER BY id"
 }
 
 stop() {
@@ -398,8 +398,8 @@ status() {
   done
 }
 
-case $shards in
-  '' | *[!0-9]* | 0) die "MMO_LOCAL_SHARDS is a count of 1 or more" ;;
+case $realms in
+  '' | *[!0-9]* | 0) die "MMO_LOCAL_REALMS is a count of 1 or more" ;;
 esac
 case $zones in
   '' | *[!0-9]* | 0) die "MMO_LOCAL_ZONES is a count of 1 or more" ;;

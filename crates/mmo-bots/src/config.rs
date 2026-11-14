@@ -11,7 +11,7 @@ use crate::seed::letters;
 #[derive(Clone)]
 pub(crate) struct Config {
   pub(crate) authority: PathBuf,
-  /// The address of the login service of each shard, in the order of the shards, with commas
+  /// The address of the login service of each realm, in the order of the realms, with commas
   /// between them.
   pub(crate) login: String,
   pub(crate) gateway: String,
@@ -78,15 +78,15 @@ fn number<T: FromStr<Err = ParseIntError>>(
 }
 
 impl Config {
-  /// The count of shards that the bots play in, one for each login service.
-  pub(crate) fn shards(&self) -> u32 {
+  /// The count of realms that the bots play in, one for each login service.
+  pub(crate) fn realms(&self) -> u32 {
     u32::try_from(self.login.split(',').count()).unwrap_or(u32::MAX)
   }
 
-  /// The shard of the bot `index` and the address of its login service: the bots go round the
-  /// shards, and the first login service is the one of shard 1.
-  pub(crate) fn shard(&self, index: u32) -> (u32, &str) {
-    let at = index % self.shards();
+  /// The realm of the bot `index` and the address of its login service: the bots go round the
+  /// realms, and the first login service is the one of realm 1.
+  pub(crate) fn realm(&self, index: u32) -> (u32, &str) {
+    let at = index % self.realms();
     (at + 1, self.login.split(',').nth(at as usize).unwrap_or_default())
   }
 
@@ -193,13 +193,13 @@ mod tests {
   }
 
   #[test]
-  fn the_bots_go_round_the_shards_that_the_login_services_name() {
+  fn the_bots_go_round_the_realms_that_the_login_services_name() {
     let one = read(&[], "").expect("a config");
     let first = (1, "localhost:4434");
-    assert_eq!((one.shards(), one.shard(0), one.shard(7)), (1, first, first));
+    assert_eq!((one.realms(), one.realm(0), one.realm(7)), (1, first, first));
     let two = read(&[("MMO_BOTS_LOGIN", "a:1,b:2")], "").expect("a config");
-    let at = [0, 1, 2].map(|index| two.shard(index));
-    assert_eq!((two.shards(), at), (2, [(1, "a:1"), (2, "b:2"), (1, "a:1")]));
+    let at = [0, 1, 2].map(|index| two.realm(index));
+    assert_eq!((two.realms(), at), (2, [(1, "a:1"), (2, "b:2"), (1, "a:1")]));
   }
 
   #[test]

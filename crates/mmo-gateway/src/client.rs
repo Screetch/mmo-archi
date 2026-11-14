@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use mmo_protocol::{
-  AccountId, Attach, CharacterId, FromClient, Intents, Layer, Link, ShardId, ToClient, decode,
+  AccountId, Attach, CharacterId, FromClient, Intents, Layer, Link, RealmId, ToClient, decode,
   encode, relayed,
 };
 use quinn::{Connection, ConnectionError, Incoming, SendStream};
@@ -40,13 +40,13 @@ async fn attach(connection: &Connection, gateway: &Arc<Gateway>) -> Result<Infal
   let link = random();
   let first = ToClient::Moved { zone: session.layer.zone, layer: session.layer.number };
   send.write_all(&framed(&encode(&first))).await?;
-  let shard = session.shard;
-  let writer = gateway.writer(shard, session.layer).await?;
+  let realm = session.realm;
+  let writer = gateway.writer(realm, session.layer).await?;
   let (messages, down) = unbounded_channel();
   let to = Route { messages, connection: connection.clone() };
   let who = (session.account, session.character);
   writer.join(link, who, to.clone());
-  let mut client = Client { connection, gateway, shard, link, who, writer, to, send, stream, down };
+  let mut client = Client { connection, gateway, realm, link, who, writer, to, send, stream, down };
   let fault = client.play().await;
   client.writer.leave(link);
   Err(fault)
@@ -64,11 +64,11 @@ async fn refuse(mut send: SendStream) -> Fault {
   Fault::NoSession
 }
 
-/// A client that plays in a shard, and the link to the writer of the layer of its player.
+/// A client that plays in a realm, and the link to the writer of the layer of its player.
 struct Client<'a> {
   connection: &'a Connection,
   gateway: &'a Arc<Gateway>,
-  shard: ShardId,
+  realm: RealmId,
   link: Link,
   /// The account and the character of the session, which the gateway joins to each layer that the
   /// player moves to.
@@ -103,7 +103,7 @@ impl Client<'_> {
     self.writer.relay(self.link, message)
   }
 
-  /// Relays the intents of a datagram to the writer of the layer that they name, in the shard of
+  /// Relays the intents of a datagram to the writer of the layer that they name, in the realm of
   /// the session.
   async fn intents(
     &self,
@@ -116,12 +116,12 @@ impl Client<'_> {
     if layer == self.writer.layer {
       return self.writer.intents(bytes);
     }
-    self.gateway.writer(self.shard, layer).await?.intents(bytes)
+    self.gateway.writer(self.realm, layer).await?.intents(bytes)
   }
 
   async fn deliver(&mut self, message: ToClient) -> Result<(), Fault> {
     if let ToClient::Moved { zone, layer } = message {
-      let next = self.gateway.writer(self.shard, Layer { zone, number: layer }).await?;
+      let next = self.gateway.writer(self.realm, Layer { zone, number: layer }).await?;
       next.join(self.link, self.who, self.to.clone());
       self.writer.forsake(self.link);
       self.writer = next;

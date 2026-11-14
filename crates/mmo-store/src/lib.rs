@@ -6,10 +6,10 @@
 //! [`Store::open`], which refuses a database that lacks a migration of this build.
 //!
 //! - The login service: [`Store::create_account`], [`Store::sign_in`], and
-//!   [`Store::create_character`] and [`Store::characters`], each in the shard of the service.
+//!   [`Store::create_character`] and [`Store::characters`], each in the realm of the service.
 //! - A layer writer: [`Store::load`], when it takes a layer or a player, and
 //!   [`Store::neighbours`], the zones across the borders of its zone.
-//! - The login service and each layer writer: the [`Directory`] of the layers of a shard in
+//! - The login service and each layer writer: the [`Directory`] of the layers of a realm in
 //!   Redis, with its scripts.
 //! - The operator: [`Store::add_zone`], and [`Store::place_zone`], which puts a zone on the map.
 //! - The keeper: [`Store::claim`], which gives a writer the next
@@ -24,7 +24,7 @@ pub mod keys;
 pub mod testing;
 mod zones;
 
-use mmo_protocol::{Epoch, KeeperRefusal, Layer, ShardId, ZoneId};
+use mmo_protocol::{Epoch, KeeperRefusal, Layer, RealmId, ZoneId};
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
@@ -71,16 +71,16 @@ pub enum Error {
   /// A newer writer claimed the layer after the writer that sent the batch, or no writer claimed
   /// it, and then it holds the epoch 0.
   #[error(
-    "layer {}:{} of shard {} is at epoch {}, and the batch is of epoch {}",
+    "layer {}:{} of realm {} is at epoch {}, and the batch is of epoch {}",
     layer.zone.0,
     layer.number,
-    shard.0,
+    realm.0,
     held.0,
     given.0
   )]
   Epoch {
-    /// The shard of the batch.
-    shard: ShardId,
+    /// The realm of the batch.
+    realm: RealmId,
     /// The layer of the batch.
     layer: Layer,
     /// The epoch of the last writer that claimed the layer.
@@ -158,7 +158,7 @@ fn taken(error: sqlx::Error, name: &str) -> Error {
 #[cfg(test)]
 mod tests {
   use mmo_protocol::{
-    AccountId, Angle, Batch, CharacterId, Epoch, KeeperRefusal, Layer, Password, Position, ShardId,
+    AccountId, Angle, Batch, CharacterId, Epoch, KeeperRefusal, Layer, Password, Position, RealmId,
     State, ZoneId,
   };
   use sqlx::PgPool;
@@ -187,10 +187,10 @@ mod tests {
     pool.close().await;
     let state = State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 1 };
     let layer = Layer { zone: ZoneId(1), number: 1 };
-    let batch = Batch { shard: ShardId(1), layer, epoch: Epoch(1), saves: Vec::new() };
+    let batch = Batch { realm: RealmId(1), layer, epoch: Epoch(1), saves: Vec::new() };
     let brom = NewCharacter {
       account: AccountId(1),
-      shard: ShardId(1),
+      realm: RealmId(1),
       name: "Brom",
       zone: ZoneId(1),
       state,
@@ -201,12 +201,12 @@ mod tests {
       store.create_account("alice", Password("one".to_owned())).await.err(),
       store.sign_in("alice", Password("one".to_owned())).await.err(),
       store.create_character(&brom).await.err(),
-      store.characters(AccountId(1), ShardId(1)).await.err(),
+      store.characters(AccountId(1), RealmId(1)).await.err(),
       store.load(&[CharacterId(1)]).await.err(),
       store.add_zone(ZoneId(1), "meadow").await.err(),
       store.place_zone(ZoneId(1), Square { column: 0, row: 0 }).await.err(),
       store.neighbours(ZoneId(1)).await.err(),
-      store.claim(ShardId(1), layer).await.err(),
+      store.claim(RealmId(1), layer).await.err(),
       store.save(&batch).await.err(),
     ];
     let closed = "attempted to acquire a connection on a closed pool";
@@ -222,7 +222,7 @@ mod tests {
   #[test]
   fn the_keeper_refuses_a_lost_zone_and_an_old_epoch_of_a_layer_as_such() {
     let layer = Layer { zone: ZoneId(1), number: 1 };
-    let epoch = Error::Epoch { shard: ShardId(1), layer, held: Epoch(2), given: Epoch(1) };
+    let epoch = Error::Epoch { realm: RealmId(1), layer, held: Epoch(2), given: Epoch(1) };
     let refusals = [Error::NoZone { zone: ZoneId(1) }, epoch].map(|error| error.refusal());
     assert_eq!(refusals, [KeeperRefusal::NoZone, KeeperRefusal::Stale { held: Epoch(2) }]);
   }

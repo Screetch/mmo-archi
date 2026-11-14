@@ -3,14 +3,14 @@ use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use mmo_protocol::ShardId;
+use mmo_protocol::RealmId;
 use quinn::{ClientConfig, ServerConfig};
 use sqlx::postgres::PgConnectOptions;
 
 /// What the layer writer reads from its environment, as the doc of the crate says.
 pub(crate) struct Config {
-  /// The shard of the writer.
-  pub(crate) shard: ShardId,
+  /// The realm of the writer.
+  pub(crate) realm: RealmId,
   /// The address of the links of the gateways.
   pub(crate) address: SocketAddr,
   /// The address that the gateways dial, which the lease of its layer holds.
@@ -34,8 +34,8 @@ pub(crate) struct Config {
 pub(crate) enum Error {
   #[error("the variable {0} is not set")]
   Unset(&'static str),
-  #[error("ZONE_SHARD is not the id of a shard: {0}")]
-  Shard(#[from] ParseIntError),
+  #[error("ZONE_REALM is not the id of a realm: {0}")]
+  Realm(#[from] ParseIntError),
   #[error("ZONE_ADDRESS is not an address and a port: {0}")]
   Address(#[from] AddrParseError),
   #[error("DATABASE_URL is not a URL of PostgreSQL: {0}")]
@@ -47,7 +47,7 @@ pub(crate) enum Error {
 impl Config {
   /// Reads the config from `var`, which gives the value of a variable of the environment.
   pub(crate) fn read(var: impl Fn(&str) -> Option<String>) -> Result<Self, Error> {
-    let shard = ShardId(value(&var, "ZONE_SHARD")?.parse()?);
+    let realm = RealmId(value(&var, "ZONE_REALM")?.parse()?);
     let address = value(&var, "ZONE_ADDRESS")?.parse()?;
     let public = value(&var, "ZONE_PUBLIC")?;
     let database = PgConnectOptions::from_str(&value(&var, "DATABASE_URL")?)?;
@@ -60,7 +60,7 @@ impl Config {
     let (server, client) = mmo_link::server(certificate, key, authority).and_then(|server| {
       mmo_link::client(certificate, key, authority).map(|client| (server, client))
     })?;
-    Ok(Self { shard, address, public, database, redis, keeper, server, client })
+    Ok(Self { realm, address, public, database, redis, keeper, server, client })
   }
 }
 
@@ -84,12 +84,12 @@ mod tests {
       vars.retain(|(key, _)| *key != name);
       vars.extend(value.map(|value| (name, value)));
       let config = Config::read(var(vars));
-      let fields = |c: Config| (c.shard.0, [c.address.to_string(), c.public, c.redis, c.keeper]);
+      let fields = |c: Config| (c.realm.0, [c.address.to_string(), c.public, c.redis, c.keeper]);
       config.map(fields).map_err(|e| e.to_string())
     };
     let found = [
       read("", None),
-      read("ZONE_SHARD", None),
+      read("ZONE_REALM", None),
       read("ZONE_ADDRESS", None),
       read("ZONE_PUBLIC", None),
       read("DATABASE_URL", None),
@@ -98,7 +98,7 @@ mod tests {
       read("ZONE_CERTIFICATE", None),
       read("ZONE_KEY", None),
       read("ZONE_AUTHORITY", None),
-      read("ZONE_SHARD", Some("first".to_owned())),
+      read("ZONE_REALM", Some("first".to_owned())),
       read("ZONE_ADDRESS", Some("zone".to_owned())),
       read("DATABASE_URL", Some("zone".to_owned())),
       read("ZONE_CERTIFICATE", Some(world.path("absent.pem"))),
@@ -113,7 +113,7 @@ mod tests {
           1,
           ["127.0.0.1:4433", "zone-1:4433", "redis://redis", "localhost:4433"].map(String::from)
         )),
-        unset("ZONE_SHARD"),
+        unset("ZONE_REALM"),
         unset("ZONE_ADDRESS"),
         unset("ZONE_PUBLIC"),
         unset("DATABASE_URL"),
@@ -122,7 +122,7 @@ mod tests {
         unset("ZONE_CERTIFICATE"),
         unset("ZONE_KEY"),
         unset("ZONE_AUTHORITY"),
-        Err("ZONE_SHARD is not the id of a shard: invalid digit found in string".to_owned()),
+        Err("ZONE_REALM is not the id of a realm: invalid digit found in string".to_owned()),
         Err("ZONE_ADDRESS is not an address and a port: invalid socket address syntax".to_owned()),
         Err(format!("DATABASE_URL is not a URL of PostgreSQL: {relative}")),
         Err(format!(

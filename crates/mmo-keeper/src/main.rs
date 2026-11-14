@@ -75,8 +75,8 @@ mod tests {
   use std::net::UdpSocket;
 
   use mmo_protocol::{
-    Angle, Batch, CharacterId, Epoch, FromKeeper, KeeperRefusal, Layer, Password, Position, Save,
-    ShardId, State, ToKeeper, ZoneId,
+    Angle, Batch, CharacterId, Epoch, FromKeeper, KeeperRefusal, Layer, Password, Position,
+    RealmId, Save, State, ToKeeper, ZoneId,
   };
   use mmo_store::{NewCharacter, Saved, Store};
   use sqlx::ConnectOptions;
@@ -114,15 +114,15 @@ mod tests {
     store.add_zone(ZoneId(1), "meadow").await?;
     let account = store.create_account("alice", Password("one".to_owned())).await?;
     let brom =
-      NewCharacter { account, shard: ShardId(1), name: "Brom", zone: ZoneId(1), state: START };
+      NewCharacter { account, realm: RealmId(1), name: "Brom", zone: ZoneId(1), state: START };
     let brom = store.create_character(&brom).await?;
     let save = |epoch, character| {
       let saves = vec![Save { character, state: MOVED, version: 1 }];
       let layer = Layer { zone: ZoneId(1), number: 1 };
-      ToKeeper::Save(Batch { shard: ShardId(1), layer, epoch: Epoch(epoch), saves })
+      ToKeeper::Save(Batch { realm: RealmId(1), layer, epoch: Epoch(epoch), saves })
     };
     let claim =
-      |zone| ToKeeper::Claim { shard: ShardId(1), layer: Layer { zone: ZoneId(zone), number: 1 } };
+      |zone| ToKeeper::Claim { realm: RealmId(1), layer: Layer { zone: ZoneId(zone), number: 1 } };
     let mut answers = Vec::new();
     let stranger = CharacterId(i64::MAX);
     let messages = [
