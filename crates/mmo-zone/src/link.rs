@@ -199,6 +199,9 @@ struct Writer {
   claim: Claim,
   /// The batches for the task that sends them to the keeper, one after the other.
   batches: UnboundedSender<Batch>,
+  /// What the writer asks of its layer in the directory, for the task that runs each ask in turn,
+  /// so that a close or a drain reads the last count that the writer wrote.
+  asks: UnboundedSender<Ask>,
   events: UnboundedSender<Event>,
   gateways: BTreeMap<Gateway, Opened>,
   dial: Dial,
@@ -233,6 +236,8 @@ impl Writer {
     let Claimed { zone, store, claim, keeper, dial } = claimed;
     let (batches, sent) = unbounded_channel();
     tokio::spawn(deliver(keeper, sent, events.clone()));
+    let (asks, asked) = unbounded_channel();
+    tokio::spawn(answer(claim.clone(), asked, events.clone()));
     let (gateways, owed, pending) = (BTreeMap::new(), BTreeMap::new(), BTreeMap::new());
     let timing = BTreeMap::new();
     let (ticks, empty, low) = (0, 0, 0);
@@ -241,6 +246,7 @@ impl Writer {
       store,
       claim,
       batches,
+      asks,
       events,
       gateways,
       dial,
@@ -317,14 +323,19 @@ impl Writer {
 
   /// Closes the layer, when it still holds no player and no place.
   fn release(&self) {
-    let claim = self.claim.clone();
-    self.later(async move { Event::Released(claim.close().await) });
+    self.ask(Ask::Close);
   }
 
   /// Asks the directory to drain the layer, when the other layers of its zone have room.
   fn ask_drain(&self) {
-    let claim = self.claim.clone();
-    self.later(async move { Event::Drained(claim.drain().await) });
+    self.ask(Ask::Drain);
+  }
+
+  /// Asks the directory in its turn: Redis runs the asks of a writer in the order that it made
+  /// them, however fast it makes them.
+  fn ask(&self, ask: Ask) {
+    // The send fails only when the layer writer stopped, and then no one needs the answer.
+    drop(self.asks.send(ask));
   }
 
   /// Moves the player of `moving` out of this layer that drains, to the layer of its zone that the
@@ -484,8 +495,7 @@ impl Writer {
 
   /// Writes `entry` in Redis.
   fn write(&self, entry: Entry) {
-    let claim = self.claim.clone();
-    self.later(async move { Event::Entries(claim.write(entry).await) });
+    self.ask(Ask::Write(entry));
   }
 
   /// Sends `saves` to the keeper in batches of `SAVES` at most, so each batch fits in one frame.
@@ -674,6 +684,30 @@ async fn deliver(
   }
 }
 
+/// What a layer writer asks of its layer in the directory.
+enum Ask {
+  /// Writes an entry in Redis.
+  Write(Entry),
+  /// Closes the layer, when it holds no player and no place.
+  Close,
+  /// Puts the layer in drain, when the other layers of its zone have room.
+  Drain,
+}
+
+/// Runs each ask of the layer writer in turn, and tells it the answer, until the writer stops. A
+/// placement reads the count that the last entry wrote, so no ask passes another.
+async fn answer(claim: Claim, mut asks: UnboundedReceiver<Ask>, events: UnboundedSender<Event>) {
+  while let Some(ask) = asks.recv().await {
+    let event = match ask {
+      Ask::Write(entry) => Event::Entries(claim.write(entry).await),
+      Ask::Close => Event::Released(claim.close().await),
+      Ask::Drain => Event::Drained(claim.drain().await),
+    };
+    // The send fails only when the layer writer stopped, and then no one needs the answer.
+    drop(events.send(event));
+  }
+}
+
 /// Relays the messages of the link of a gateway to the layer writer until a fault ends it.
 async fn gateway(incoming: Incoming, gateway: Gateway, events: UnboundedSender<Event>) {
   let fault = match incoming.await {
@@ -755,6 +789,7 @@ mod tests {
   use std::cell::Cell;
   use std::cell::RefCell;
   use std::collections::BTreeMap;
+  use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Duration;
 
   use mmo_collide::SIDE_CM;
@@ -925,6 +960,16 @@ mod tests {
     }
   }
 
+  /// Holds once `entries` events came: the writes of the first lease, then of a join, which are
+  /// the only events that the writer hears before its first tick.
+  fn joined(entries: usize) -> impl Fn(&Writer, &Event) -> bool {
+    let seen = Cell::new(0);
+    move |_, _| {
+      seen.set(seen.get() + 1);
+      seen.get() == entries
+    }
+  }
+
   /// Hears the events of `writer` until `done` holds, and gives the fault of the first event that
   /// stops the writer.
   async fn hear(
@@ -1074,20 +1119,19 @@ mod tests {
     for _ in 0..2 * TICKS_PER_SECOND {
       writer.tick();
     }
-    // The first lease, then each second the ticks and the lease of the layer: 5 events, all of
-    // them writes.
-    let ended = Cell::new(0);
-    let entries = |_: &Writer, _: &Event| {
-      ended.set(ended.get() + 1);
-      ended.get() == 5
+    // The first lease, then each second the ticks and the lease of the layer: all of them writes.
+    let entries = |_: &Writer, _: &Event| true;
+    let counts = loop {
+      let ticks = hash(&meadow.redis, "ticks:1:1:1").await;
+      let counts: Vec<(u32, u64)> = ticks
+        .iter()
+        .map(|(bucket, count)| (bucket.parse().expect("a bucket"), count.parse().expect("a count")))
+        .collect();
+      if counts.iter().map(|(_, count)| count).sum::<u64>() == 40 {
+        break counts;
+      }
+      assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
     };
-    assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
-    let ticks = hash(&meadow.redis, "ticks:1:1:1").await;
-    let counts: Vec<(u32, u64)> = ticks
-      .iter()
-      .map(|(bucket, count)| (bucket.parse().expect("a bucket"), count.parse().expect("a count")))
-      .collect();
-    assert_eq!(counts.iter().map(|(_, count)| count).sum::<u64>(), 40);
     assert!(counts.iter().all(|(bucket, _)| *bucket < keys::TICK_BUCKETS), "{counts:?}");
   }
 
@@ -1152,11 +1196,11 @@ mod tests {
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
     let entries = |_: &Writer, event: &Event| matches!(event, Event::Entries(_));
-    assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
     let present = BTreeMap::from(
       [("character", "1"), ("shard", "1"), ("zone", "1"), ("layer", "1"), ("epoch", "1")]
         .map(|(k, v)| (k.into(), v.into())),
     );
+    assert_eq!(hear(&mut writer, &mut heard, joined(3)).await, None);
     let key = format!("presence:{}", meadow.account.0);
     assert_eq!(hash(&meadow.redis, &key).await, present);
     assert_eq!(hash(&meadow.redis, "writer:1:1:1").await["address"], "zone-1:4433");
@@ -1167,8 +1211,11 @@ mod tests {
     assert_eq!(writer.owed.len(), 1);
     assert_eq!(hear(&mut writer, &mut heard, saved_event).await, None);
     assert!(writer.owed.is_empty());
-    while !hash(&meadow.redis, &key).await.is_empty() {
+    loop {
       assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
+      if hash(&meadow.redis, &key).await.is_empty() {
+        break;
+      }
     }
     let saved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
     assert_eq!((saved.version, saved.state.position.x), (1, 90));
@@ -1203,6 +1250,33 @@ mod tests {
     let saved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
     assert_eq!(saved.state.position.x, 90);
     writer.write(Entry::Absent(Vec::new()));
+  }
+
+  /// Each placement reads the count of a layer that its writer wrote last, so the entries of a
+  /// writer reach Redis in the order that it made them. The binary runs its tasks on many threads,
+  /// where a task that a task spawned last can run first.
+  #[sqlx::test(migrations = false)]
+  async fn the_entries_of_a_writer_reach_redis_in_the_order_that_it_made_them(pool: PgPool) {
+    const COUNTS: usize = 400;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(4)
+      .enable_all()
+      .build()
+      .expect("a runtime");
+    let body = runtime.spawn(async move {
+      let meadow = Meadow::new(pool).await;
+      let (mut writer, mut heard) = meadow.writer().await;
+      for players in 1..=COUNTS {
+        writer.write(Entry::Layer { players, taken: Vec::new() });
+      }
+      let entries = AtomicUsize::new(0);
+      let all = |_: &Writer, _: &Event| entries.fetch_add(1, Ordering::Relaxed) + 1 == COUNTS + 1;
+      assert_eq!(hear(&mut writer, &mut heard, all).await, None);
+      assert_eq!(hash(&meadow.redis, "layers:1").await["1:1"], COUNTS.to_string());
+    });
+    let done = body.await;
+    runtime.shutdown_background();
+    done.expect("the entries in order");
   }
 
   /// Doc lines 105-110: the keeper stops and comes back, and each layer writer sends it again the
@@ -1301,13 +1375,16 @@ mod tests {
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
     let entries = |_: &Writer, event: &Event| matches!(event, Event::Entries(_));
-    assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
+    assert_eq!(hear(&mut writer, &mut heard, joined(3)).await, None);
     let key = format!("presence:{}", meadow.account.0);
     assert_eq!(hash(&meadow.redis, &key).await.len(), 5);
     let logout = ToZone::Client(Relayed { link: Link(1), message: FromClient::Logout });
     assert!(writer.hear(Event::Message(GATE, logout)).is_none());
-    while !hash(&meadow.redis, &key).await.is_empty() {
+    loop {
       assert_eq!(hear(&mut writer, &mut heard, entries).await, None);
+      if hash(&meadow.redis, &key).await.is_empty() {
+        break;
+      }
     }
     assert!(writer.owed.is_empty());
     let saved = meadow.store.load(&[meadow.character]).await.expect("a save")[0];
