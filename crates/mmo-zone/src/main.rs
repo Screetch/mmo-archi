@@ -13,7 +13,9 @@
 //! A player that walks past a border of its zone goes to a layer of the zone across that border, as
 //! the map of the world gives it, with the hand-off of section 6: the writer asks the placement of
 //! the directory for that layer, dials its writer, and drops the player when that writer answers
-//! that it saved the player.
+//! that it saved the player. A layer that held at most a quarter of its cap for 60 s asks the
+//! directory to drain it, and when it drains, its writer moves each player to another layer of the
+//! zone in the same way, each second, and the layer closes once it is empty.
 //!
 //! The writer keeps its state as sections 2, 5, 6 and 9 of `docs/architecture.md` say. When it
 //! takes a layer, it claims the layer from the keeper, which gives it the next epoch of that

@@ -194,7 +194,9 @@ impl Directory {
   }
 
   /// Puts `layer` in drain when the other open layers of its zone have room for all its players
-  /// together, and gives whether it drains now. A layer that drains takes no new player.
+  /// together, after the players of the layers of the zone that drain already, and gives whether
+  /// it drains. A count holds the places of a layer, as for [`Directory::place`]. A layer that
+  /// drains takes no new player, and its writer moves each of its players to another layer.
   pub async fn drain(
     self,
     redis: &mut impl ConnectionLike,
@@ -209,6 +211,7 @@ impl Directory {
       .arg(keys::writers(self.shard))
       .arg(keys::DIRECTORY)
       .arg(self.shard.0)
+      .arg(keys::places(self.shard))
       .invoke_async(redis)
       .await
   }
@@ -446,6 +449,36 @@ mod tests {
     count(&mut db, on(1, 1), 1, 4).await;
     assert_eq!(cross(&mut db, 9, 1, on(1, 2)).await, Placed::Wait);
     assert_eq!(hash(&mut db, "layers:1").await, fields([("1:1", "4"), ("1:2", "1"), ("1:3", "0")]));
+    assert!(SHARD.drain(&mut db, on(1, 2)).await.expect("a drain"), "a layer drains once");
+  }
+
+  #[tokio::test]
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  async fn the_room_of_a_drain_keeps_the_players_of_the_layers_that_drain_and_of_the_places() {
+    let (_redis, mut db) = shard(4).await;
+    for number in 1..=3 {
+      place(&mut db, 1, 1).await;
+      assert_eq!(claimed(&mut db, "w", 1).await, on(1, number));
+      count(&mut db, on(1, number), 1, 4).await;
+    }
+    for (number, players) in [(1, 2), (2, 2), (3, 1)] {
+      count(&mut db, on(1, number), 1, players).await;
+    }
+    let () = db.hset("layers:1", "2:1", 0).await.expect("a layer of another zone");
+    assert!(SHARD.drain(&mut db, on(1, 1)).await.expect("a drain"));
+    assert!(
+      !SHARD.drain(&mut db, on(1, 2)).await.expect("a drain"),
+      "layer 3 has room for 3 players, and the 2 players of layer 1 take 2 of them"
+    );
+    count(&mut db, on(1, 2), 1, 0).await;
+    let places = [(u64::MAX, 8), (u64::MAX, 9)];
+    let () = db.zadd_multiple("placed:1:1:2", &places).await.expect("two places");
+    assert!(!SHARD.drain(&mut db, on(1, 3)).await.expect("a drain"), "the places count");
+    let () = db.del("placed:1:1:2").await.expect("the places taken");
+    assert!(SHARD.drain(&mut db, on(1, 3)).await.expect("a drain"));
+    let mut draining: Vec<String> = db.smembers("draining:1").await.expect("a set");
+    draining.sort();
+    assert_eq!(draining, ["1:1", "1:3"]);
   }
 
   #[tokio::test]
