@@ -1338,6 +1338,7 @@ mod tests {
     let mut meadow = Meadow::new(pool).await;
     let (mut writer, mut heard) = meadow.writer().await;
     meadow.join(&mut writer).await;
+    assert_eq!(hear(&mut writer, &mut heard, joined(3)).await, None);
     walk(&mut writer, 1, 3);
     meadow.keeper.stop();
     writer.keep();
