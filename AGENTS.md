@@ -6,13 +6,14 @@ each crate in `crates/`, and the crates of the game come one by one, each in a p
 
 The shape of the game is fixed, and each crate serves it:
 
-- The server is the one authority of the state of the world. A client sends the intents of its player, and the server
+- The server is the one authority of the state of the game. A client sends the intents of its player, and the server
   decides. A client can predict a result and correct it when the server answers, but it never decides.
-- A shard is one independent world, and more shards hold more players. The world of a shard is cut into zones, and a
-  zone runs one or more layers, each a full copy of the zone with its own cap of players. Each layer has exactly one
-  writer, a process that alone writes the state of the layer.
+- A realm is one independent world, and more realms hold more players. Each character belongs to exactly one realm,
+  which the player chooses at login. The map of the game is cut into zones, each realm runs all of them, and a zone runs
+  one or more layers, each a full copy of the zone with its own cap of players. Each layer has exactly one writer, a
+  process that alone writes the state of the layer.
 - The gateway keeps no state: it ends the connection of a client, checks its session, finds the writer of the layer of
-  the player in the directory, and sends each message to that writer. So any gateway serves any client of any shard,
+  the player in the directory, and sends each message to that writer. So any gateway serves any client of any realm,
   and a gateway that stops loses nothing.
 - Redis holds the short shared state: the sessions, the presence, the directory of the layers and the chat.
   PostgreSQL holds the durable data, as the accounts, the characters and the items.
@@ -57,16 +58,21 @@ does not serve its meaning, the name is wrong, and the name changes.
 - The authority of a state is the one process that decides it. The authority of the state of a layer is its writer. A
   client is never an authority.
 - An intent is what a client asks for its player, as a move or the use of an item. The server checks it and decides
-  what it changes. An intent is never a fact of the world.
-- A zone is a part of the map of a world. It holds no state of its own: its layers hold it.
-- A layer is one full copy of a zone in a shard, with its own state, its own players and its own cap of players. Each
+  what it changes. An intent is never a fact of the game.
+- A zone is a part of the map of the game. It holds no state of its own: its layers hold it.
+- A layer is one full copy of a zone in a realm, with its own state, its own players and its own cap of players. Each
   layer has exactly one writer, and two processes never write the state of one layer.
-- A shard is one independent world, with its own zones and layers, its own directory, its own queue and its own
-  players. A player of one shard never meets a player of another, and more shards hold more players.
+- A realm is one independent world, with its own zones and layers, its own directory, its own queue and its own players.
+  A player of one realm never meets a player of another, and more realms hold more players. Each character belongs to
+  exactly one realm. The identity of a realm is its id and its name. Its region, its language and its type of rules are
+  attributes that the client shows: any combination is valid, and none of them names a realm.
+- The level of population of a realm is low, medium, high or full. One function computes it from the count of the
+  admitted players of the realm and its cap, never from the count of its characters, as `docs/architecture.md` says. A
+  realm at the level full makes no new character, and a character that stands in it still logs in through its queue.
 - The gateway is stateless: all that it reads, it reads from Redis or from the message. A state that a gateway keeps
   is a defect.
 - A session proves that a client signed in. The presence says which player is online, and where. The directory says
-  which layers each zone runs in each shard, and which process writes each layer. Redis holds all three, and the chat.
+  which layers each zone runs in each realm, and which process writes each layer. Redis holds all three, and the chat.
 - Durable data outlives each process and each restart, and PostgreSQL holds it. Short state lives in Redis, and the
   game can lose it and make it again.
 - Deterministic means that the same state and the same inputs give the same result on the server and on each client.
@@ -205,20 +211,21 @@ fix what your change broke, and report what was broken before.
   `MMO_LOCAL_GATEWAY_PORT` and `MMO_LOCAL_PG_BIN` change the folder, the ports and the place of the programs of
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
-  `MMO_LOCAL_SHARDS` (1) sets the count of shards, `MMO_LOCAL_SHARD_CAP` (100) the cap of each shard and
+  `MMO_LOCAL_REALMS` (1) sets the count of realms, `MMO_LOCAL_REALM_CAP` (100) the cap of each realm and
   `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, and `MMO_LOCAL_ZONES` (1) the count of zones, each on the next square
-  of one row of the map. The stack runs a login service and a pool of layer writers for each shard, the writers on the
-  ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the shards, and their report
-  gives the layers that opened in each shard and the players on each. Set the same `MMO_LOCAL_SHARDS` for `bots` as for
-  `start`. `sh script/report.sh <report> <count> <shards> [<waiting> [<recover>]]` reads that report and fails on a bot
-  that did not play or wait in the queue, on a layer over its cap, on a shard with too few layers, on a queue that
+  of one row of the map. The stack runs a login service and a pool of layer writers for each realm, the writers on the
+  ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the realms, and their report
+  gives the layers that opened in each realm and the players on each. Set the same `MMO_LOCAL_REALMS` for `bots` as for
+  `start`. `sh script/report.sh <report> <count> <realms> [<waiting> [<recover>]]` reads that report and fails on a bot
+  that did not play or wait in the queue, on a layer over its cap, on a realm with too few layers, on a queue that
   holds another count of bots than `<waiting>`, admits out of its order or gives no place each 7 s, and, when
   `<recover>` is 1, on a bot that did not play again in time or on its layer. `MMO_BOTS_WAITING` and
   `MMO_BOTS_RECOVER_SECONDS` set those two rules for the bots. `sh script/local.sh fault <gateway|keeper|writer>
   [seconds]` ends one process of the running stack with KILL, waits, and starts it again, `sh script/local.sh versions`
   prints the version of the save of each character, and `sh script/local.sh players` the players that the directory
   counts. `sh script/faults.sh <writer|gateway|keeper> <count> <log>` runs stage 6 for one fault on that stack. No
-  stage and no test runs more than 500 bots.
+  stage and no test runs more than 500 bots. On a machine of the owner, a run uses layers of cap 5, the least cap of a
+  layer, realms of cap 20 and 50 bots at most.
   `MMO_LOCAL_PROFILE=release` builds and runs the release profile, which the numbers of `docs/architecture.md` need.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole, but for
   `crates/mmo-client/src/window.rs`, the one file that needs a window, which `.cargo/config.toml` leaves out. The tests of `mmo-render`

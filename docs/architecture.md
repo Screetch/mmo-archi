@@ -11,8 +11,8 @@ load test of section 12 must prove each number again with the crates of the game
 
 | Target | Value |
 | --- | --- |
-| Players online in the game at the same time | 10000, in 2 shards |
-| Players in one shard, cap | 5000 |
+| Players online in the game at the same time | 10000, in 2 realms |
+| Players in one realm, cap | 5000 |
 | Players in one layer, cap | 500 |
 | Rate of the simulation | 20 ticks each second (50 ms) |
 | Entities that one player sees, cap | 64 |
@@ -22,7 +22,7 @@ load test of section 12 must prove each number again with the crates of the game
 | Time until play starts again after a layer writer stops | 10 s (estimate) |
 | Data that the game loses when a gateway stops | none |
 
-The game grows by layers and shards (section 6). More layers hold a crowd in one zone, and more shards hold more
+The game grows by layers and realms (section 6). More layers hold a crowd in one zone, and more realms hold more
 players.
 
 ## 2. The processes
@@ -49,25 +49,25 @@ flowchart LR
   A1 -. reads .-> P
 ```
 
-A1 and A2 are two layers of the zone A, and B1 is a layer of the zone B, in one shard. Each process is the binary of
-one crate. Each link is QUIC (section 4). The process manager of the operator starts each process and starts it again
-when it stops. The directory is not a process: it is data in Redis, which the scripts of section 6 change, and each
-layer writer writes the entry of its own layer. One PostgreSQL, one Redis, one keeper, the login services and the
-gateways serve all the shards, and each layer writer serves one shard.
+A1 and A2 are two layers of the zone A, and B1 is a layer of the zone B, in one realm. Each process is the binary of one
+crate. Each link is QUIC (section 4). The process manager of the operator starts each process and starts it again when
+it stops. The directory is not a process: it is data in Redis, which the scripts of section 6 change, and each layer
+writer writes the entry of its own layer. One PostgreSQL, one Redis, one keeper and the gateways serve all the realms,
+and each copy of the login service and each layer writer serves one realm.
 
 | Process | It alone writes | It reads | When it stops |
 | --- | --- | --- | --- |
-| Login service | the accounts, the new characters, the sessions, the caps of each shard, and the queue and the set of admitted players of each shard | PostgreSQL, Redis | Another copy serves the clients. The queue stays in Redis. |
+| Login service | the accounts, the new characters, the sessions, the entry of its realm, and the queue and the set of admitted players of its realm | PostgreSQL, Redis | Another copy serves the clients. The queue stays in Redis. |
 | Gateway | nothing | Redis, the message | Its clients connect to another gateway. The game loses no data. |
-| Layer writer | the state of its layer, its entry in the directory, the times of its ticks, the presence of its players | Redis, PostgreSQL, the messages of its players | An idle writer of the shard takes the layer in about 10 s. Players lose 10 s of play at most. |
+| Layer writer | the state of its layer, its entry in the directory, the times of its ticks, the presence of its players | Redis, PostgreSQL, the messages of its players | An idle writer of the realm takes the layer in about 10 s. Players lose 10 s of play at most. |
 | Keeper | the saves of the characters, the items and the epoch of each layer in PostgreSQL | the save batches | The layer writers keep the dirty state and send it again. No save is lost. |
 
 ### The login service
 
 The login service makes the accounts and the characters, checks a name and a password, and gives a session. It owns the
-admission queue of section 8. It keeps
-in its memory nothing that a client needs. Each copy reads and writes Redis, so any copy serves any client. The operator
-runs two copies or more.
+admission queue of section 8. It keeps in its memory nothing that a client needs. The operator gives each copy one realm
+in its config, and runs two copies or more for each realm. Each copy reads and writes Redis, so any copy of a realm
+serves any client of that realm, and any copy lists all the realms.
 
 A password goes in the table `accounts` as an argon2id hash in the PHC format, with 19 MiB of memory, 2 passes and 1
 lane. One check took 9.8 ms on one core (section 7). One address sends at most 5 failed logins each minute for one
@@ -76,9 +76,9 @@ password cannot lock the owner of the account out. One address makes at most 5 a
 new account holds 8 characters at least and 128 bytes at most. A try with a password that breaks this rule makes no
 account, and it counts for no limit. A login checks no length, so an older account signs in.
 
-After a login, the player selects a character. The login service reads the characters of the account in the shard of
+After a login, the player selects a character. The login service reads the characters of the account in the realm of
 the login. When the player selects one, it runs the placement of section 6 for the zone of the character, and writes
-the session `session:{token}` with the account, the character, the shard, the zone and the layer that the placement
+the session `session:{token}` with the account, the character, the realm, the zone and the layer that the placement
 gives.
 The token is 32 random bytes
 from the random source of the system. The login service refuses a new session while the presence of the account stands,
@@ -87,12 +87,12 @@ so a player never holds two copies of one character.
 ### The gateway
 
 The gateway ends the QUIC connection of a client, and checks the session in Redis when the connection opens. It keeps
-the account and the shard of the session with the connection, since a player never changes its shard in a session.
+the account and the realm of the session with the connection, since a player never changes its realm in a session.
 It joins the client to the layer that the presence of the player names, when a layer writer holds the character of the
-session in the shard of the session, and else to the layer of the session. A move or a hand-off takes a player out of
+session in the realm of the session, and else to the layer of the session. A move or a hand-off takes a player out of
 the layer of its login, so a client that attaches again after it comes back to the layer that holds its player. It
-sends each message to the writer of the layer that the message names, in the shard of the connection. It keeps only
-its open connections and a copy of the directory of each shard. It can drop the copy at any time and read it again
+sends each message to the writer of the layer that the message names, in the realm of the connection. It keeps only
+its open connections and a copy of the directory of each realm. It can drop the copy at any time and read it again
 from Redis. It reads it again at each message on the channel `directory`, and each 5 s.
 
 Each datagram of a client names the zone and the layer that the client is in (section 4), so the gateway keeps no
@@ -114,16 +114,16 @@ The layer writer is the one authority of the state of its layer. It runs the tic
 sends each snapshot. It moves a player to another zone with the hand-off of section 6, and to another layer of its
 zone with the move of section 6.
 
-The operator gives each writer one shard. A writer that holds no layer is idle, and section 6 says how it takes a
+The operator gives each writer one realm. A writer that holds no layer is idle, and section 6 says how it takes a
 layer and how it gives it back.
 
 A writer claims its layer in two steps. First it asks the keeper for the next epoch of the layer, which the keeper
-writes in PostgreSQL. Then it writes the entry `writer:{s}:{z}:{l}` in Redis with its address and its epoch. The entry
+writes in PostgreSQL. Then it writes the entry `writer:{r}:{z}:{l}` in Redis with its address and its epoch. The entry
 has a lease of 3 s, which the writer renews each second. Each save of the writer carries its epoch, and the keeper
 refuses a save with an old epoch. So a writer that lost its layer, but still runs, writes nothing.
 
 When a writer stops, its lease ends after 3 s, and its layer stays in the directory with no writer. An idle writer of
-the shard claims it with the next epoch. It reads the presence keys of the layer in Redis, and loads the last save of
+the realm claims it with the next epoch. It reads the presence keys of the layer in Redis, and loads the last save of
 each of those players from PostgreSQL. The gateways see the change of the directory and send the players to the new
 writer, which sends each player a full snapshot. The process manager starts the stopped writer again, and it is idle.
 
@@ -135,7 +135,7 @@ the keeper refuses a batch of its epoch or when the entry of its layer holds a n
 ### The keeper
 
 The keeper is the one writer of the game data in PostgreSQL: the saves of the characters, the items and the epoch of
-each layer, for all the shards. The login service only adds a new character, at version 0, which no layer writer holds
+each layer, for all the realms. The login service only adds a new character, at version 0, which no layer writer holds
 yet. The keeper runs the migrations when it starts (section 9). It receives the save batches of the layer writers,
 writes each batch in one transaction, and acknowledges it. One keeper keeps the count of connections to PostgreSQL
 small, 16 at most.
@@ -154,38 +154,40 @@ save.
 
 ## 3. The stores
 
-Redis holds the short shared state of all the shards. The game can lose it and make it again: the players log in
-again, the login service writes the caps of each shard again, and the layer writers write the directory and the
-presence again.
+Redis holds the short shared state of all the realms. The game can lose it and make it again: the players log in again,
+the login service writes the entry of each realm again, and the layer writers write the directory and the presence
+again.
 
 | Key | Type | Writer | Life | Content |
 | --- | --- | --- | --- | --- |
-| `session:{token}` | hash | login service | 24 h, or until logout | account, character, shard, zone, layer |
-| `presence:{account}` | hash | layer writer | 30 s, renewed each 10 s | character, shard, zone, layer, epoch |
-| `shard:{s}` | hash | login service | none | `name`, `cap` and `layer_cap`: the name of the shard, its cap of admitted players and the cap of each of its layers |
-| `layers:{s}` | hash | the script `place` adds a layer, the script `close` removes it, and its writer writes its count | none | each layer of the shard, as the field `{z}:{l}`, with its count of players |
-| `draining:{s}` | set | the scripts `drain` and `close` | none | the layers of the shard that drain, as `{z}:{l}` |
-| `placed:{s}:{z}:{l}` | sorted set | the script `place` adds a place, and the script `lease` removes it | 60 s for each place | the accounts that a placement gave the layer and whose players its writer did not take yet |
-| `writer:{s}:{z}:{l}` | hash | layer writer | 3 s, renewed each 1 s | address, epoch |
-| `ticks:{s}:{z}:{l}` | hash | layer writer | 10 minutes, renewed each 1 s | the count of the ticks of the writer in each bucket of 250 µs, from 0 to 99.75 ms, which the load test reads |
-| `directory` | channel | the scripts of section 6 and the layer writer | none | the shard, the zone and the layer of each layer that opened, closed, started to drain or changed its writer |
-| `shard:{s}:queue` | sorted set | login service | none | the queued accounts, by the time that each entered |
-| `shard:{s}:admitted` | sorted set | login service | none | the admitted accounts, by the end of their slot |
-| `shard:{s}:admissions` | sorted set | login service | 10 minutes | the admitted accounts, by the time of their admission |
+| `session:{token}` | hash | login service | 24 h, or until logout | account, character, realm, zone, layer |
+| `presence:{account}` | hash | layer writer | 30 s, renewed each 10 s | character, realm, zone, layer, epoch |
+| `realms` | set | login service | none | the id of each realm |
+| `realm:{r}` | hash | login service | none | the entry of the realm: `name`, `region`, `language`, `rules` and `login`, its name, its three attributes and the address of its login service, and `cap` and `layer_cap`, its cap of admitted players and the cap of each of its layers |
+| `layers:{r}` | hash | the script `place` adds a layer, the script `close` removes it, and its writer writes its count | none | each layer of the realm, as the field `{z}:{l}`, with its count of players |
+| `draining:{r}` | set | the scripts `drain` and `close` | none | the layers of the realm that drain, as `{z}:{l}` |
+| `placed:{r}:{z}:{l}` | sorted set | the script `place` adds a place, and the script `lease` removes it | 60 s for each place | the accounts that a placement gave the layer and whose players its writer did not take yet |
+| `writer:{r}:{z}:{l}` | hash | layer writer | 3 s, renewed each 1 s | address, epoch |
+| `ticks:{r}:{z}:{l}` | hash | layer writer | 10 minutes, renewed each 1 s | the count of the ticks of the writer in each bucket of 250 µs, from 0 to 99.75 ms, which the load test reads |
+| `directory` | channel | the scripts of section 6 and the layer writer | none | the realm, the zone and the layer of each layer that opened, closed, started to drain or changed its writer |
+| `realm:{r}:queue` | sorted set | login service | none | the queued accounts, by the time that each entered |
+| `realm:{r}:admitted` | sorted set | login service | none | the admitted accounts, by the end of their slot |
+| `realm:{r}:admissions` | sorted set | login service | 10 minutes | the admitted accounts, by the time of their admission |
 | `queued:{account}` | string | login service | 120 s, renewed by the client | the mark that a queued client still waits |
 | `admit:{account}` | string | login service | 60 s | the mark that the account has a slot |
 | `resume:{token}` | string | login service | 120 s | the account of a queued client that can come back |
 | `failed:{address}:{name}` | string | login service | 60 s | the count of the failed logins of a name from an address in the last minute |
 | `guessed:{address}` | string | login service | 10 minutes | the count of the failed logins of an address over all names in the last 10 minutes |
 | `created:{address}` | string | login service | 1 h | the count of the accounts that an address made in the last hour |
-| `chat:{s}:{channel}` | stream and channel | layer writer | the last 1000 lines | the chat of a channel of the shard |
+| `chat:{r}:{channel}` | stream and channel | layer writer | the last 1000 lines | the chat of a channel of the realm |
 
-`{s}` is the id of a shard, `{z}` the id of a zone and `{l}` the number of a layer, each in decimal. A token goes in a key as 64 hex digits in lower case. An address goes in a key as its address of IPv4, or as
-its network of /64 for IPv6, since one host commonly holds the whole network. The module `keys` of `mmo-store` makes
-each key, so no other crate writes the name of a key.
+`{r}` is the id of a realm, `{z}` the id of a zone and `{l}` the number of a layer, each in decimal. A token goes in a
+key as 64 hex digits in lower case. An address goes in a key as its address of IPv4, or as its network of /64 for IPv6,
+since one host commonly holds the whole network. The module `keys` of `mmo-store` makes each key, so no other crate
+writes the name of a key.
 
-The layer writer sends the chat lines of its players to the channels of its shard in Redis. It also sends to its
-players the lines of each channel of the shard that they read. So the gateway keeps no list of channels.
+The layer writer sends the chat lines of its players to the channels of its realm in Redis. It also sends to its
+players the lines of each channel of the realm that they read. So the gateway keeps no list of channels.
 
 PostgreSQL holds the durable data. Section 9 gives the tables.
 
@@ -201,9 +203,9 @@ A client first opens one connection to the login service, with one stream. It se
 sequenceDiagram
   participant C as client
   participant L as login service
-  C->>L: Shards
-  L-->>C: Shards
-  C->>L: NewAccount or Login, with a shard
+  C->>L: Realms
+  L-->>C: Realms
+  C->>L: NewAccount or Login, with a realm
   L-->>C: Queued, then Characters when the account gets a slot
   C->>L: NewCharacter
   L-->>C: Characters
@@ -211,17 +213,21 @@ sequenceDiagram
   L-->>C: Session
 ```
 
-- `Shards` gives the list of the shards, each with its id, its name, its count of admitted players, its cap and the
-  length of its queue.
-- `NewAccount` makes an account, and `Login` signs in to one. Each names a shard, and enters the queue of that shard.
+- `Realms` gives the list of the realms, each with its id, its name, its region, its language, its type of rules, its
+  level of population, the length of its queue and the address of its login service. Any copy of the login service
+  answers it. The client shows each realm with its three attributes and its level, and the player chooses one (section
+  6).
+- `NewAccount` makes an account, and `Login` signs in to one. The client sends each of them to the address of the login
+  service of the realm that the player chose. Each names that realm, and enters its queue.
 - While the account waits, the client sends `Wait` each 5 s. On a new connection, it comes back to its place with
   `Resume`.
-- When the account has a slot, `Characters` gives the characters of the account in the shard of the login,
-  `NewCharacter` makes a character in that shard, and `Select` gives the session token that the client gives to a
+- When the account has a slot, `Characters` gives the characters of the account in the realm of the login,
+  `NewCharacter` makes a character in that realm, and `Select` gives the session token that the client gives to a
   gateway.
-- A refusal gives its cause: a wrong password, a password that is too short or too long, too many tries, a name that
-  is taken or that is not valid, a shard that does not stand, an account that is online, a character of another
-  account or of another shard, an account that holds 8 characters already, or a place or a slot that ended.
+- A refusal gives its cause: a wrong password, a password that is too short or too long, too many tries, a name that is
+  taken or that is not valid, a realm that does not stand or that the copy does not serve, a realm at the level full,
+  which makes no new character, an account that is online, a character of another account or of another realm, an
+  account that holds 8 characters already, or a place or a slot that ended.
 
 Then the client opens one connection to a gateway:
 
@@ -250,11 +256,11 @@ The state goes on the wire in integers. A position is in centimetres as an `i32`
 an `i16`, and a direction of view as a `u16`. These integers made a full snapshot 48 percent smaller than `f32` values
 (1073 bytes against 2081 bytes for 64 entities).
 
-The protocol has one version, `PROTOCOL: u16` in `mmo-protocol`. The first message of each side of a link is a
-hello: the version as a `u16`, then the build as a `u32`, both little-endian and with no bitcode, so each version reads
-the version of each other. A side accepts only its own version, and else answers with its own hello, which carries the
-version that it needs. The links between two servers carry the same hello. A change of the protocol needs a restart of the world: the operator stops the world,
-deploys each process, and starts it again.
+The protocol has one version, `PROTOCOL: u16` in `mmo-protocol`. The first message of each side of a link is a hello:
+the version as a `u16`, then the build as a `u32`, both little-endian and with no bitcode, so each version reads the
+version of each other. A side accepts only its own version, and else answers with its own hello, which carries the
+version that it needs. The links between two servers carry the same hello. A change of the protocol needs a restart of
+the game: the operator stops each process, deploys it, and starts it again.
 
 A datagram of a client is `{ zone, layer, ack, inputs }`. It holds the zone and the layer of the player, the last tick
 of a snapshot that the client received, and the last 3 inputs. The 3 inputs let the writer recover a lost datagram.
@@ -297,71 +303,148 @@ them.
 The client runs the same step of `mmo-collide` on its own inputs to show its player at once. When a snapshot comes, the
 client takes the state of the server at the acknowledged tick and applies its later inputs again.
 
-## 6. The zones, the layers and the shards
+## 6. The zones, the layers and the realms
 
-The map of a world is cut into zones. A zone is a square of 1024 m. It holds no state of its own: its layers hold it.
-Each zone stands on one square of the map, which the table `zones` holds: its column grows toward the east, along x,
-and its row toward the north, along z. Each zone has its own coordinates, from 0 to 1024 m on x and on z. Two zones on
-next squares share a border, and each is the next zone of the other across it. A zone that stands on no square has no
-next zone.
+The map of the game is cut into zones, and each realm runs all of them. A zone is a square of 1024 m. It holds no state
+of its own: its layers hold it. Each zone stands on one square of the map, which the table `zones` holds: its column
+grows toward the east, along x, and its row toward the north, along z. Each zone has its own coordinates, from 0 to 1024
+m on x and on z. Two zones on next squares share a border, and each is the next zone of the other across it. A zone that
+stands on no square has no next zone.
 
-### The shard
+### The realm
 
-A shard is one independent world. It has its own zones and layers, its own directory, its own queue and its own
-players. A player of one shard never sees and never meets a player of another. Each character belongs to one shard,
-which its row in PostgreSQL holds, and the client names the shard at each login (section 4). Each shard adds its cap
-of players, so more shards hold more players.
+A realm is one independent world. It has its own zones and layers, its own directory, its own queue and its own players.
+Each realm runs every zone of the map, and shares no state of a zone with another realm. A player of one realm never
+sees and never meets a player of another. Each character belongs to exactly one realm, which its row in PostgreSQL
+holds. The player chooses the realm at login, from the list of the realms that the client shows (section 4). Each realm
+adds its cap of players, so more realms hold more players.
 
-The login service finds the shard of a character in its row. It lists, selects and places only the characters whose
-row holds the shard of the login, and it writes that shard in the row of each new character. So a character plays only
-in its own shard, and a client that selects a character of another shard gets the refusal of a character that is not
-its own.
+The identity of a realm is its id and its name. The id is the number that the operator gives the realm, and no two
+realms hold one name. Each realm also has three attributes:
 
-The shards share the accounts, PostgreSQL, Redis, the keeper, the login services and the gateways. Each key of Redis
-that belongs to a shard holds the id of the shard (section 3). The hash `shard:{s}` holds the caps of the shard:
-`cap`, the count of the players that its queue admits (section 8), and `layer_cap`, the count of the players of each
-of its layers. The login service writes it from its config when it starts, and no other process writes it.
+- The region, as Europe or America.
+- The language, as French or English.
+- The type of rules, as normal, player against player, or role play.
+
+Every combination of the three attributes is valid. Several realms can hold the same three attributes, as three realms
+of Europe, French and normal, and two realms can differ in one, two or three of them. So no part of the game finds a
+realm by its attributes. The type of rules is a label that the client shows, and nothing more: no rule of the game reads
+it, since the game has no combat yet.
+
+The entry of a realm has one home: the config of its login service. The operator gives each copy of the login service
+one realm, with its id, its name, its three attributes, the address of its login service, its caps and the start of its
+new characters. At each run of the admission script (section 8), each copy writes that entry in the hash `realm:{r}` and
+the id in the set `realms`, so a Redis that lost them holds them again. The message `Realms` reads that set and each
+hash, and gives them to the client (section 4). No other process writes the entry, and no process keeps a copy of the
+entry of another realm.
+
+The login service finds the realm of a character in its row. It lists, selects and places only the characters whose row
+holds the realm of the login, and it writes that realm in the row of each new character. So a character plays only in
+its own realm, and a client that selects a character of another realm gets the refusal of a character that is not its
+own.
+
+The realms share the accounts, PostgreSQL, Redis, the keeper and the gateways. Each realm has its own copies of the
+login service and its own pool of layer writers. Each key of Redis that belongs to a realm holds the id of the realm
+(section 3). The hash `realm:{r}` holds the caps of the realm with its entry: `cap`, the count of the players that its
+queue admits (section 8), and `layer_cap`, the count of the players of each of its layers.
+
+### The level of population
+
+The client shows each realm with its level of population: low, medium, high or full. The level comes from two numbers
+alone: the count `a` of the admitted players of the realm, who are online or have a slot, as `realm:{r}:admitted` holds
+them, and the cap `c` of the realm. It never comes from the count of the characters that the realm holds.
+
+| Level | Rule | With a cap of 100 | With a cap of 20 |
+| --- | --- | --- | --- |
+| low | 5 × a < 2 × c | 0 to 39 | 0 to 7 |
+| medium | 2 × c ≤ 5 × a < 4 × c | 40 to 79 | 8 to 15 |
+| high | 4 × c ≤ 5 × a, and a < c | 80 to 99 | 16 to 19 |
+| full | c ≤ a | 100 | 20 |
+
+The one home of the rule is the function `Population::of(admitted, cap)` of `mmo-protocol`, beside the enum `Population`
+that `Realms` carries. The login service calls it when it lists the realms and when it makes a character, and the
+program of the bots calls it to check the level that the list gives. The client shows the level that it gets, and
+computes none. The rule uses integers alone, so each caller gets the same level from the same numbers.
+
+A realm at the level full makes no new character. The login service refuses `NewCharacter` there with a cause of its
+own, and the client shows that cause: the realm is full, so the player makes the character in another realm. A character
+that stands in a full realm still logs in to it, through its queue. The level is full exactly when the realm holds its
+cap of admitted players, which is when its queue admits no more, so the queue does not change (section 8).
+
+### The transfer of a character
+
+A transfer moves a character from its realm to another realm. It is a later feature: no code serves it yet. This part
+says what it needs, so that no choice of today blocks it.
+
+These choices keep the transfer possible. A change that breaks one of them needs a new plan for the transfer:
+
+- An account belongs to no realm. It plays in each realm, and its cap of 8 characters counts over all the realms, so a
+  transfer does not change the count.
+- The id of a character is unique over all the realms, and a transfer keeps it. Each row that belongs to a character, as
+  a save or a later item, refers to the character by its id alone, and never by its realm.
+- The name of a character is unique over all the realms, as the table `characters` keeps it, so a character that arrives
+  in a realm never meets a character of the same name.
+- The realm of a character is one column, `characters.realm_id`, so a transfer changes one value.
+- Each realm runs the same map, so a character keeps its zone and its position.
+- The version of a save only grows, and the keeper writes a save only when the row of the character holds the realm of
+  the batch (section 9). So after a transfer, a layer writer of the old realm that still holds an old copy of the
+  character writes nothing.
+- The sessions, the presence, the places and the slots are short state in Redis, which ends by itself. The presence of
+  an account holds one character over all the realms, so an account plays one character at a time.
+
+The transfer must add or change these parts:
+
+- A message of the client that asks for the transfer, and its refusals.
+- A check that the account is offline: no presence, no session, and no place and no slot in the queue of a realm. The
+  login service refuses a new session during the transfer, as it does while the presence of the account stands.
+- One step in PostgreSQL, in one transaction: it changes `realm_id` and adds 1 to the version of the character. The
+  keeper is the one writer of the saves, so either the keeper runs that step, or the feature gives the login service
+  that right in this document first.
+- The rule of a full realm: a realm at the level full takes no character by a transfer, as it makes no new character.
+- The items, when the game has them: they move with their character, since they refer to its id alone. The lines of the
+  chat stay in the old realm.
 
 ### The layer
 
-A layer is one full copy of a zone in a shard: the same map, with its own state, its own players, its own writer and
-its own cap. A zone runs one or more layers in a shard while players are in it, and none when no player is in it. A
+A layer is one full copy of a zone in a realm: the same map, with its own state, its own players, its own writer and
+its own cap. A zone runs one or more layers in a realm while players are in it, and none when no player is in it. A
 player of one layer does not see the players of the other layers of the zone. Each layer has exactly one writer, and
 two processes never write the state of one layer.
 
-The number of a layer is the least number from 1 up that its zone does not use in its shard when the layer opens.
-Redis keys the layer `l` of the zone `z` of the shard `s` as `{s}:{z}:{l}`. The directory of a shard is three keys:
+The number of a layer is the least number from 1 up that its zone does not use in its realm when the layer opens.
+Redis keys the layer `l` of the zone `z` of the realm `r` as `{r}:{z}:{l}`. The directory of a realm is three keys:
 
-- `layers:{s}` holds each layer of the shard, as the field `{z}:{l}`, with its count of players.
-- `draining:{s}` holds the layers of the shard that drain.
-- `writer:{s}:{z}:{l}` holds the address and the epoch of the writer of a layer, with a lease of 3 s. A layer whose
+- `layers:{r}` holds each layer of the realm, as the field `{z}:{l}`, with its count of players.
+- `draining:{r}` holds the layers of the realm that drain.
+- `writer:{r}:{z}:{l}` holds the address and the epoch of the writer of a layer, with a lease of 3 s. A layer whose
   lease ended has no writer.
 
-A layer is open when it stands in `layers:{s}`, has a writer, and does not drain.
+A layer is open when it stands in `layers:{r}`, has a writer, and does not drain.
 
-The cap of a layer is the `layer_cap` of its shard, 500 at the start, and 5 at least. The writer of a layer reads the
+The cap of a layer is the `layer_cap` of its realm, 500 at the start, and 5 at least. The writer of a layer reads the
 cap when it claims the layer, and keeps it for the life of the layer. The writer is the one authority of the count of
 its layer: it refuses an attach, a hand-off or a move into its layer when the layer holds its cap. It writes its count
-in `layers:{s}` at each change and each second. The scripts below read that count. When a script races a change of a
+in `layers:{r}` at each change and each second. The scripts below read that count. When a script races a change of a
 count and gives a full layer, the writer of that layer refuses the player, and the caller runs the script again after
 1 s.
 
 ### The scripts of the directory
 
 Five Lua scripts of `mmo-store`, which its `Directory` runs, change the directory. Redis runs each one as one atomic
-step, so two callers never take one decision twice. Each script but `lease` sends the shard, the zone and the layer that it changed on the channel `directory`.
+step, so two callers never take one decision twice. Each script but `lease` sends the realm, the zone and the layer that
+it changed on the channel `directory`.
 
 | Script | Who runs it | What it does |
 | --- | --- | --- |
 | `place` | the login service and the layer writer | gives the layer that a player enters in a zone, or answers to wait and opens a layer |
-| `claim` | an idle layer writer, each second | gives the writer the layer of its shard with no writer that has the lowest zone, then the lowest number, or nothing, and writes the lease of that layer with the epoch 0, so no other writer takes it |
+| `claim` | an idle layer writer, each second | gives the writer the layer of its realm with no writer that has the lowest zone, then the lowest number, or nothing, and writes the lease of that layer with the epoch 0, so no other writer takes it |
 | `lease` | the writer of a layer, each second and at each change of its count | renews the lease of the layer with the epoch and the address of the writer, writes its count, and ends the place of each player that it took, unless the lease holds a newer epoch |
 | `drain` | the writer of a layer | marks the layer as draining when the other open layers of its zone have room for all its players, after the players of the layers of the zone that drain already |
 | `close` | the writer of a layer | removes the layer when it holds no player and its lease holds the epoch of the writer |
 
 ### The placement
 
-`place` gets the shard, the zone and the account, and the layer that the player leaves when it crosses from another
+`place` gets the realm, the zone and the account, and the layer that the player leaves when it crosses from another
 zone or moves out of a draining layer. A layer has room when its count is under its cap. Then `place` gives the first
 of these:
 
@@ -370,9 +453,9 @@ of these:
 2. The open layer of the zone with the most players that has room, and of these the lowest number. So a full layer
    stays full, and the layer with the fewest players empties.
 3. Else wait. When no layer of the zone stands with no writer, `place` also opens a layer: it adds the least free
-   number of the zone to `layers:{s}` with a count of 0, for a writer to claim.
+   number of the zone to `layers:{r}` with a count of 0, for a writer to claim.
 
-The layer that `place` gives holds the place of the player in `placed:{s}:{z}:{l}` for 60 s, until its writer takes
+The layer that `place` gives holds the place of the player in `placed:{r}:{z}:{l}` for 60 s, until its writer takes
 the player and ends the place with its next `lease`. The count of a layer for `place` is the count of its writer and
 its places, so placements that come faster than the writer writes its count never pass the cap.
 
@@ -381,18 +464,18 @@ slot of the account, and the source writer keeps the player at the border.
 
 ### The pool of writers
 
-The operator gives each layer writer one shard. For each shard, the process manager runs one writer for each zone, one
-more for each `layer_cap` players of the `cap` of the shard, and 2 more for the recovery. A writer that holds no layer
+The operator gives each layer writer one realm. For each realm, the process manager runs one writer for each zone, one
+more for each `layer_cap` players of the `cap` of the realm, and 2 more for the recovery. A writer that holds no layer
 is idle, and runs `claim` each second. When `claim` gives it a layer, it claims the epoch of the layer as section 2
 says, and becomes its writer. A new layer and the layer of a writer that stopped take the same path, so the opening of
-a layer and its recovery are one mechanism. When no writer of the shard is idle, a new layer waits for one, and so do
+a layer and its recovery are one mechanism. When no writer of the realm is idle, a new layer waits for one, and so do
 the players that `place` sends to it.
 
 ### The drain and the close
 
 A layer drains when its players fit in the other layers of its zone, so that a zone runs no more layers than its
 players need. The writer of a layer that held at most a quarter of its cap for 60 s runs `drain`, and runs it again
-each second until the layer drains or holds more players. `drain` adds the layer to `draining:{s}` when the other
+each second until the layer drains or holds more players. `drain` adds the layer to `draining:{r}` when the other
 open layers of the zone have room for all its players together, after the players of the layers of the zone that drain
 already, and else does nothing. The count of a layer holds its places, as for `place`, so two layers that drain at the
 same time never send more players to the open layers than their room. A draining layer takes no new player: its
@@ -405,7 +488,7 @@ The writer moves a player only at a safe point: a tick at which the player sent 
 tick is a safe point.
 
 The writer of a layer that held no player for 30 s, the time that it keeps the player of a closed link, runs `close`.
-`close` removes the layer from `layers:{s}` and from `draining:{s}`, and deletes its lease, when its count is still 0
+`close` removes the layer from `layers:{r}` and from `draining:{r}`, and deletes its lease, when its count is still 0
 and its lease holds the epoch of the writer. The writer is then idle again, and the number of the layer is free for the
 next layer of the zone.
 
@@ -420,10 +503,10 @@ writer tries again a second later. The client gets `Moved { zone, layer }` with 
 
 The zone across a border is the zone on the next square of the map on that side. A zone has four borders: x = 0 is its
 west border, x = 1024 m its east border, z = 0 its south border and z = 1024 m its north border. A border with no zone
-beyond it, as no square of the map holds one, is the edge of the world, and its floor ends there. A writer reads the
-four zones across its borders from the store, with `Store::neighbours`, when it takes a layer. No rule of the order of
-the ids gives a neighbour. A player past two borders at once crosses the border on x first, and the writer of the
-target then hands it on across the border on z.
+beyond it, as no square of the map holds one, is the edge of the map, and its floor ends there. A writer reads the four
+zones across its borders from the store, with `Store::neighbours`, when it takes a layer. No rule of the order of the
+ids gives a neighbour. A player past two borders at once crosses the border on x first, and the writer of the target
+then hands it on across the border on z.
 
 Each writer sends the quantized state of its entities within 48 m of a border, each tick, to the writer of the layer
 with the same number in the zone across that border, when that layer stands. It sends `Edge { zone, entities }` on a
@@ -497,7 +580,7 @@ after 20 ticks of warm-up. "Town" puts half of the players in one square of 128 
 A local PostgreSQL 18 updated 2500 rows of a table of 100000 characters in one statement in 5.7 ms to 10.1 ms, over 5
 runs. One check of an argon2id hash took 9.8 ms, the least of 20 runs.
 
-### The budget of a shard of 5000 players
+### The budget of a realm of 5000 players
 
 The tick of a layer writer has 50 ms. Its target is 25 ms at the 99th percentile, so one slow tick does not delay the
 next one.
@@ -514,30 +597,31 @@ runs (section 12). The worst tick of 500 players took 0.34 ms on the M5, and tha
 ms, so the cap has much room. A crowd of more than 500 players in one zone opens more layers, and adds no work to a
 writer.
 
-A shard starts with 8 zones, about 625 players in each, so each zone runs 2 layers.
+A realm starts with 8 zones, about 625 players in each, so each zone runs 2 layers.
 
-| Resource | One player | 5000 players, one shard | Plan |
+| Resource | One player | 5000 players, one realm | Plan |
 | --- | --- | --- | --- |
 | Data down | 5.0 KB/s mean, 18.8 KB/s worst | 25 MB/s mean, 94 MB/s worst | 3 gateways (estimate) |
 | Data up | 1.8 KB/s | 9 MB/s | the same gateways |
 | Layer writers | | 16 layers, and more when crossings open them | a pool of 20 writers: 8 for the zones, 10 for the cap and 2 for the recovery, on 2 hosts of 8 cores (estimate) |
 | Login checks | 9.8 ms once | 49 core-seconds | 2 login services of 4 cores |
-| Saves in PostgreSQL | one row each 10 s | 500 rows/s, 16 batches each 10 s | 1 keeper, 1 primary and 1 replica for all the shards |
-| Redis | 0.1 operations/s | about 1000 operations/s | 1 primary and 1 replica for all the shards |
+| Saves in PostgreSQL | one row each 10 s | 500 rows/s, 16 batches each 10 s | 1 keeper, 1 primary and 1 replica for all the realms |
+| Redis | 0.1 operations/s | about 1000 operations/s | 1 primary and 1 replica for all the realms |
 
 The data down is the mean snapshot of 188 bytes, or the worst of 879 bytes, 20 times each second. Each datagram adds
 about 60 bytes of IP, UDP and QUIC headers (estimate). The data up is a datagram of 30 bytes and its headers, 20 times
 each second.
 
-The target of 10000 players runs 2 shards: twice the gateways, the writers and the login services of one shard, with
+The target of 10000 players runs 2 realms: twice the gateways, the writers and the login services of one realm, with
 one keeper, one PostgreSQL and one Redis, which then take 1000 rows/s and about 2000 operations/s (estimate).
 
-### A full shard
+### A full realm
 
-When a shard holds its cap of admitted players, a new login waits in its queue (section 8). When a layer holds its
-cap, its writer refuses an attach, a hand-off and a move into it, and `place` gives another layer or opens one
-(section 6). While no writer claims a new layer, the player waits: the source keeps a player who crosses at the border,
-and the login service keeps the slot of a player who selects a character until `place` gives a layer.
+When a realm holds its cap of admitted players, it is at the level full: a new login waits in its queue (section 8), and
+the realm makes no new character (section 6). When a layer holds its cap, its writer refuses an attach, a hand-off and a
+move into it, and `place` gives another layer or opens one (section 6). While no writer claims a new layer, the player
+waits: the source keeps a player who crosses at the border, and the login service keeps the slot of a player who selects
+a character until `place` gives a layer.
 
 ### More players
 
@@ -545,16 +629,18 @@ and the login service keeps the slot of a player who selects a character until `
    measures it. Above the cap of 64 visible entities, the cost of interest grows with the count of players, not with
    its square.
 2. Add a gateway for each 2500 players.
-3. Add a shard. A shard adds its cap of players, its pool of writers and its gateways, with no change of the code.
+3. Add a realm. A realm adds its cap of players, its pool of writers and its gateways, with no change of the code.
 
 ## 8. The login queue
 
-Each shard has a cap, 5000 at the start, which `shard:{s}` holds (section 6). The set `shard:{s}:admitted` holds each
-admitted account, with the time in milliseconds when its slot ends. The sorted set `shard:{s}:queue` holds each queued
-account, with the time when it entered. An account waits in the queue of the shard that its login names, and holds a
-place or a slot in one shard at most.
+Each realm has a cap, 5000 at the start, which `realm:{r}` holds (section 6). The set `realm:{r}:admitted` holds each
+admitted account, with the time in milliseconds when its slot ends. The sorted set `realm:{r}:queue` holds each queued
+account, with the time when it entered. An account waits in the queue of the realm that its login names, and holds a
+place or a slot in one realm at most. The queue keeps a rush of logins, to the game or to one realm, from a bottleneck,
+and the level of population does not change it: a realm is full exactly when its admitted set holds its cap, and then a
+new login waits.
 
-- Each login enters the queue with `ZADD NX`, also when the shard has a free slot, so no login passes an account that
+- Each login enters the queue with `ZADD NX`, also when the realm has a free slot, so no login passes an account that
   waits. The next run of the script admits it. An account has one place at most, and a client that comes back keeps
   its first place. An account whose presence stands gets no place.
 - A new account enters the queue as a login does. The name of an account holds 3 to 16 letters and digits of ASCII.
@@ -562,21 +648,22 @@ place or a slot in one shard at most.
 - An address makes 5 accounts each hour at most, as `created:{address}` counts them. Each valid try counts,
   also a try with a name that is taken, so the limit also slows a search for the names that exist. An address of IPv6
   counts by its network of /64, since one host often holds the whole network.
-- A new character is made only while its account has a slot, so the cap of the shard limits it as it limits a login.
-  It belongs to the shard of that slot. Its name holds 3 to 16 letters of ASCII, with the first letter in upper case
-  and the rest in lower case. It starts in the zone and at the point that the operator gives to the login service. The
-  client then gets the list of the characters of the account in the shard again. An account holds 8 characters at
-  most over all the shards, and a ninth gets the refusal that says so.
+- A new character is made only while its account has a slot and its realm is under the level full (section 6), so the
+  cap of the realm limits it as it limits a login. It belongs to the realm of that slot. Its name holds 3 to 16 letters
+  of ASCII, with the first letter in upper case and the rest in lower case. It starts in the zone and at the point that
+  the operator gives to the login service. The client then gets the list of the characters of the account in the realm
+  again. An account holds 8 characters at most over all the realms, and a ninth gets the refusal that says so.
 - The client renews `queued:{account}` each 5 s. In the same request it gets its position from `ZRANK` and the length
   of the queue. It also gets an estimate of its wait from the admissions of the last 10 minutes.
-- Each second, each copy of the login service runs one Lua script for each shard, which Redis runs as one atomic step.
-  The script reads the time of Redis. For each admitted account whose slot ended, it extends the slot by 30 s when the
-  presence of the account stands. Else it removes the account. Then it takes from the head of the queue as many
-  accounts as the shard has free slots, and 100 in each second at most over all the copies, as `shard:{s}:admissions`
-  counts them. It skips an account whose `queued:{account}` ended, adds each other account to the admitted set with a
-  slot of 60 s, and writes `admit:{account}`.
+- Each second, each copy of the login service runs one Lua script for its realm, which Redis runs as one atomic step.
+  The script first writes the entry of the realm in `realm:{r}` and its id in `realms` (section 6), then reads the time
+  of Redis. For each admitted account whose slot ended, it extends the slot by 30 s when the presence of the account
+  stands. Else it removes the account. Then it takes from the head of the queue as many accounts as the realm has free
+  slots, and 100 in each second at most over all the copies, as `realm:{r}:admissions` counts them. It skips an account
+  whose `queued:{account}` ended, adds each other account to the admitted set with a slot of 60 s, and writes
+  `admit:{account}`.
 - The copy of the login service that serves the client sees `admit:{account}` and sends the characters of the account
-  in the shard. When the client selects one, the copy runs `place` for the zone of the character (section 6), and runs
+  in the realm. When the client selects one, the copy runs `place` for the zone of the character (section 6), and runs
   it again each second while it answers wait. Then the copy takes `admit:{account}` away, so one slot gives one session
   at most, makes the session with the layer that `place` gave, and gives the token to the client. The client then has
   60 s to reach a gateway. When it does not, its slot ends and goes to the next account.
@@ -588,7 +675,7 @@ entered in the same millisecond keep the fixed order that Redis gives them. Many
 each run is atomic and checks the free slots again. A restart of a login service or of a gateway loses no place, since
 the queue is in Redis. The client logs in again within 120 s with its `resume:{token}`, and needs no new check of its
 password. The limit of 100 admissions each second spreads the loads of characters over time. After a restart of a
-shard, 5000 players enter in 50 s.
+realm, 5000 players enter in 50 s.
 
 ## 9. The persistence
 
@@ -625,7 +712,7 @@ CREATE TABLE characters (
 CREATE INDEX characters_account ON characters (account_id);
 ```
 
-A migration adds the shard of each character and the epoch of each layer, which replaces the epoch of `zones`:
+A migration adds the realm of each character and the epoch of each layer, which replaces the epoch of `zones`:
 
 ```sql
 ALTER TABLE characters ADD COLUMN shard_id integer NOT NULL DEFAULT 1;
@@ -648,8 +735,18 @@ ALTER TABLE zones ADD COLUMN map_column integer, ADD COLUMN map_row integer;
 ALTER TABLE zones ADD CONSTRAINT zones_square UNIQUE (map_column, map_row);
 ```
 
-The id of a shard is the number that the operator gives it in the config of the login service. The first shard is 1,
-so each character that stood before the shards belongs to it. The column `epoch` of `zones` stays until no deployed
+The migration of the layers gave the column of the realm the first name of the realm, `shard_id`. A later migration
+gives it its name in both tables. A rename stops each process that reads the old name, so it goes in a change that needs
+a restart of the game (section 4):
+
+```sql
+ALTER TABLE characters RENAME COLUMN shard_id TO realm_id;
+
+ALTER TABLE layers RENAME COLUMN shard_id TO realm_id;
+```
+
+The id of a realm is the number that the operator gives it in the config of the login service. The first realm is 1,
+so each character that stood before the realms belongs to it. The column `epoch` of `zones` stays until no deployed
 process reads it, as the rule of the migrations below says.
 
 The position is in whole centimetres and the yaw in steps of 1/65536 of a turn, as the step of `mmo-collide` gives them
@@ -659,7 +756,8 @@ goes in the table, and the table refuses a name that is not.
 The migrations are SQL files in `crates/mmo-store/migrations/`, which sqlx runs in the order of their numbers. The
 keeper runs them when it starts, under the lock of sqlx, so two keepers do not run them together. The other processes
 check that the database has each migration that they need, and stop with an error when it does not. A migration only
-adds: a new column has a default, and a column goes away only after no deployed process reads it.
+adds: a new column has a default, and a column goes away only after no deployed process reads it. A column changes its
+name only in a change that needs a restart of the game, when no old process runs.
 
 The cap of characters of one account is 8, and the migration `0002_character_cap.sql` keeps it in the table. Its
 trigger `characters_account_cap` runs before each insert in `characters`: it locks the row of the account, counts the
@@ -681,10 +779,10 @@ A layer writer saves at these times:
 - Before it tells a player the result of an act that changes an item, as a trade or a purchase.
 
 The keeper writes a batch in one transaction. It first locks the row of the layer and checks its epoch. Then it writes
-only the characters of the shard of the batch whose new `version` is greater than the saved one. So a writer that
+only the characters of the realm of the batch whose new `version` is greater than the saved one. So a writer that
 stops loses at most the last 10 s of movement of its players, and never an item. A save of a character that no row of
-the shard holds is a fault, since the login service places a character only in its own shard: the keeper writes the
-other saves of the batch, and writes the ids of those characters, the layer and the shard in its log.
+the realm holds is a fault, since the login service places a character only in its own realm: the keeper writes the
+other saves of the batch, and writes the ids of those characters, the layer and the realm in its log.
 
 ## 10. The determinism
 
@@ -716,17 +814,17 @@ crate 9, and the client follows. Each new crate adds its name to `release-please
 
 | Order | Crate | Its doors |
 | ---: | --- | --- |
-| 1 | `mmo-protocol` | `PROTOCOL`, the messages of each stream and each datagram, `encode`, `decode`, the reader of frames |
+| 1 | `mmo-protocol` | `PROTOCOL`, the messages of each stream and each datagram, `encode`, `decode`, the reader of frames, and `Population` with `Population::of`, the level of population of a realm |
 | 2 | `mmo-collide` | `DT`, `Body`, `Input`, `Terrain`, `step(&Terrain, Body, Input) -> Body`, `state_hash` |
 | 3 | `mmo-store` | the migrations, the queries of each table, the name and the format of each key of Redis, and the scripts of the directory |
 | 4 | `mmo-link` | `server` and `client`, the QUIC configs of the links between the servers, which take only the peers that the authority of the operator signed, and `public`, the QUIC config of a server that takes players |
 | 5 | `mmo-keeper` | the binary of the keeper, and its messages in `mmo-protocol` |
 | 6 | `mmo-zone` | the binary of the layer writer: the tick, the interest, the deltas, the claim of a layer, the saves, the lease, the hand-off, the drain and the move between two layers |
 | 7 | `mmo-gateway` | the binary of the gateway |
-| 8 | `mmo-login` | the binary of the login service, with the queue |
+| 8 | `mmo-login` | the binary of the login service, with the queue and the list of the realms |
 | 9 | `mmo-bots` | the headless clients of the load test |
-| 10 | `mmo-client` | the binary of the client, with winit, wgpu and the prediction of `mmo-collide` |
-| 11 | `mmo-render` | the skinned glTF models of the game with their poses, and the drawing of the world with wgpu |
+| 10 | `mmo-client` | the binary of the client, with the list of the realms, winit, wgpu and the prediction of `mmo-collide` |
+| 11 | `mmo-render` | the skinned glTF models of the game with their poses, and the drawing of the scene with wgpu |
 
 `mmo-store` is the one home of each table and each key, so no other crate writes SQL or the name of a key of Redis.
 
@@ -737,17 +835,18 @@ gateway. It sends inputs 20 times each second from a seeded walk, and acknowledg
 order or a chat line. Each bot checks that it can decode each message. The bots run on hosts of the operator, apart from
 the hosts of the servers.
 
-| Stage | Bots | Shards, caps and zones | What it proves | It passes when |
+| Stage | Bots | Realms, caps and zones | What it proves | It passes when |
 | --- | ---: | --- | --- | --- |
-| 1 | 200 | 1 shard of cap 200, layers of cap 20, 1 zone | the path from login to play, and the opening of layers | each bot plays, no message fails to decode, and the zone runs 10 layers, none with more than 20 players |
-| 2 | 500, half in a town | 1 shard of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
-| 3 | 500, of which 40 cross a border | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the hand-over | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and each crosser enters the layer with its own number in the next zone |
-| 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
-| 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain, the move and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, and each bot left plays |
-| 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
+| 1 | 200 | 1 realm of cap 200, layers of cap 20, 1 zone | the path from login to play, and the opening of layers | each bot plays, no message fails to decode, and the zone runs 10 layers, none with more than 20 players |
+| 2 | 500, half in a town | 1 realm of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
+| 3 | 500, of which 40 cross a border | 2 realms of cap 250, layers of cap 20, 2 zones | the realms, the placement and the hand-over | each realm admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other realm, and each crosser enters the layer with its own number in the next zone |
+| 4 | 300 | 1 realm of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
+| 5 | 200, then 150 of them log out and the others send no order | 1 realm of cap 200, layers of cap 20, 1 zone | the drain, the move and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, and each bot left plays |
+| 6 | 200, with faults | 1 realm of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
+| 7 | 285: 150 in the full realm, of which 50 log in at once, then 85 and 50 | 3 realms of cap 100, layers of cap 20, 1 zone | the realms, their levels of population, a full realm and a rush of logins | each bot plays in the realm of its character; at each look, the level of each realm matches its admitted players; the full realm refuses a new character and makes none; when 20 of its bots log out, 20 bots that wait, whose characters stand in it, enter through its queue in their order of entry; the 30 others still wait, so the rush loses no bot; no layer passes 20 players |
 
 No test runs more than 500 bots, on a machine or in CI. The stages prove the rules of scale with small caps, so a run
-of 500 bots or fewer opens many layers and more than one shard, and stage 2 proves the cap of a layer that the game
+of 500 bots or fewer opens many layers and more than one realm, and stage 2 proves the cap of a layer that the game
 runs.
 
 Each stage runs in one place or in none, and a place checks the rules that `sh script/report.sh` reads from the report,
@@ -756,29 +855,30 @@ which section 12 gives below:
 | Stage | Where it runs | What fails there |
 | --- | --- | --- |
 | 1 | the job `the bots` of the gates, in the dev profile | a bot that does not play, a fault of a bot, a layer over its cap, fewer than 10 layers |
-| 2 | the workflow `load`, in the release profile, on the base and on the head of a pull request | on the head: a bot that does not play, a fault, a layer over its cap, a shard with too few layers. The tick and the data of the row stand in the report and the summary, and no check fails on them |
-| 3 | the workflow `load`, as stage 2, on 2 zones | as stage 2, and a bot that saw a bot of the other shard, a crosser that did not enter the next zone, and a crossing into the next zone that did not keep the number of its layer |
+| 2 | the workflow `load`, in the release profile, on the base and on the head of a pull request | on the head: a bot that does not play, a fault, a layer over its cap, a realm with too few layers. The tick and the data of the row stand in the report and the summary, and no check fails on them |
+| 3 | the workflow `load`, as stage 2, on 2 zones | as stage 2, and a bot that saw a bot of the other realm, a crosser that did not enter the next zone, and a crossing into the next zone that did not keep the number of its layer |
 | 4 | the workflow `load`, as stage 2 | the rules of the queue below |
-| 5 | nowhere | no check runs it, since the drain and the move wait |
+| 5 | the workflow `load`, on the head alone | the rules of the drain below |
 | 6 | the workflow `load`, on the head alone | the rules of the recovery below |
+| 7 | the job `the load` of the workflow `load`, on the head alone | the rules of the realms below |
 
-Stage 3 makes the bots that cross the first 40 of its run, 20 for each shard, and each other bot logs in after each of
-them played. So the crossers of a shard stand on its layer 1, which holds 20 players, and no other bot stands there.
+Stage 3 makes the bots that cross the first 40 of its run, 20 for each realm, and each other bot logs in after each of
+them played. So the crossers of a realm stand on its layer 1, which holds 20 players, and no other bot stands there.
 The next zone has no layer, and the first crossing makes the directory open its layer 1: each crosser enters the layer 1
 of the next zone, as the placement of section 6 says, and the report counts the crossings that kept the number of
 their layer. The stage proves that rule for the layer 1 alone. The test of `Directory::place` in `mmo-store` proves it
-for each number. Each bot checks each entity that a snapshot gives it against the shard of each character of the run,
-and the report counts the bots of another shard that a bot saw, which must be none.
+for each number. Each bot checks each entity that a snapshot gives it against the realm of each character of the run,
+and the report counts the bots of another realm that a bot saw, which must be none.
 
-Each layer writer reports the time of each tick in `ticks:{s}:{z}:{l}` (section 3), and each bot reports its bytes up
-and down and its shard. The bots go round the shards, each through the login service of its shard. Each second of the
-play, the program of the bots reads `shard:{s}` and `layers:{s}` of each shard, so its report gives, for each shard, the
+Each layer writer reports the time of each tick in `ticks:{r}:{z}:{l}` (section 3), and each bot reports its bytes up
+and down and its realm. The bots go round the realms, each through the login service of its realm. Each second of the
+play, the program of the bots reads `realm:{r}` and `layers:{r}` of each realm, so its report gives, for each realm, the
 count of layers that opened in all its zones with the cap of a layer, and the players on each layer, zone by zone. Two lines of the budget of the
-report read them: no layer held more players than its cap, and each shard opened at least as many layers as its players
+report read them: no layer held more players than its cap, and each realm opened at least as many layers as its players
 need at that cap. The test keeps each report with the commit that it ran.
 
 The job `the bots` of the gates, in `.github/workflows/gates.yml`, runs stage 1 on Linux, in the dev profile. It runs
-`sh script/local.sh start` with `MMO_LOCAL_SHARD_CAP=200` and `MMO_LOCAL_LAYER_CAP=20`, so that no bot waits in the
+`sh script/local.sh start` with `MMO_LOCAL_REALM_CAP=200` and `MMO_LOCAL_LAYER_CAP=20`, so that no bot waits in the
 queue and the zone opens 10 layers. Then it runs `sh script/local.sh bots 200` with `MMO_BOTS_JOIN_SECONDS=30` and
 `MMO_BOTS_PLAY_SECONDS=20`, under a timeout of 120 s, and last `sh script/local.sh stop`. The program of the bots exits
 with 0 when a bot fails, so the job reads its report with `sh script/report.sh`: it fails when a bot did not play, when
@@ -788,29 +888,33 @@ stack stay as the artifact `bots`.
 
 ### How to run it
 
-`sh script/local.sh bots <count>` runs the bots against the local stack that `sh script/local.sh start` makes. The
-bots make their accounts in PostgreSQL, since the login service makes 5 new accounts an hour for one address. Then each
-bot logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this
-document, `MMO_LOCAL_SHARDS` for the count of shards, `MMO_LOCAL_SHARD_CAP` for the cap of each shard,
-`MMO_LOCAL_LAYER_CAP` for the cap of a layer, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of one
-row of the map, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as
-`MMO_BOTS_TOWN` for the bots that start in one square of 128 m, and `MMO_BOTS_CROSSERS` for the first bots, which log in
-before the others and walk east from near the east border of the zone. The stack runs the login service and the pool of
-writers of section 6 for each shard, and `bots` gives the bots one login service for each shard. The caps start small,
-100 for a shard and 20 for a layer, so that a few bots open many layers. A layer writer keeps the player of a closed
-link for 30 s, so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger
-count.
+`sh script/local.sh bots <count>` runs the bots against the local stack that `sh script/local.sh start` makes. The bots
+make their accounts in PostgreSQL, since the login service makes 5 new accounts an hour for one address. Then each bot
+logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this document,
+`MMO_LOCAL_REALMS` for the count of realms, `MMO_LOCAL_REALM_CAP` for the cap of each realm, `MMO_LOCAL_LAYER_CAP` for
+the cap of a layer, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of one row of the map, and the
+variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as `MMO_BOTS_TOWN` for the bots that start in one square of 128
+m, and `MMO_BOTS_CROSSERS` for the first bots, which log in before the others and walk east from near the east border of
+the zone. The stack runs the login service and the pool of writers of section 6 for each realm, and `bots` gives the
+bots one login service for each realm. The caps start small, 100 for a realm and 20 for a layer, so that a few bots open
+many layers. A layer writer keeps the player of a closed link for 30 s, so wait 35 s between two runs. Run no stage with
+more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.
+
+On a machine of the owner, a run stays small: layers of cap 5, the least cap of a layer, realms of cap 20 and 50 bots at
+most, as `MMO_LOCAL_LAYER_CAP=5`, `MMO_LOCAL_REALM_CAP=20` and `sh script/local.sh bots 50`. Stage 7 runs there as 3
+realms of cap 20 with 26, 17 and 7 bots: the first realm is full with 6 bots in its queue, the second is at the level
+high and the third at the level low.
 
 The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4, 5 and 6 on a runner of CI, for each pull request
 that changes a crate of the path of a player. It runs the stages 2, 3 and 4 on a new stack of the release build of the
 base of the pull request, then of the change, on the same runner, and the stages 5 and 6 on the change alone. It fails when a bot of the change cannot play, when a layer of the
-change passes its cap, when a shard of the change opens fewer layers than its players need, and, in stage 3, when a bot
-sees a bot of the other shard, when a crosser does not enter the next zone and when a crossing into it does not keep the
+change passes its cap, when a realm of the change opens fewer layers than its players need, and, in stage 3, when a bot
+sees a bot of the other realm, when a crosser does not enter the next zone and when a crossing into it does not keep the
 number of its layer, as `sh script/report.sh` reads them from the report of the bots. Its summary gives the report of
 the bots, the cores of the gateway and of the layer writers over the last 20 s of the play, and the hottest functions of
 each, from `perf`.
 
-Stage 4 runs 300 bots on a shard of cap 200. `MMO_BOTS_WAITING=100` tells the bots that the queue must hold 100 of them
+Stage 4 runs 300 bots on a realm of cap 200. `MMO_BOTS_WAITING=100` tells the bots that the queue must hold 100 of them
 when the measure ends, so the measure starts when the other 200 play. The report then prints a `queue:` line and 4
 lines of the budget: the queue holds the 100 bots, no bot that got a session entered the queue after a bot that waits,
 each waiting bot holds the place of its order of entry in a queue as long as the count of waiting bots, and each
@@ -835,6 +939,20 @@ line and 3 lines of the budget: each bot left plays at the end, and the last loo
 It also shows no layer of a quarter of its cap or fewer whose players fit in the room of the other layers. `sh
 script/report.sh <report> 200 1 0 0 0 150` fails when one of them is over. The stage runs on the change alone, since a
 base below the drain cannot pass it. The tests of `mmo-zone` prove the same drain, move and close with a cap of 4.
+
+Stage 7 runs 285 bots on a new stack of the change, with 3 realms of cap 100 and layers of cap 20, as the last stage of
+the job `the load`, since a base with no list of realms cannot pass it. The item that builds the list of the realms and
+their levels adds the stage. Each bot has a character that the program of the bots made before in the realm of its
+login. The first realm gets 100 bots that play, then a rush of 50 bots that log in at the same time, so it is at the
+level full and the 50 wait in its queue. The second realm gets 85 bots, at the level high, and the third 50 bots, at the
+level medium. The test of `Population::of` in `mmo-protocol` proves each bound of each level.
+
+Each second of the play, the program of the bots asks for `Realms`, reads the admitted set and the cap of each realm,
+and counts each realm whose level is not `Population::of` of those two numbers. While the first realm is full, one of
+its bots asks for a new character, and the report gives the refusal that it got and the count of its characters. Then 20
+bots of the first realm log out, and 20 bots of its queue enter in their order of entry and play, while 30 still wait.
+The report prints a `realms:` line and a line of the budget for each rule of the table, and `sh script/report.sh` fails
+when one of them is over.
 
 ### The first local results
 
@@ -892,8 +1010,8 @@ the layer writer and the stores share those 4 cores. The cores of a process are 
 
 ## 13. The drawing
 
-The crate `mmo-render` draws the world with wgpu to a texture. It has no window: the client gives it the texture of its
-window, and a test gives it a texture of its own.
+The crate `mmo-render` draws the scene of the game with wgpu to a texture. It has no window: the client gives it the
+texture of its window, and a test gives it a texture of its own.
 
 - A model is a binary glTF with one skinned mesh, a colour map, a normal map and a clip named `Idle`. The character of
   the game is `crates/mmo-render/assets/character.glb`, which `script/character.py` writes.
