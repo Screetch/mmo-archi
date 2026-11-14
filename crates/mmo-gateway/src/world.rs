@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use bitcode::{DecodeOwned, Encode};
 use mmo_protocol::{
-  Attach, Frames, Hello, Layer, PROTOCOL, Relayed, ShardId, ToClient, Token, ZoneId, decode,
-  encode, frame, relayed, unrelayed,
+  AccountId, Attach, Frames, Hello, Layer, PROTOCOL, Relayed, ShardId, ToClient, Token, ZoneId,
+  decode, encode, frame, relayed, unrelayed,
 };
 use mmo_store::keys;
 use quinn::crypto::rustls::QuicClientConfig;
@@ -153,6 +153,20 @@ impl World {
     let mut redis = self.redis.clone();
     let () = redis.hset_multiple(keys::session(&token), &fields).await.expect("a session");
     token
+  }
+
+  /// Writes the presence of `account` with `character` in the layer 1 of `zone` of `shard`, as the
+  /// writer of that layer does.
+  pub(crate) async fn presence(&self, account: i64, character: i64, shard: i64, zone: i32) {
+    let fields = [
+      (keys::CHARACTER, character),
+      (keys::SHARD, shard),
+      (keys::ZONE, zone.into()),
+      (keys::LAYER, 1),
+      (keys::EPOCH, 1),
+    ];
+    let key = keys::presence(AccountId(account));
+    let () = self.redis.clone().hset_multiple(key, &fields).await.expect("a presence");
   }
 
   /// Writes the lease of the layer 1 of `zone` of shard 1 in the directory, as its writer does.

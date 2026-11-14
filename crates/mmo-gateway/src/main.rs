@@ -1,6 +1,7 @@
 //! The gateway of mmo-archi. It ends the QUIC connection of each client, checks its session in
-//! Redis, finds the zone of its player in the directory of zones, and relays each message between
-//! the client and the writer of that zone.
+//! Redis, and relays each message between the client and the writer of the layer of its player:
+//! the layer that the presence of the player names when a writer holds the player, since a move or
+//! a hand-off takes it out of the layer of its login, and else the layer of the session.
 //!
 //! It keeps no state of a player. It holds only its open connections, and a link to each layer
 //! writer that the directory names, which it can drop at any time and open again from Redis. So
@@ -346,7 +347,7 @@ mod tests {
     let refused = newer.accept_with(PROTOCOL + 1).await;
     reasons.push(client.closed().await);
     drop(refused);
-    for keys in ["~writer:*", "~session:*"] {
+    for keys in ["~writer:*", "~session:*", "~[sp][er][se][se]*"] {
       let token = world.session(11, 42, 1).await;
       world.grant(keys, "+@all").await;
       reasons.push(world.attach(address, token).await.closed().await);
@@ -368,8 +369,40 @@ mod tests {
         reason(&another_version()),
         reason("Redis fails: NoPerm: No permissions to access a key"),
         reason("Redis fails: NoPerm: No permissions to access a key"),
+        reason("Redis fails: NoPerm: No permissions to access a key"),
       ]
     );
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_client_attaches_to_the_layer_that_the_presence_of_its_player_names() {
+    let world = World::new().await;
+    let meadow = world.zone(1).await;
+    let forest = world.zone(2).await;
+    let address = world.gateway().await;
+    let first = async |character, shard| {
+      world.presence(11, character, shard, 2).await;
+      world.announced(address, world.session(11, 42, 1).await).await
+    };
+    let join = |link| ToZone::Join { link, account: AccountId(11), character: CharacterId(42) };
+    let in_meadow = ToClient::Moved { zone: ZoneId(1), layer: 1 };
+    let (other, said) = first(43, 1).await;
+    assert_eq!(said, in_meadow, "the presence of another character of the account");
+    let mut one = meadow.accept().await;
+    let (elsewhere, said) = first(42, 2).await;
+    assert_eq!(said, in_meadow, "the presence of the character in another shard");
+    let links = [link_at(&other, &one).await, link_at(&elsewhere, &one).await];
+    let joins = [one.message::<ToZone>().await, one.message::<ToZone>().await];
+    for link in links {
+      assert!(joins.contains(&join(link)), "{link:?} in {joins:?}");
+    }
+    let (moved, said) = first(42, 1).await;
+    assert_eq!(said, ToClient::Moved { zone: ZoneId(2), layer: 1 });
+    let mut two = forest.accept().await;
+    moved.send_datagram(&intents(2));
+    let link = two.relayed_of::<Intents>().await.link;
+    assert_eq!(two.message::<ToZone>().await, join(link));
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]

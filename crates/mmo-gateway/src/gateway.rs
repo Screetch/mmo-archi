@@ -45,6 +45,9 @@ pub(crate) struct Session {
 /// The account, the character, the shard, the zone and the layer of a session in Redis.
 type SessionFields = (Option<i64>, Option<i64>, Option<u32>, Option<i32>, Option<u32>);
 
+/// The character, the shard, the zone and the layer of the presence of an account in Redis.
+type PresenceFields = (Option<i64>, Option<u32>, Option<i32>, Option<u32>);
+
 fn key(shard: ShardId, layer: Layer) -> (u32, i32, u32) {
   (shard.0, layer.zone.0, layer.number)
 }
@@ -67,19 +70,26 @@ impl Gateway {
     Ok(gateway)
   }
 
-  /// The session of `token`, or `None` when the login service gave none or it ended.
+  /// The session of `token`, or `None` when the login service gave none or it ended. Its layer is
+  /// the layer that the presence of its player names when a layer writer holds the player, since a
+  /// move or a hand-off takes the player out of the layer of its login.
   pub(crate) async fn session(&self, token: &Token) -> Result<Option<Session>, RedisError> {
+    let mut redis = self.redis.clone();
     let fields = [keys::ACCOUNT, keys::CHARACTER, keys::SHARD, keys::ZONE, keys::LAYER];
-    let found: SessionFields = self.redis.clone().hmget(keys::session(token), &fields).await?;
-    Ok(match found {
-      (Some(account), Some(character), Some(shard), Some(zone), Some(number)) => Some(Session {
-        account: AccountId(account),
-        character: CharacterId(character),
-        shard: ShardId(shard),
-        layer: Layer { zone: ZoneId(zone), number },
-      }),
-      _ => None,
-    })
+    let found: SessionFields = redis.hmget(keys::session(token), &fields).await?;
+    let (Some(account), Some(character), Some(shard), Some(zone), Some(number)) = found else {
+      return Ok(None);
+    };
+    let fields = [keys::CHARACTER, keys::SHARD, keys::ZONE, keys::LAYER];
+    let present: PresenceFields = redis.hmget(keys::presence(AccountId(account)), &fields).await?;
+    let layer = match present {
+      (Some(held), Some(at), Some(zone), Some(number)) if held == character && at == shard => {
+        Layer { zone: ZoneId(zone), number }
+      }
+      _ => Layer { zone: ZoneId(zone), number },
+    };
+    let (account, character, shard) = (AccountId(account), CharacterId(character), ShardId(shard));
+    Ok(Some(Session { account, character, shard, layer }))
   }
 
   /// The link to the writer of `layer` of `shard`, which the gateway opens when it holds none.
