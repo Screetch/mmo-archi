@@ -5,9 +5,11 @@ use std::iter;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mmo_client::{Down, Fault, Gap, Place, Play, Predictor, Trust, Up, World, enter};
+use mmo_client::{Account, Down, Fault, Gap, Place, Play, Predictor, Trust, Up, World, enter};
 use mmo_collide::{Terrain, ground};
-use mmo_protocol::{Angle, CharacterId, Intents, Layer, Snapshot, ToClient, Token, ZoneId, encode};
+use mmo_protocol::{
+  Angle, CharacterId, Intents, Layer, Refusal, Snapshot, ToClient, Token, ZoneId, encode,
+};
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep};
 
@@ -44,6 +46,12 @@ pub(crate) struct Shared {
   pub(crate) leavers: u32,
   /// The signal for the leavers to log out.
   pub(crate) leave: watch::Receiver<bool>,
+  /// The logins that start each second.
+  pub(crate) ramp: u32,
+  /// The count of the bots that play, or that failed, after which the rush logs in.
+  pub(crate) rushing: usize,
+  /// The count of the bots of the rush that got a place in the queue.
+  pub(crate) rushed: AtomicUsize,
 }
 
 /// What one bot measured.
@@ -57,6 +65,8 @@ pub(crate) struct Outcome {
   pub(crate) queued: bool,
   /// The time that the bot ended.
   pub(crate) ended: Option<Instant>,
+  /// What the login service answered when the bot asked for a new character before the rush.
+  pub(crate) probe: Option<Probe>,
   /// The time without a snapshot of each loss of the link that ended with the player in play again.
   pub(crate) recoveries: Vec<Duration>,
   /// The losses of the link that ended on another layer than the one that the bot left.
@@ -91,6 +101,15 @@ pub(crate) struct Outcome {
   /// The largest snapshot, in bytes.
   pub(crate) largest: usize,
   pub(crate) fault: Option<String>,
+}
+
+/// What the login service answered when the bot before the rush asked for a new character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Probe {
+  /// The login service refused the character for this cause.
+  Refused(Refusal),
+  /// The login service made the character.
+  Made,
 }
 
 /// What a bot does in a run, beside its walk.
@@ -303,21 +322,58 @@ async fn send_walk(walk: &mut Walk, out: &mut Outcome, link: &mut Play) {
   }
 }
 
-/// Waits until the crossers play, unless the bot is one. It gives false when the run ended first.
-async fn after_crossers(
+/// Waits until the crossers play, unless the bot is one, and a bot of the rush until each other
+/// bot plays, and then for its rank at the pace of the ramp. It gives false when the run ended
+/// first.
+async fn after_others(
   shared: &Shared,
   bot: &Bot,
   stop: &mut watch::Receiver<bool>,
   out: &mut Outcome,
 ) -> bool {
-  while !bot.crosser && shared.ready.load(Ordering::Relaxed) < shared.crossers {
-    out.phase = "crossers";
+  let (phase, others) = match bot.rush {
+    Some(_) => ("rush", shared.rushing),
+    None if bot.crosser => ("crossers", 0),
+    None => ("crossers", shared.crossers),
+  };
+  while shared.ready.load(Ordering::Relaxed) < others {
+    out.phase = phase;
     tokio::select! {
       () = sleep(RETRY) => {}
       _ = stop.changed() => return false,
     }
   }
+  let rank = bot.rush.unwrap_or_default();
+  sleep(Duration::from_secs_f64(f64::from(rank) / f64::from(shared.ramp.max(1)))).await;
   true
+}
+
+/// Keeps a place that the login service gave the bot in the queue, and counts the first place of
+/// a bot of the rush.
+fn note(shared: &Shared, bot: &Bot, out: &mut Outcome, place: Place) {
+  if bot.rush.is_some() && out.places.is_empty() {
+    shared.rushed.fetch_add(1, Ordering::Relaxed);
+  }
+  out.place.get_or_insert(place);
+  out.places.push((Instant::now(), place));
+}
+
+/// Asks for the new character of the probe, when the bot has one, and keeps the answer. A bot
+/// that the realm refused logs in again with its own character in its slot.
+async fn probe(shared: &Shared, bot: &Bot, out: &mut Outcome) -> Result<(), Error> {
+  let Some(name) = &bot.probe else {
+    return Ok(());
+  };
+  out.phase = "probe";
+  let account = Account { character: name.clone(), ..bot.account.clone() };
+  let mut queued = |place| note(shared, bot, out, place);
+  let tried = enter(&shared.trust, &bot.login, &account, &mut queued).await;
+  out.probe = Some(match tried {
+    Ok(_) => Probe::Made,
+    Err(Fault::Refused(why)) => Probe::Refused(why),
+    Err(fault) => return Err(fault.into()),
+  });
+  Ok(())
 }
 
 async fn play(
@@ -328,15 +384,16 @@ async fn play(
 ) -> Result<bool, Error> {
   // The crossers log in first: they fill the first layer of their realm, so a crosser enters the
   // layer with its number in the next zone, which the first crossing opens.
-  if !after_crossers(shared, bot, &mut stop, out).await {
+  if !after_others(shared, bot, &mut stop, out).await {
     return Ok(false);
   }
-  out.phase = "login";
   let started = Instant::now();
-  let queued = &mut |place| {
-    out.place.get_or_insert(place);
-    out.places.push((Instant::now(), place));
-  };
+  tokio::select! {
+    probed = probe(shared, bot, out) => probed?,
+    _ = stop.changed() => return Ok(true),
+  }
+  out.phase = "login";
+  let queued = &mut |place| note(shared, bot, out, place);
   let token = tokio::select! {
     session = enter(&shared.trust, &bot.login, &bot.account, queued) => session?.token,
     _ = stop.changed() => return Ok(true),
@@ -418,14 +475,17 @@ mod tests {
   use mmo_client::World;
   use mmo_client::testing::{Fake, hold};
   use mmo_client::{Account, Place, Trust};
+  use std::future::Future;
+
+  use mmo_client::testing::Peer;
   use mmo_protocol::{
-    Angle, Attach, CharacterId, FromClient, FromLogin, Layer, Password, Refusal, Snapshot,
-    ToClient, ToLogin, Token, ZoneId, encode,
+    AccountId, Angle, Attach, Character, CharacterId, FromClient, FromLogin, Layer, Password,
+    Refusal, Snapshot, ToClient, ToLogin, Token, ZoneId, encode, frame,
   };
   use tokio::sync::{oneshot, watch};
   use tokio::time::{sleep, timeout};
 
-  use super::{End, Outcome, Role, Shared, TURN, Walk, again, run};
+  use super::{End, Outcome, Probe, Role, Shared, TURN, Walk, again, run};
   use crate::fixture::{authority, entity, login_service, send, snapshot};
   use crate::rng::Rng;
   use crate::seed::Bot;
@@ -441,9 +501,12 @@ mod tests {
       index: 0,
       realm: 1,
       login: login.address.clone(),
+      id: AccountId(7),
       account,
       character: CharacterId(42),
       crosser: false,
+      rush: None,
+      probe: None,
     }
   }
 
@@ -460,7 +523,136 @@ mod tests {
       realms: HashMap::new(),
       leavers: 0,
       leave: watch::channel(false).1,
+      ramp: 50,
+      rushing: 0,
+      rushed: AtomicUsize::new(0),
     }
+  }
+
+  /// A login service that answers the first login of a probe with `first`, and then gives the
+  /// character Brom and a session, as `login_service` does.
+  fn probed<S, F>(first: S) -> Fake
+  where
+    S: FnOnce(Peer) -> F + Send + 'static,
+    F: Future<Output = Peer> + Send + 'static,
+  {
+    Fake::start_twice(first, |mut peer| async move {
+      peer.read::<ToLogin>().await;
+      let character = Character { id: CharacterId(42), name: "Brom".to_owned() };
+      peer.write(&FromLogin::Characters(vec![character])).await;
+      assert_eq!(peer.read::<ToLogin>().await, ToLogin::Select { character: CharacterId(42) });
+      peer.write(&FromLogin::Session { token: Token([5; 32]) }).await;
+      peer
+    })
+  }
+
+  /// Runs `bot` against `login` and a gateway that shows its player once, and stops the run once
+  /// the bot plays.
+  async fn plays(login: Fake, bot: Bot, shared: impl FnOnce(Shared) -> Shared) -> (Outcome, usize) {
+    let (seen, played) = oneshot::channel();
+    let gateway = Fake::start(move |mut peer| async move {
+      peer.read::<Attach>().await;
+      peer.write(&ToClient::Moved { zone: ZoneId(1), layer: 1 }).await;
+      send(&peer, &snapshot(10, None, vec![entity(42)]));
+      seen.send(()).expect("the test waits for the play");
+      peer
+    });
+    let shared = shared(shared_by(&login, &gateway));
+    let (stop, stopped) = watch::channel(false);
+    let stopping = async {
+      played.await.expect("a bot that plays");
+      while shared.ready.load(Ordering::Relaxed) == 0 {
+        sleep(Duration::from_millis(20)).await;
+      }
+      stop.send_replace(true);
+    };
+    let (out, ()) = tokio::join!(run(&shared, &bot, stopped), stopping);
+    gateway.end().await;
+    login.end().await;
+    (out, shared.rushed.load(Ordering::Relaxed))
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn the_bot_before_the_rush_asks_for_a_new_character_then_plays_its_own() {
+    let refusing = probed(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      let place = FromLogin::Queued { position: 0, length: 1, wait: 1, resume: Token([1; 32]) };
+      peer.write(&place).await;
+      let character = Character { id: CharacterId(42), name: "Brom".to_owned() };
+      peer.write(&FromLogin::Characters(vec![character])).await;
+      assert_eq!(peer.read::<ToLogin>().await, ToLogin::NewCharacter { name: "Nada".to_owned() });
+      peer.write(&FromLogin::Refused(Refusal::Full)).await;
+      peer
+    });
+    let making = probed(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      peer.write(&FromLogin::Characters(vec![])).await;
+      assert_eq!(peer.read::<ToLogin>().await, ToLogin::NewCharacter { name: "Nada".to_owned() });
+      let character = Character { id: CharacterId(43), name: "Nada".to_owned() };
+      peer.write(&FromLogin::Characters(vec![character])).await;
+      assert_eq!(peer.read::<ToLogin>().await, ToLogin::Select { character: CharacterId(43) });
+      peer.write(&FromLogin::Session { token: Token([6; 32]) }).await;
+      peer
+    });
+    let mut probes = Vec::new();
+    for login in [refusing, making] {
+      let asking = Bot { probe: Some("Nada".to_owned()), ..bot(&login) };
+      let (out, _) = plays(login, asking, |shared| shared).await;
+      let heard = out.places.iter().map(|(_, place)| place.position).collect::<Vec<_>>();
+      probes.push((out.probe, out.fault, out.end, heard));
+    }
+    assert_eq!(
+      probes,
+      [
+        (Some(Probe::Refused(Refusal::Full)), None, End::Playing, vec![0]),
+        (Some(Probe::Made), None, End::Playing, vec![]),
+      ]
+    );
+    let garbling = Fake::start(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      peer.write_raw(&frame(&[0xff]).expect("a frame")).await;
+      peer
+    });
+    let idle = Fake::start(hold);
+    let shared = shared_by(&garbling, &idle);
+    let (_stop, stopped) = watch::channel(false);
+    let broken = Bot { probe: Some("Nada".to_owned()), ..bot(&garbling) };
+    let out = run(&shared, &broken, stopped).await;
+    let ended = (out.probe, out.fault.as_deref(), out.phase);
+    let garbled = "the bytes are not a message of this version of the protocol";
+    assert_eq!(ended, (None, Some(garbled), "probe"));
+    garbling.end().await;
+    let holding = Fake::start(hold);
+    let shared = shared_by(&holding, &idle);
+    let (stop, stopped) = watch::channel(false);
+    let waiting = Bot { probe: Some("Nada".to_owned()), ..bot(&holding) };
+    let stopping = async {
+      sleep(Duration::from_millis(300)).await;
+      stop.send_replace(true);
+    };
+    let (out, ()) = tokio::join!(run(&shared, &waiting, stopped), stopping);
+    assert_eq!((out.probe, out.phase, out.queued, out.fault), (None, "probe", true, None));
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn a_bot_of_the_rush_logs_in_once_each_other_bot_plays_and_counts_its_first_place() {
+    let login = login_service("Brom", 42);
+    let late = Bot { rush: Some(1), ..bot(&login) };
+    let (out, counted) = plays(login, late, |shared| Shared { ramp: 100, ..shared }).await;
+    assert_eq!((out.fault, out.end, out.places.len(), counted), (None, End::Playing, 1, 1));
+    let login = Fake::start(hold);
+    let idle = Fake::start(hold);
+    let shared = Shared { rushing: 1, ..shared_by(&login, &idle) };
+    let (stop, stopped) = watch::channel(false);
+    let waiting = Bot { rush: Some(0), ..bot(&login) };
+    let stopping = async {
+      sleep(Duration::from_millis(300)).await;
+      stop.send_replace(true);
+    };
+    let (out, ()) = tokio::join!(run(&shared, &waiting, stopped), stopping);
+    assert_eq!((out.phase, out.queued, out.fault), ("rush", false, None));
   }
 
   /// A full snapshot, a late one, one that starts from a snapshot that the bot lacks, one that

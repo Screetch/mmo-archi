@@ -14,7 +14,16 @@ use tokio::task::JoinHandle;
 use crate::Trust;
 
 /// A script, boxed so that the server is one function for every script.
-type Script = Box<dyn FnOnce(Peer) -> Pin<Box<dyn Future<Output = Peer> + Send>> + Send>;
+pub type Script = Box<dyn FnOnce(Peer) -> Pin<Box<dyn Future<Output = Peer> + Send>> + Send>;
+
+/// The script `script`, boxed for [`Fake::start_each`].
+pub fn script<S, F>(script: S) -> Script
+where
+  S: FnOnce(Peer) -> F + Send + 'static,
+  F: Future<Output = Peer> + Send + 'static,
+{
+  Box::new(move |peer| Box::pin(script(peer)))
+}
 
 /// The side of the server of one connection that a script plays.
 pub struct Peer {
@@ -83,7 +92,13 @@ impl Fake {
     S: FnOnce(Peer) -> F + Send + 'static,
     F: Future<Output = Peer> + Send + 'static,
   {
-    Self::serve(true, vec![Box::new(move |peer| Box::pin(script(peer)))])
+    Self::start_each(vec![self::script(script)])
+  }
+
+  /// A server whose hello is done when each script starts. It serves each connection with the
+  /// next of `scripts`, once the connection before is closed.
+  pub fn start_each(scripts: Vec<Script>) -> Self {
+    Self::serve(true, scripts)
   }
 
   /// A server whose hello is done when each script starts. It serves a connection with `first`,
@@ -96,11 +111,7 @@ impl Fake {
     T: FnOnce(Peer) -> G + Send + 'static,
     G: Future<Output = Peer> + Send + 'static,
   {
-    let scripts: Vec<Script> = vec![
-      Box::new(move |peer| Box::pin(first(peer))),
-      Box::new(move |peer| Box::pin(second(peer))),
-    ];
-    Self::serve(true, scripts)
+    Self::start_each(vec![script(first), script(second)])
   }
 
   /// A server whose script starts at the stream of the client, with the hello of each side
@@ -110,7 +121,7 @@ impl Fake {
     S: FnOnce(Peer) -> F + Send + 'static,
     F: Future<Output = Peer> + Send + 'static,
   {
-    Self::serve(false, vec![Box::new(move |peer| Box::pin(script(peer)))])
+    Self::serve(false, vec![self::script(script)])
   }
 
   fn serve(greeting: bool, scripts: Vec<Script>) -> Self {

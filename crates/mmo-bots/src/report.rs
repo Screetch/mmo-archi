@@ -4,12 +4,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use mmo_protocol::Layer;
+use mmo_protocol::{Layer, Refusal};
 use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 use tokio::time::Instant;
 
-use crate::bot::{End, Outcome, Role};
+use crate::bot::{End, Outcome, Probe, Role};
 use crate::layers::{Realm, Seen};
+use crate::levels::Levels;
 use crate::ticks::Counts;
 
 /// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
@@ -279,9 +280,10 @@ impl Drain {
       let low = |players: &&u32| **players > 0 && **players * 4 <= realm.cap;
       sparse += counts.iter().filter(low).filter(|players| fits(**players)).count();
     }
-    let staying: Vec<&Outcome> = outcomes.iter().filter(|out| out.role != Role::Leaver).collect();
+    let staying = outcomes.iter().filter(|out| out.role != Role::Leaver && !out.queued);
+    let staying: Vec<&Outcome> = staying.collect();
     Self {
-      leavers: outcomes.len() - staying.len(),
+      leavers: outcomes.iter().filter(|out| out.role == Role::Leaver).count(),
       left: outcomes.iter().filter(|out| out.end == End::LoggedOut).count(),
       staying: staying.len(),
       playing: staying.iter().filter(|out| out.end == End::Playing).count(),
@@ -311,6 +313,55 @@ impl Drain {
   }
 }
 
+/// What a run with a rush showed of the realms: the levels of the list against the admitted
+/// players, the answer of the full realm to a new character, and the players of each realm.
+#[derive(Debug, PartialEq)]
+struct Census {
+  levels: Levels,
+  /// The answer to the new character of the bot before the rush, and the count of the characters
+  /// that its account holds in the first realm at the end.
+  probe: Option<Probe>,
+  characters: usize,
+  /// The players of each realm in its layers at the last look, and its bots that play at the end.
+  held: BTreeMap<u32, u32>,
+  playing: BTreeMap<u32, u32>,
+}
+
+impl Census {
+  fn line(&self) -> String {
+    let Levels { looks, apart, last } = &self.levels;
+    let pairs = |map: &BTreeMap<u32, u32>| {
+      map.iter().map(|(id, n)| format!("{id} {n}")).collect::<Vec<_>>().join(", ")
+    };
+    let levels: Vec<String> = last.iter().map(|(id, level)| format!("{id} {level:?}")).collect();
+    let probe = match self.probe {
+      Some(Probe::Refused(why)) => format!("the refusal {why:?}"),
+      Some(Probe::Made) => "a new character".to_owned(),
+      None => "no answer".to_owned(),
+    };
+    format!(
+      "realms: {looks} looks at the list, {apart} levels apart from the admitted players, the last levels {}, the bot before the rush got {probe} and holds {} characters in the first realm, the players of each realm {} and its bots that play {}",
+      levels.join(", "),
+      self.characters,
+      pairs(&self.held),
+      pairs(&self.playing),
+    )
+  }
+
+  fn budget(&self) -> [(&'static str, bool); 3] {
+    let Levels { looks, apart, .. } = self.levels;
+    let refused = self.probe == Some(Probe::Refused(Refusal::Full)) && self.characters == 1;
+    [
+      (
+        "the level of each realm matches its admitted players at each look",
+        looks > 0 && apart == 0,
+      ),
+      ("the full realm refuses a new character and makes none", refused),
+      ("each realm holds the players of its bots", self.held == self.playing),
+    ]
+  }
+}
+
 /// The result of a run.
 #[derive(Debug)]
 pub(crate) struct Report {
@@ -325,6 +376,7 @@ pub(crate) struct Report {
   /// bot that waits in the queue is one of them.
   unjoined: BTreeMap<&'static str, usize>,
   drain: Drain,
+  census: Option<Census>,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -338,8 +390,8 @@ pub(crate) struct Report {
   layers: Seen,
   /// The bots that played, by their realm.
   realms: BTreeMap<u32, usize>,
-  /// The bots that played and never left their zone, by their realm: the players that its layers
-  /// of the zone must hold.
+  /// The bots that played, never left their zone and did not log out, by their realm: the players
+  /// that its layers of the zone must hold at one time.
   stayed: BTreeMap<u32, usize>,
   window: Duration,
 }
@@ -380,7 +432,9 @@ impl Report {
       *realms.entry(out.realm).or_default() += 1;
     }
     let mut stayed = BTreeMap::new();
-    let left = |out: &Outcome| out.crossings.iter().any(|(from, to)| from.zone != to.zone);
+    let left = |out: &Outcome| {
+      out.end == End::LoggedOut || out.crossings.iter().any(|(from, to)| from.zone != to.zone)
+    };
     for out in outcomes.iter().filter(|out| out.joined.is_some() && !left(out)) {
       *stayed.entry(out.realm).or_default() += 1;
     }
@@ -413,11 +467,40 @@ impl Report {
       gaps: outcomes.iter().map(|out| out.gaps).sum(),
       ticks: Ticks::new(ticks),
       drain: Drain::new(outcomes, &layers),
+      census: None,
       layers,
       realms,
       stayed,
       window,
     }
+  }
+}
+
+impl Report {
+  /// The report with what a run with a rush showed of the realms: the `levels` of the looks at the
+  /// list, and the count of the `characters` that the bot before the rush holds in the first realm.
+  pub(crate) fn with_census(
+    mut self,
+    outcomes: &[Outcome],
+    levels: Levels,
+    characters: usize,
+  ) -> Self {
+    let held = self
+      .layers
+      .iter()
+      .map(|(id, realm)| (*id, realm.layers.values().filter_map(|layer| layer.now).sum::<u32>()));
+    let mut playing = BTreeMap::new();
+    for out in outcomes.iter().filter(|out| out.end == End::Playing) {
+      *playing.entry(out.realm).or_default() += 1;
+    }
+    self.census = Some(Census {
+      levels,
+      probe: outcomes.iter().find_map(|out| out.probe),
+      characters,
+      held: held.filter(|(_, players)| *players > 0).collect(),
+      playing,
+    });
+    self
   }
 }
 
@@ -522,6 +605,7 @@ impl fmt::Display for Report {
     lines.extend(self.crossing.line());
     lines.extend(self.sight().into_iter().chain(self.unjoined()));
     lines.extend(self.drain.line());
+    lines.extend(self.census.as_ref().map(Census::line));
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -555,6 +639,7 @@ impl fmt::Display for Report {
     lines.extend(self.crossing.budget().into_iter().map(line));
     lines.extend(self.sight_budget().map(line));
     lines.extend(self.drain.budget().into_iter().flatten().map(line));
+    lines.extend(self.census.iter().flat_map(Census::budget).map(line));
     writeln!(f, "{}", lines.join("\n"))
   }
 }
@@ -565,12 +650,13 @@ mod tests {
   use std::time::Duration;
 
   use mmo_client::Place;
-  use mmo_protocol::{Layer, ZoneId};
+  use mmo_protocol::{Layer, Refusal, ZoneId};
   use tokio::time::Instant;
 
   use super::{Queue, Report, Stats, Ticks};
-  use crate::bot::{End, Outcome, Role};
+  use crate::bot::{End, Outcome, Probe, Role};
   use crate::layers::{Players, Realm, Seen};
+  use crate::levels::Levels;
 
   fn played(wait: u64, enter: u64, up: usize, down: usize, largest: usize) -> Outcome {
     Outcome {
@@ -698,6 +784,38 @@ mod tests {
     assert!(text.starts_with("load test: 0 bots, 0 played, 0 waiting, 0 failed\n"), "{text}");
     assert!(
       text.contains("budget tick p99 at most 25 ms: over\nbudget no tick of 50 ms or more: over\n")
+    );
+  }
+
+  #[test]
+  fn the_census_of_a_run_with_a_rush_names_the_levels_the_probe_and_the_players_of_each_realm() {
+    use mmo_protocol::Population::{Full, Low};
+    let seen = || Seen::from([(1, realm(5, &[(1, 1, 2, 2)])), (2, realm(5, &[(1, 1, 0, 1)]))]);
+    let playing = |realm| Outcome { end: End::Playing, realm, ..played(1, 2, 0, 0, 0) };
+    let census = |outcomes: &[Outcome], levels, characters| {
+      let zero = Duration::ZERO;
+      let report = Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen(), zero);
+      report.with_census(outcomes, levels, characters).to_string()
+    };
+    let probe = Outcome { probe: Some(Probe::Refused(Refusal::Full)), ..playing(1) };
+    let last = BTreeMap::from([(1, Full), (2, Low)]);
+    let text = census(&[probe, playing(1)], Levels { looks: 3, apart: 0, last }, 1);
+    let line = "realms: 3 looks at the list, 0 levels apart from the admitted players, the last levels 1 Full, 2 Low, the bot before the rush got the refusal Full and holds 1 characters in the first realm, the players of each realm 1 2 and its bots that play 1 2\n";
+    assert!(text.contains(line), "{text}");
+    let budget = "budget the level of each realm matches its admitted players at each look: ok\nbudget the full realm refuses a new character and makes none: ok\nbudget each realm holds the players of its bots: ok\n";
+    assert!(text.ends_with(budget), "{text}");
+    let made = Outcome { probe: Some(Probe::Made), ..playing(2) };
+    let text = census(&[made], Levels { looks: 0, apart: 0, last: BTreeMap::new() }, 2);
+    assert!(text.contains("the last levels , the bot before the rush got a new character and holds 2 characters in the first realm, the players of each realm 1 2 and its bots that play 2 1\n"), "{text}");
+    let over = "budget the level of each realm matches its admitted players at each look: over\nbudget the full realm refuses a new character and makes none: over\nbudget each realm holds the players of its bots: over\n";
+    assert!(text.ends_with(over), "{text}");
+    let text = census(&[], Levels { looks: 2, apart: 1, last: BTreeMap::new() }, 0);
+    assert!(text.contains("1 levels apart from the admitted players, the last levels , the bot before the rush got no answer and holds 0 characters"), "{text}");
+    assert!(
+      text.contains(
+        "budget the level of each realm matches its admitted players at each look: over\n"
+      ),
+      "{text}"
     );
   }
 

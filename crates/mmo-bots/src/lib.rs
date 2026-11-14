@@ -44,6 +44,17 @@
 //!   directory shows an empty layer, or a layer of a quarter of its cap or fewer whose players fit
 //!   in the room of the other layers of the zone. So a measure of 150 s proves the drain and the
 //!   close of the layers that the leavers emptied. The default is 0.
+//! - `MMO_BOTS_REALMS`: the count of the bots of each realm, in the order of the realms, with
+//!   commas between them, as `150,85,50`. The first bots fill the first realm, the next ones the
+//!   second, and so on. With no value, the bots go round the realms.
+//! - `MMO_BOTS_RUSH`: how many of the last bots of the first realm log in once each other bot
+//!   plays, at the pace of the ramp, as `50`. The bot of the first realm before them asks first
+//!   for a new character, which fills the realm, so the realm must refuse it, and then plays its
+//!   own. The rush waits in the queue of the full realm, and the leavers then free their slots.
+//!   Each second of the measure, the run also asks the last login service for the list of the
+//!   realms, and the report fails when the level of a realm is not the level of its admitted
+//!   players and its cap, when the full realm made the new character, or when the layers of a
+//!   realm do not hold its bots that play. The default is 0.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.
@@ -63,6 +74,7 @@ mod config;
 #[cfg(test)]
 mod fixture;
 mod layers;
+mod levels;
 mod report;
 mod rng;
 mod seed;
@@ -73,6 +85,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use mmo_client::Trust;
+use mmo_protocol::RealmId;
 use mmo_store::Store;
 use redis::aio::MultiplexedConnection;
 use sqlx::postgres::PgPoolOptions;
@@ -83,8 +96,9 @@ use tokio::time::{Instant, sleep};
 use bot::{Outcome, Shared};
 use config::Config;
 use layers::Seen;
+use levels::Levels;
 use report::Report;
-use seed::SEEDERS;
+use seed::{Bot, SEEDERS};
 
 pub use config::Error as ConfigError;
 
@@ -115,14 +129,15 @@ pub async fn run(read: &dyn Fn(&str) -> Option<String>) -> Result<(), Failure> {
   Ok(())
 }
 
-/// Waits until each bot plays or failed, or until `limit` passes, and says its progress.
-async fn settle(shared: &Shared, bots: usize, limit: Duration) {
+/// Waits until `count` reaches `bots`, or until `limit` passes, and says its progress: the bots
+/// that play or failed, or the bots of the rush that got a place in the queue.
+async fn settle(count: &AtomicUsize, bots: usize, what: &str, limit: Duration) {
   let end = Instant::now() + limit;
   let mut waits = 0_u32;
   loop {
-    let ready = shared.ready.load(Ordering::Relaxed);
+    let ready = count.load(Ordering::Relaxed);
     if waits.is_multiple_of(50) {
-      eprintln!("{ready} of {bots} bots play or failed");
+      eprintln!("{ready} of {bots} bots {what}");
     }
     if ready >= bots || Instant::now() >= end {
       return;
@@ -132,20 +147,50 @@ async fn settle(shared: &Shared, bots: usize, limit: Duration) {
   }
 }
 
-/// Looks at the directory of the layers each second until the measure ends, and once at its end.
+/// Looks at the directory of the layers each second until the measure ends, and once at its end,
+/// and in a run with a rush at the levels of the list of the realms, which any login service
+/// gives: it asks the last one, whose realm the rush does not fill.
 async fn look_during(
   redis: &mut MultiplexedConnection,
   config: &Config,
+  trust: &Trust,
   seen: &mut Seen,
-) -> redis::RedisResult<()> {
+  levels: &mut Levels,
+) -> Result<(), Failure> {
   let end = Instant::now() + config.play;
   loop {
-    layers::look(redis, config.realms(), seen).await?;
+    let looked = layers::look(redis, config.realms(), seen).await;
+    let listed = if config.rush > 0 {
+      let login = config.login.rsplit(',').next().unwrap_or_default();
+      levels::look(trust, login, redis, config.realms(), levels).await
+    } else {
+      Ok(())
+    };
+    looked.map_err(Failure::from).and(listed)?;
     let left = end.saturating_duration_since(Instant::now());
     if left.is_zero() {
       return Ok(());
     }
     sleep(left.min(Duration::from_secs(1))).await;
+  }
+}
+
+/// What the `bots` of a run share, with the signal `leave` for the leavers.
+fn shared(config: &Config, trust: Trust, bots: &[Bot], leave: watch::Receiver<bool>) -> Shared {
+  Shared {
+    trust,
+    gateway: config.gateway.clone(),
+    zone: config.zone,
+    seed: config.seed,
+    ready: AtomicUsize::new(0),
+    reconnect: !config.recover.is_zero(),
+    crossers: usize::try_from(config.crossers).unwrap_or(usize::MAX),
+    realms: bots.iter().map(|bot| (bot.character.0, bot.realm)).collect(),
+    leavers: config.leavers,
+    leave,
+    ramp: config.ramp,
+    rushing: bots.len().saturating_sub(config.rush as usize),
+    rushed: AtomicUsize::new(0),
   }
 }
 
@@ -161,16 +206,10 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let bots = seed::seed(&store, config).await?;
   let client = redis::Client::open(config.redis.as_str())?;
   let mut redis = client.get_multiplexed_async_connection().await?;
-  let gateway = config.gateway.clone();
-  let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
-  let reconnect = !config.recover.is_zero();
-  let crossers = usize::try_from(config.crossers).unwrap_or(usize::MAX);
-  let realms = bots.iter().map(|bot| (bot.character.0, bot.realm)).collect();
   let (leaving, leave) = watch::channel(false);
-  let leavers = config.leavers;
-  let base =
-    Shared { trust, gateway, zone, seed, ready, reconnect, crossers, realms, leavers, leave };
-  let shared = Arc::new(base);
+  let prober = bots.iter().find(|bot| bot.probe.is_some()).map(|bot| bot.id);
+  let rush = config.rush as usize;
+  let shared = Arc::new(shared(config, trust, &bots, leave));
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
   for bot in bots {
@@ -181,11 +220,13 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
       bot::run(&shared, &bot, stopped).await
     });
   }
-  settle(&shared, tasks.len().saturating_sub(config.waiting as usize), config.join).await;
+  let playing = tasks.len().saturating_sub((config.waiting as usize).max(rush));
+  settle(&shared.ready, playing, "play or failed", config.join).await;
+  settle(&shared.rushed, rush, "of the rush wait in the queue", config.join).await;
   leaving.send_replace(true);
   let before = ticks::read(&mut redis, config.realms()).await;
-  let mut opened = Seen::new();
-  let looked = look_during(&mut redis, config, &mut opened).await;
+  let (mut opened, mut levels) = (Seen::new(), Levels::default());
+  let looked = look_during(&mut redis, config, &shared.trust, &mut opened, &mut levels).await;
   let after = ticks::read(&mut redis, config.realms()).await;
   stop.send_replace(true);
   let mut outcomes: Vec<Outcome> = Vec::new();
@@ -195,7 +236,7 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   }
   let counts = before.and_then(|before| after.map(|after| ticks::since(&before, &after)))?;
   looked?;
-  Ok(Report::new(
+  let report = Report::new(
     usize::try_from(config.bots).unwrap_or(usize::MAX),
     usize::try_from(config.waiting).unwrap_or(usize::MAX),
     config.recover,
@@ -203,15 +244,26 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
     &counts,
     opened,
     config.play,
-  ))
+  );
+  match prober {
+    Some(id) => store
+      .characters(id, RealmId(1))
+      .await
+      .map(|listed| report.with_census(&outcomes, levels, listed.len()))
+      .map_err(Failure::from),
+    None => Ok(report),
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use std::path::Path;
 
-  use mmo_client::testing::{Fake, hold};
-  use mmo_protocol::{Attach, Password, ZoneId};
+  use mmo_client::testing::{Fake, hold, script};
+  use mmo_protocol::{
+    Attach, Character, CharacterId, FromLogin, Password, Population, Realm, RealmId, Refusal,
+    Rules, ToLogin, Token, ZoneId,
+  };
   use mmo_store::Store;
   use mmo_store::testing::Redis;
   use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -284,6 +336,84 @@ mod tests {
     login.end().await;
     let none = vars(&path, url.as_str(), &redis.url(), 0, &[]);
     assert_eq!(run_with(&none).await, Ok(()));
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_run_with_a_rush_looks_at_the_levels_and_counts_the_characters_of_the_probe(
+    _: PgPoolOptions,
+    connect: PgConnectOptions,
+  ) {
+    let url = connect.to_url_lossy();
+    let store = Store::migrate(PgPool::connect_with(connect).await.expect("a pool"))
+      .await
+      .expect("a migrated database");
+    store.add_zone(ZoneId(1), "meadow").await.expect("a zone");
+    let redis = Redis::start().await;
+    let brom = || Character { id: CharacterId(1), name: "Bxyzaaaa".to_owned() };
+    let place = || FromLogin::Queued { position: 0, length: 1, wait: 1, resume: Token([1; 32]) };
+    let first = Fake::start_each(vec![
+      script(move |mut peer| async move {
+        peer.read::<ToLogin>().await;
+        peer.write(&place()).await;
+        peer.write(&FromLogin::Characters(vec![brom()])).await;
+        let asked = ToLogin::NewCharacter { name: "Nxyzaaaa".to_owned() };
+        assert_eq!(peer.read::<ToLogin>().await, asked);
+        peer.write(&FromLogin::Refused(Refusal::Full)).await;
+        peer
+      }),
+      script(move |mut peer| async move {
+        peer.read::<ToLogin>().await;
+        peer.write(&FromLogin::Characters(vec![brom()])).await;
+        assert_eq!(peer.read::<ToLogin>().await, ToLogin::Select { character: CharacterId(1) });
+        peer.write(&FromLogin::Session { token: Token([5; 32]) }).await;
+        peer
+      }),
+      script(move |mut peer| async move {
+        peer.read::<ToLogin>().await;
+        peer.write(&place()).await;
+        peer
+      }),
+    ]);
+    let full = |id| Realm {
+      id: RealmId(id),
+      name: format!("Realm{id}"),
+      region: "Europe".to_owned(),
+      language: "French".to_owned(),
+      rules: Rules::Normal,
+      population: Population::Full,
+      queue: 0,
+      login: "localhost:1".to_owned(),
+    };
+    let second = Fake::start(move |mut peer| async move {
+      assert_eq!(peer.read::<ToLogin>().await, ToLogin::Realms);
+      peer.write(&FromLogin::Realms(vec![full(1), full(2)])).await;
+      peer
+    });
+    let gateway = Fake::start(move |mut peer| async move {
+      peer.read::<Attach>().await;
+      // The seeders make the two characters at once, so either one can hold the id 1.
+      send(&peer, &snapshot(10, None, vec![entity(1), entity(2)]));
+      peer
+    });
+    let (_folder, path) = authority(&[&first, &second, &gateway]);
+    let logins = format!("{},{}", first.address, second.address);
+    let more = [
+      ("MMO_BOTS_LOGIN", logins.as_str()),
+      ("MMO_BOTS_GATEWAY", gateway.address.as_str()),
+      ("MMO_BOTS_REALMS", "2,0"),
+      ("MMO_BOTS_RUSH", "1"),
+      ("MMO_BOTS_WAITING", "1"),
+    ];
+    let two = vars(&path, url.as_str(), &redis.url(), 2, &more);
+    let read = |name: &str| two.iter().rev().find(|(key, _)| *key == name).map(|(_, v)| v.clone());
+    let report = measure(&Config::read(&read).expect("a config")).await.expect("a report");
+    let text = report.to_string();
+    assert!(text.starts_with("load test: 2 bots, 1 played, 1 waiting, 0 failed\n"), "{text}");
+    let census = "realms: 1 looks at the list, 0 levels apart from the admitted players, the last levels 1 Full, 2 Full, the bot before the rush got the refusal Full and holds 1 characters in the first realm, the players of each realm  and its bots that play 1 1\n";
+    assert!(text.contains(census), "{text}");
+    gateway.end().await;
+    second.end().await;
+    first.end().await;
   }
 
   /// A Redis user that may run each command but those that `rules` take away.
