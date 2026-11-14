@@ -211,7 +211,8 @@ struct Crossing {
   crossed: usize,
   /// The moves of the bots to another layer, of each zone.
   moves: usize,
-  /// The moves into the next zone, and those of them that kept the number of their layer.
+  /// The moves of the crossers into the next zone, and those of them that kept the number of their
+  /// layer. A bot that does not cross may walk over the border, and it owes nothing to its number.
   entries: usize,
   kept: usize,
 }
@@ -219,10 +220,11 @@ struct Crossing {
 impl Crossing {
   fn new(outcomes: &[Outcome]) -> Self {
     let next = |(from, to): &&(Layer, Layer)| to.zone.0 == from.zone.0 + 1;
-    let entries = || outcomes.iter().flat_map(|out| &out.crossings).filter(next);
+    let crossers = || outcomes.iter().filter(|out| out.crosser);
+    let entries = || crossers().flat_map(|out| &out.crossings).filter(next);
     Self {
-      crossers: outcomes.iter().filter(|out| out.crosser).count(),
-      crossed: outcomes.iter().filter(|out| out.crossings.iter().any(|one| next(&one))).count(),
+      crossers: crossers().count(),
+      crossed: crossers().filter(|out| out.crossings.iter().any(|one| next(&one))).count(),
       moves: outcomes.iter().map(|out| out.crossings.len()).sum(),
       entries: entries().count(),
       kept: entries().filter(|(from, to)| to.number == from.number).count(),
@@ -259,6 +261,9 @@ pub(crate) struct Report {
   crossing: Crossing,
   /// The bots of another shard that the bots saw, each counted once for each bot that saw it.
   strangers: usize,
+  /// The bots that the end of the measure found before their first snapshot, by their phase: a
+  /// bot that waits in the queue is one of them.
+  unjoined: BTreeMap<&'static str, usize>,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -310,6 +315,10 @@ impl Report {
     for out in outcomes.iter().filter(|out| out.joined.is_some()) {
       *shards.entry(out.shard).or_default() += 1;
     }
+    let mut unjoined = BTreeMap::new();
+    for out in outcomes.iter().filter(|out| out.joined.is_none() && out.fault.is_none()) {
+      *unjoined.entry(out.phase).or_default() += 1;
+    }
     Self {
       bots,
       played: outcomes.iter().filter(|out| out.joined.is_some()).count(),
@@ -317,6 +326,7 @@ impl Report {
       recovery: Recovery::new(recover, outcomes),
       crossing: Crossing::new(outcomes),
       strangers: outcomes.iter().map(|out| out.strangers.len()).sum(),
+      unjoined,
       faults,
       position: Stats::new(
         outcomes.iter().filter_map(|out| out.place).map(|p| f64::from(p.position)).collect(),
@@ -380,6 +390,17 @@ impl Report {
     self.sighted().then(|| format!("sight: {} bots of another shard seen", self.strangers))
   }
 
+  /// The line of the report on the bots that stopped before their first snapshot, and where each
+  /// one stood, when some did.
+  fn unjoined(&self) -> Option<String> {
+    let total: usize = self.unjoined.values().sum();
+    let phases: Vec<String> =
+      self.unjoined.iter().map(|(phase, n)| format!("{phase} {n}")).collect();
+    (total > 0).then(|| {
+      format!("unjoined: {total} bots stopped before their first snapshot: {}", phases.join(", "))
+    })
+  }
+
   /// The line of the budget on that sight: a shard is a world of its own, so none is seen.
   fn sight_budget(&self) -> Option<(&'static str, bool)> {
     self.sighted().then_some(("no bot saw a bot of another shard", self.strangers == 0))
@@ -414,7 +435,7 @@ impl fmt::Display for Report {
       lines.push(self.recovery.line());
     }
     lines.extend(self.crossing.line());
-    lines.extend(self.sight());
+    lines.extend(self.sight().into_iter().chain(self.unjoined()));
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -601,8 +622,9 @@ mod tests {
       let (zero, seen) = (Duration::ZERO, Seen::new());
       Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
-    let text = report(&[crossed, moved, one(vec![])]);
-    let mixed = "crossings: 2 moves to another layer, 1 of 3 crossers entered the next zone, 0 of 1 entries kept the number of their layer\n";
+    let walker = Outcome { crossings: vec![(layer(1, 3), layer(2, 5))], ..played(1, 2, 0, 0, 0) };
+    let text = report(&[crossed, moved, one(vec![]), walker]);
+    let mixed = "crossings: 3 moves to another layer, 1 of 3 crossers entered the next zone, 0 of 1 entries kept the number of their layer\n";
     assert!(text.contains(mixed), "{text}");
     let budget = "budget each crosser entered the next zone: over\nbudget each entry into the next zone kept the number of its layer: over\n";
     assert!(text.ends_with(budget), "{text}");
@@ -612,6 +634,25 @@ mod tests {
     assert!(text.ends_with("entered the next zone: ok\nbudget each entry into the next zone kept the number of its layer: ok\n"), "{text}");
     let text = report(&[played(1, 2, 0, 0, 0)]);
     assert!(!text.contains("crossings") && !text.contains("crosser"), "{text}");
+  }
+
+  #[test]
+  fn the_report_says_where_the_bots_that_never_played_stood() {
+    let stopped = |phase| Outcome { phase, ..Outcome::default() };
+    let faulted = Outcome { fault: Some("a fault".to_owned()), ..stopped("login") };
+    let queued = Outcome { queued: true, ..stopped("login") };
+    let one = played(1, 2, 0, 0, 0);
+    let outcomes =
+      [stopped("attach"), stopped("snapshot"), stopped("attach"), faulted, queued, one];
+    let (zero, seen) = (Duration::ZERO, Seen::new());
+    let text = Report::new(6, 0, zero, &outcomes, &BTreeMap::new(), seen, zero).to_string();
+    let line =
+      "unjoined: 4 bots stopped before their first snapshot: attach 2, login 1, snapshot 1\n";
+    assert!(text.contains(line), "{text}");
+    let (zero, seen) = (Duration::ZERO, Seen::new());
+    let text =
+      Report::new(1, 0, zero, &[played(1, 2, 0, 0, 0)], &BTreeMap::new(), seen, zero).to_string();
+    assert!(!text.contains("unjoined"), "{text}");
   }
 
   #[test]

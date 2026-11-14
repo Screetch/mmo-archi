@@ -73,6 +73,9 @@ pub(crate) struct Outcome {
   pub(crate) crossings: Vec<(Layer, Layer)>,
   /// The characters of another shard that a snapshot gave to the bot.
   pub(crate) strangers: HashSet<i64>,
+  /// What the bot did last: it waited for the crossers, logged in, attached to the gateway, or
+  /// waited for the first snapshot that shows its player.
+  pub(crate) phase: &'static str,
   /// The time from the first snapshot that shows the player to the end.
   pub(crate) played: Duration,
   /// The bytes of the datagrams up and down, with no header of IP, UDP or QUIC.
@@ -267,11 +270,13 @@ async fn play(
   // The crossers log in first: they fill the first layer of their shard, so a crosser enters the
   // layer with its number in the next zone, which the first crossing opens.
   while !bot.crosser && shared.ready.load(Ordering::Relaxed) < shared.crossers {
+    out.phase = "crossers";
     tokio::select! {
       () = sleep(RETRY) => {}
       _ = stop.changed() => return Ok(false),
     }
   }
+  out.phase = "login";
   let started = Instant::now();
   let queued = &mut |place| {
     out.place.get_or_insert(place);
@@ -282,7 +287,9 @@ async fn play(
     _ = stop.changed() => return Ok(true),
   };
   out.waited = Some(started.elapsed());
+  out.phase = "attach";
   let mut link = Play::attach(&shared.trust, &shared.gateway, token).await?;
+  out.phase = "snapshot";
   let mut walk = Walk::new(shared, bot);
   let mut clock = interval(TICK);
   clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
