@@ -211,31 +211,43 @@ struct Crossing {
   crossed: usize,
   /// The moves of the bots to another layer, of each zone.
   moves: usize,
+  /// The moves of the crossers into the next zone, and those of them that kept the number of their
+  /// layer. A bot that does not cross may walk over the border, and it owes nothing to its number.
+  entries: usize,
+  kept: usize,
 }
 
 impl Crossing {
   fn new(outcomes: &[Outcome]) -> Self {
-    let next = |(from, to): &(Layer, Layer)| to.zone.0 == from.zone.0 + 1;
+    let next = |(from, to): &&(Layer, Layer)| to.zone.0 == from.zone.0 + 1;
+    let crossers = || outcomes.iter().filter(|out| out.crosser);
+    let entries = || crossers().flat_map(|out| &out.crossings).filter(next);
     Self {
-      crossers: outcomes.iter().filter(|out| out.crosser).count(),
-      crossed: outcomes.iter().filter(|out| out.crossings.iter().any(next)).count(),
+      crossers: crossers().count(),
+      crossed: crossers().filter(|out| out.crossings.iter().any(|one| next(&one))).count(),
       moves: outcomes.iter().map(|out| out.crossings.len()).sum(),
+      entries: entries().count(),
+      kept: entries().filter(|(from, to)| to.number == from.number).count(),
     }
   }
 
   /// The line of the report, when some bots cross.
   fn line(&self) -> Option<String> {
-    let Self { crossers, crossed, moves } = self;
+    let Self { crossers, crossed, moves, entries, kept } = self;
     let text = format!(
-      "crossings: {moves} moves to another layer, {crossed} of {crossers} crossers entered the next zone"
+      "crossings: {moves} moves to another layer, {crossed} of {crossers} crossers entered the next zone, {kept} of {entries} entries kept the number of their layer"
     );
     (*crossers > 0).then_some(text)
   }
 
-  /// The line of the budget, when some bots cross.
-  fn budget(&self) -> Option<(&'static str, bool)> {
-    let label = "each crosser entered the next zone";
-    (self.crossers > 0).then_some((label, self.crossed >= self.crossers))
+  /// The lines of the budget, when some bots cross. A crossing keeps the number of its layer when
+  /// the layer with that number is open in the next zone and has room: the stage that runs it
+  /// holds each crosser of a shard on one layer, which the next zone opens with the first crosser.
+  fn budget(&self) -> Vec<(&'static str, bool)> {
+    let crossed = ("each crosser entered the next zone", self.crossed >= self.crossers);
+    let kept =
+      ("each entry into the next zone kept the number of its layer", self.kept == self.entries);
+    if self.crossers > 0 { vec![crossed, kept] } else { Vec::new() }
   }
 }
 
@@ -247,6 +259,11 @@ pub(crate) struct Report {
   queue: Queue,
   recovery: Recovery,
   crossing: Crossing,
+  /// The bots of another shard that the bots saw, each counted once for each bot that saw it.
+  strangers: usize,
+  /// The bots that the end of the measure found before their first snapshot, by their phase: a
+  /// bot that waits in the queue is one of them.
+  unjoined: BTreeMap<&'static str, usize>,
   faults: BTreeMap<String, usize>,
   position: Stats,
   waited: Stats,
@@ -298,12 +315,18 @@ impl Report {
     for out in outcomes.iter().filter(|out| out.joined.is_some()) {
       *shards.entry(out.shard).or_default() += 1;
     }
+    let mut unjoined = BTreeMap::new();
+    for out in outcomes.iter().filter(|out| out.joined.is_none() && out.fault.is_none()) {
+      *unjoined.entry(out.phase).or_default() += 1;
+    }
     Self {
       bots,
       played: outcomes.iter().filter(|out| out.joined.is_some()).count(),
       queue: Queue::new(waiting, outcomes),
       recovery: Recovery::new(recover, outcomes),
       crossing: Crossing::new(outcomes),
+      strangers: outcomes.iter().map(|out| out.strangers.len()).sum(),
+      unjoined,
       faults,
       position: Stats::new(
         outcomes.iter().filter_map(|out| out.place).map(|p| f64::from(p.position)).collect(),
@@ -356,6 +379,34 @@ impl Report {
   }
 }
 
+impl Report {
+  /// Whether bots of more than one shard played, so that a bot could see a bot of another.
+  fn sighted(&self) -> bool {
+    self.shards.len() > 1
+  }
+
+  /// The line of the report on the bots of another shard that a bot saw, when two shards play.
+  fn sight(&self) -> Option<String> {
+    self.sighted().then(|| format!("sight: {} bots of another shard seen", self.strangers))
+  }
+
+  /// The line of the report on the bots that stopped before their first snapshot, and where each
+  /// one stood, when some did.
+  fn unjoined(&self) -> Option<String> {
+    let total: usize = self.unjoined.values().sum();
+    let phases: Vec<String> =
+      self.unjoined.iter().map(|(phase, n)| format!("{phase} {n}")).collect();
+    (total > 0).then(|| {
+      format!("unjoined: {total} bots stopped before their first snapshot: {}", phases.join(", "))
+    })
+  }
+
+  /// The line of the budget on that sight: a shard is a world of its own, so none is seen.
+  fn sight_budget(&self) -> Option<(&'static str, bool)> {
+    self.sighted().then_some(("no bot saw a bot of another shard", self.strangers == 0))
+  }
+}
+
 impl fmt::Display for Report {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let queued = self.queue.waiting;
@@ -384,6 +435,7 @@ impl fmt::Display for Report {
       lines.push(self.recovery.line());
     }
     lines.extend(self.crossing.line());
+    lines.extend(self.sight().into_iter().chain(self.unjoined()));
     lines.push(format!(
       "ticks of the writers in {:.0} s: {total}, p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms, {slow} over 25 ms, {late} over 50 ms",
       self.window.as_secs_f64(),
@@ -414,7 +466,8 @@ impl fmt::Display for Report {
     if !bound.is_zero() {
       lines.extend(self.recovery.budget().map(|(label, holds)| line((&label, holds))));
     }
-    lines.extend(self.crossing.budget().map(line));
+    lines.extend(self.crossing.budget().into_iter().map(line));
+    lines.extend(self.sight_budget().map(line));
     writeln!(f, "{}", lines.join("\n"))
   }
 }
@@ -569,15 +622,58 @@ mod tests {
       let (zero, seen) = (Duration::ZERO, Seen::new());
       Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
-    let text = report(&[crossed, moved, one(vec![])]);
-    let mixed = "crossings: 2 moves to another layer, 1 of 3 crossers entered the next zone\n";
+    let walker = Outcome { crossings: vec![(layer(1, 3), layer(2, 5))], ..played(1, 2, 0, 0, 0) };
+    let text = report(&[crossed, moved, one(vec![]), walker]);
+    let mixed = "crossings: 3 moves to another layer, 1 of 3 crossers entered the next zone, 0 of 1 entries kept the number of their layer\n";
     assert!(text.contains(mixed), "{text}");
-    assert!(text.ends_with("budget each crosser entered the next zone: over\n"), "{text}");
+    let budget = "budget each crosser entered the next zone: over\nbudget each entry into the next zone kept the number of its layer: over\n";
+    assert!(text.ends_with(budget), "{text}");
     let text = report(&[one(vec![(layer(1, 1), layer(2, 1))])]);
-    let all = "crossings: 1 moves to another layer, 1 of 1 crossers entered the next zone\n";
-    assert!(text.contains(all) && text.ends_with("entered the next zone: ok\n"), "{text}");
+    let all = "crossings: 1 moves to another layer, 1 of 1 crossers entered the next zone, 1 of 1 entries kept the number of their layer\n";
+    assert!(text.contains(all), "{text}");
+    assert!(text.ends_with("entered the next zone: ok\nbudget each entry into the next zone kept the number of its layer: ok\n"), "{text}");
     let text = report(&[played(1, 2, 0, 0, 0)]);
     assert!(!text.contains("crossings") && !text.contains("crosser"), "{text}");
+  }
+
+  #[test]
+  fn the_report_says_where_the_bots_that_never_played_stood() {
+    let stopped = |phase| Outcome { phase, ..Outcome::default() };
+    let faulted = Outcome { fault: Some("a fault".to_owned()), ..stopped("login") };
+    let queued = Outcome { queued: true, ..stopped("login") };
+    let one = played(1, 2, 0, 0, 0);
+    let outcomes =
+      [stopped("attach"), stopped("snapshot"), stopped("attach"), faulted, queued, one];
+    let (zero, seen) = (Duration::ZERO, Seen::new());
+    let text = Report::new(6, 0, zero, &outcomes, &BTreeMap::new(), seen, zero).to_string();
+    let line =
+      "unjoined: 4 bots stopped before their first snapshot: attach 2, login 1, snapshot 1\n";
+    assert!(text.contains(line), "{text}");
+    let (zero, seen) = (Duration::ZERO, Seen::new());
+    let text =
+      Report::new(1, 0, zero, &[played(1, 2, 0, 0, 0)], &BTreeMap::new(), seen, zero).to_string();
+    assert!(!text.contains("unjoined"), "{text}");
+  }
+
+  #[test]
+  fn the_report_counts_the_bots_of_another_shard_that_a_bot_saw_when_two_shards_play() {
+    let on = |shard, seen: &[i64]| Outcome {
+      shard,
+      strangers: seen.iter().copied().collect(),
+      ..played(1, 2, 0, 0, 0)
+    };
+    let report = |outcomes: &[Outcome]| {
+      let (zero, seen) = (Duration::ZERO, Seen::new());
+      Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
+    };
+    let text = report(&[on(1, &[]), on(2, &[])]);
+    assert!(text.contains("sight: 0 bots of another shard seen\n"), "{text}");
+    assert!(text.ends_with("budget no bot saw a bot of another shard: ok\n"), "{text}");
+    let text = report(&[on(1, &[7, 8]), on(2, &[9])]);
+    assert!(text.contains("sight: 3 bots of another shard seen\n"), "{text}");
+    assert!(text.ends_with("budget no bot saw a bot of another shard: over\n"), "{text}");
+    let text = report(&[on(1, &[7]), on(1, &[])]);
+    assert!(!text.contains("sight") && !text.contains("another shard"), "{text}");
   }
 
   #[test]

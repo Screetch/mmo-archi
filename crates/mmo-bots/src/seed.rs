@@ -44,13 +44,15 @@ pub(crate) fn letters(mut n: u64, width: usize) -> String {
     .collect()
 }
 
-/// The last `crossers` bots cross the east border of the zone.
+/// The first `crossers` bots cross the east border of the zone. They log in before the others, so
+/// they stand on the first layer of their shard.
 fn crosser(config: &Config, index: u32) -> bool {
-  index >= config.bots.saturating_sub(config.crossers)
+  index < config.crossers
 }
 
-/// Where the bot `index` starts: a crosser within 30 m of the east border, the first `town` bots in
-/// one square of 128 m, and the others anywhere in the zone, in centimetres on the floor.
+/// Where the bot `index` starts: a crosser within 30 m of the east border, the first `town` bots
+/// that do not cross in one square of 128 m, and the others anywhere in the zone, in centimetres
+/// on the floor.
 fn start(config: &Config, index: u32) -> State {
   let mut rng = Rng::new(config.seed ^ u64::from(index));
   let mut at = |origin: i32, span: u32| origin + i32::try_from(rng.below(span)).unwrap_or_default();
@@ -168,9 +170,9 @@ mod tests {
       let (x, _, z) = at(index);
       (SIDE_CM - 3_000..SIDE_CM - 100).contains(&x) && (1_000..101_400).contains(&z)
     };
-    assert!((0..4).all(town) && (4..7).all(spread) && (7..10).all(border));
+    assert!((0..3).all(border) && town(3) && (4..10).all(spread));
     let crossers: Vec<u32> = bots.iter().filter(|bot| bot.crosser).map(|bot| bot.index).collect();
-    assert_eq!(crossers, [7, 8, 9]);
+    assert_eq!(crossers, [0, 1, 2]);
     assert!(saved.iter().all(|one| one.zone == ZoneId(3) && one.state.hit_points == 100));
     let again = seed(&store, &config(1, 0)).await.err().map(|error| error.to_string());
     assert_eq!(again.as_deref(), Some("the store refuses the bots: the name botabc0 is taken"));

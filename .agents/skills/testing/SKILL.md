@@ -21,7 +21,7 @@ Each gate runs locally. Run each build through `sh script/build-slot.sh`, as `AG
 | Change | Start with |
 | --- | --- |
 | A defect | Reproduce it narrowly; run that proof again after the repair, and the tests beside it |
-| A crate of `crates/` | `cargo test -p <crate>` as a quick probe, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo coverage`, which must stay at 100 percent |
+| A crate of `crates/` | `cargo nextest run -p <crate>` as a quick probe, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo coverage`, which must stay at 100 percent |
 | The lints or the format, `Cargo.toml` or `rustfmt.toml` | `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` on the whole workspace |
 | A message between a client and the servers | The tests of each crate that sends or reads it, since a change of a door is a breaking change, as `.github/pull_request_template.md` says |
 | The shared crate of the collisions | Its tests, with a test that the same state and the same inputs give the same result, since the server and the client must agree |

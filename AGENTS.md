@@ -30,6 +30,8 @@ The files beside the crates:
   the format of the Rust: a width of 100 and two spaces.
 - `.cargo/config.toml` is the one home of the bar of the coverage of the Rust: its alias `cargo coverage` runs the
   tests of the workspace and measures them in the same run.
+- `.config/nextest.toml` is the one home of the limit in time of a test: `cargo coverage` runs each test in a process
+  of its own, and ends the process of a test that runs 120 seconds, with the name of that test.
 - `script/` holds the tools of the gates and of the workers: scripts of sh, and `script/title.py`, which the
   `python3` of the system runs with no package.
 - `mmo-play`, the binary of `mmo-client`, is the game client: `cargo run -p mmo-client --bin mmo-play -- --demo` opens its
@@ -123,6 +125,12 @@ the fix and its proof. An answer that only explains is not done.
 - A test of speed compares two times that it measures in one run, and takes the least of several runs of each, or
   better counts the work that the code does, which no load changes. A bound in seconds fails on a machine under load.
   A test of a process that a timeout ends gives it a limit that a loaded machine cannot cross.
+- The tool holds the limit in time of a test. `.config/nextest.toml` ends each test that runs 120 seconds, and the run
+  fails with the line `TIMEOUT` and the name of the test, so a test that waits for a socket, a channel or a child
+  process holds no slot of builds and no run. Run the tests with `cargo coverage` or `cargo nextest run`, never with
+  `cargo test`, which has no limit. The limit of the file is the last bound of a test. A wait that a test can name
+  still gets a shorter bound of its own, as `within` of `crates/mmo-gateway/src/world.rs` gives, so that its failure
+  names the step.
 
 ## Commands
 
@@ -178,7 +186,7 @@ fix what your change broke, and report what was broken before.
   the Rust.
 - `docker compose up -d`: start PostgreSQL and Redis for local work, as `compose.yaml` says. The tests of `mmo-store`
   run against the PostgreSQL that `DATABASE_URL` names, as `postgres://postgres:postgres@127.0.0.1:5432/postgres`, and
-  each test makes a database of its own and drops it. So `cargo test`, `cargo coverage` and a commit that runs the
+  each test makes a database of its own and drops it. So `cargo nextest`, `cargo coverage` and a commit that runs the
   hook need `DATABASE_URL`. Give them a server that holds no data of a player. The tests of `mmo-login` also start a
   Redis of their own for each test, with the program that `REDIS_SERVER` names, or else `redis-server` of the `PATH`,
   which `brew install redis` gives.
@@ -215,9 +223,9 @@ fix what your change broke, and report what was broken before.
 - `cargo coverage`: the tests of the workspace with their coverage, which must be whole, but for
   `crates/mmo-client/src/window.rs`, the one file that needs a window, which `.cargo/config.toml` leaves out. The tests of `mmo-render`
   draw to a texture and open no window, but they need a graphics adapter: the GPU of the machine, or lavapipe
-  (`mesa-vulkan-drivers`) on Linux. It needs cargo-llvm-cov, which
-  `cargo install cargo-llvm-cov --locked` installs. `cargo test --workspace` runs the tests with no measure, as a quick
-  probe.
+  (`mesa-vulkan-drivers`) on Linux. It needs cargo-llvm-cov and cargo-nextest,
+  which `cargo install cargo-llvm-cov cargo-nextest --locked` installs. `cargo nextest run --workspace` runs the tests with
+  no measure, as a quick probe, with the same limit of each test.
 - `sh script/hooks/pre-commit run`: every guard of the commit hook, on the whole tree, each one the guard of furb for
   the same fault:
   - `stray`: no `*.rej`, `*.orig` or `*-E` file. `large-files`: no file that the change adds holds more than 500 KB.

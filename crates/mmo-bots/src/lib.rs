@@ -12,9 +12,10 @@
 //! with the index `i` plays in the shard `i % n + 1`, through the login service of that shard. Each
 //! second of the measure, [`run`] reads the directory of each shard, `mmo_store::keys::layers`, and
 //! the report tells the layers that opened in each shard and the players on each, and fails when a
-//! layer passes its cap or a shard opens fewer layers than its players need. The bytes are the
-//! sizes of the datagrams, with no header of IP, UDP or QUIC, which add about 60 bytes to each
-//! datagram.
+//! layer passes its cap or a shard opens fewer layers than its players need. When two shards play,
+//! it also counts the bots of another shard that a snapshot gave to a bot, and fails when one did.
+//! The bytes are the sizes of the datagrams, with no header of IP, UDP or QUIC, which add about 60
+//! bytes to each datagram.
 //!
 //! [`run`] reads these variables of its environment:
 //!
@@ -31,9 +32,12 @@
 //!   waits, when a bot with a session entered the queue after one that waits, when a waiting bot
 //!   holds no place of its order of entry, or when it gets no place for more than 7 s. The default
 //!   is 0.
-//! - `MMO_BOTS_CROSSERS`: how many of the last bots start within 30 m of the east border of the
-//!   zone and walk east, which makes each of them cross it, as `50`. The report fails when a
-//!   crosser did not enter the next zone. The default is 0.
+//! - `MMO_BOTS_CROSSERS`: how many of the first bots start within 30 m of the east border of the
+//!   zone and walk east, which makes each of them cross it, as `40`. The other bots log in after
+//!   each of them played, so the crossers stand on the first layer of their shard. Give at most
+//!   as many crossers to a shard as a layer holds. The report fails when a crosser did not enter
+//!   the next zone, and when one entered a layer with another number than its own. The default
+//!   is 0.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.
@@ -154,7 +158,9 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let gateway = config.gateway.clone();
   let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
   let reconnect = !config.recover.is_zero();
-  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready, reconnect });
+  let crossers = usize::try_from(config.crossers).unwrap_or(usize::MAX);
+  let shards = bots.iter().map(|bot| (bot.character.0, bot.shard)).collect();
+  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready, reconnect, crossers, shards });
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
   for bot in bots {

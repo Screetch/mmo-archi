@@ -9,8 +9,9 @@
 # fewer shards than <shards>, when the queue does not hold the <waiting> bots that must wait (0 by default), when the
 # queue does not admit in the order of entry, does not give each waiting bot the place of its rank and does not renew
 # it each 7 s, when <recover> is 1, when a bot that lost its link was not back in play within its bound or came
-# back on another layer, and, when <crossers> is above 0, when a crosser did not enter the next zone. It checks no tick time and no byte budget, which stage 2 of section 12 of
-# docs/architecture.md proves.
+# back on another layer, when two shards play and a bot saw a bot of the other one, and, when <crossers> is above 0, when
+# a crosser did not enter the next zone or entered a layer with another number than its own. It checks no tick time and no
+# byte budget, which stage 2 of section 12 of docs/architecture.md proves.
 set -eu
 
 report=${1:?usage: sh script/report.sh <report> <count> <shards>}
@@ -24,7 +25,7 @@ awk -v want="$count" -v shards="$shards" -v waiting="$waiting" -v recover="$reco
   /^load test: / { found = 1; bots = $3; played = $5; queued = $7 }
   /^  [0-9]+ bots: / { faults += $1; print "fault: " $0 }
   /^shard [0-9]+: / { opened++ }
-  /^budget (no layer over its cap|each shard opened the layers that its players need|the queue holds the bots that must wait|the queue admits in the order of entry|each waiting bot holds the place of its order of entry|each waiting bot gets its place at least each 7 s|each bot that lost its link played again|each bot played again within [0-9]+ s|each bot played again on its layer|each crosser entered the next zone): / {
+  /^budget (no layer over its cap|each shard opened the layers that its players need|the queue holds the bots that must wait|the queue admits in the order of entry|each waiting bot holds the place of its order of entry|each waiting bot gets its place at least each 7 s|each bot that lost its link played again|each bot played again within [0-9]+ s|each bot played again on its layer|each crosser entered the next zone|each entry into the next zone kept the number of its layer|no bot saw a bot of another shard): / {
     lines++
     if ($NF != "ok") { print "error: " $0; bad = 1 }
   }
@@ -34,7 +35,7 @@ awk -v want="$count" -v shards="$shards" -v waiting="$waiting" -v recover="$reco
       printf "error: %s of %s bots played, %s waited of %s that must, and %d ended with a fault\n", played, want, queued, waiting, faults
       bad = 1
     }
-    expected = 6 + 3 * recover + (crossers > 0)
+    expected = 6 + 3 * recover + 2 * (crossers > 0) + (shards > 1)
     if (opened != shards || lines != expected) {
       printf "error: the report shows %d of %d shards, and %d of its %d lines of the budget on the layers, the queue and the recovery\n", opened, shards, lines, expected
       bad = 1
