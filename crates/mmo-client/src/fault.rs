@@ -1,6 +1,6 @@
 use std::io;
 
-use mmo_protocol::Refusal;
+use mmo_protocol::{FromLogin, Refusal};
 use quinn::{ConnectError, ConnectionError, ReadError, SendDatagramError, WriteError};
 use rustls::client::VerifierBuilderError;
 
@@ -54,6 +54,10 @@ pub enum Fault {
   /// The login service refuses the client.
   #[error("the login service refuses: {0:?}")]
   Refused(Refusal),
+  /// The login service answers with a message that does not answer the last message of the
+  /// client.
+  #[error("the login service answers {0:?}, which the client did not ask")]
+  Unasked(FromLogin),
   /// The account holds no character with this name, and a new one did not give it.
   #[error("the account has no character named {0}")]
   NoCharacter(String),

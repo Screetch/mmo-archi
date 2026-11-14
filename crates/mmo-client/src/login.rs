@@ -3,7 +3,7 @@
 use std::future::pending;
 use std::time::Duration;
 
-use mmo_protocol::{CharacterId, FromLogin, Password, ToLogin, Token};
+use mmo_protocol::{CharacterId, FromLogin, Password, Realm, ToLogin, Token};
 use tokio::time::sleep;
 
 use crate::Fault;
@@ -59,6 +59,18 @@ pub async fn enter(
   enter_with(trust, address, account, queued, WAIT).await
 }
 
+/// The realms of the game, as the login service at `address`, as `host:port`, lists them, each
+/// with its attributes and its level of population.
+pub async fn realms(trust: &Trust, address: &str) -> Result<Vec<Realm>, Fault> {
+  let mut link = open(trust, address).await?;
+  link.write(&ToLogin::Realms).await?;
+  match link.read::<FromLogin>().await? {
+    FromLogin::Realms(realms) => Ok(realms),
+    FromLogin::Refused(why) => Err(Fault::Refused(why)),
+    other => Err(Fault::Unasked(other)),
+  }
+}
+
 async fn enter_with(
   trust: &Trust,
   address: &str,
@@ -106,6 +118,7 @@ async fn enter_with(
         let named = || Fault::NoCharacter(account.character.clone());
         return selected.map(|character| Session { token, character }).ok_or_else(named);
       }
+      unasked @ FromLogin::Realms(_) => return Err(Fault::Unasked(unasked)),
     }
   }
 }
@@ -114,11 +127,14 @@ async fn enter_with(
 mod tests {
   use std::time::Duration;
 
-  use mmo_protocol::{Character, CharacterId, FromLogin, Password, Refusal, ToLogin, Token};
+  use mmo_protocol::{
+    Character, CharacterId, FromLogin, Password, Population, Realm, RealmId, Refusal, Rules,
+    ToLogin, Token,
+  };
 
-  use mmo_protocol::frame;
+  use mmo_protocol::{Hello, frame};
 
-  use super::{Account, Place, Session, WAIT, enter, enter_with};
+  use super::{Account, Place, Session, WAIT, enter, enter_with, realms};
   use crate::testing::{Fake, hold};
 
   const TOKEN: Token = Token([9; 32]);
@@ -222,6 +238,77 @@ mod tests {
     let (token, _) = run(&hasty, &account(false)).await;
     assert_eq!(token, Err("the account has no character named brom".to_owned()));
     hasty.end().await;
+    let listing = Fake::start(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      peer.write(&FromLogin::Realms(vec![])).await;
+      peer
+    });
+    let (token, _) = run(&listing, &account(false)).await;
+    assert_eq!(
+      token,
+      Err("the login service answers Realms([]), which the client did not ask".to_owned())
+    );
+    listing.end().await;
+  }
+
+  #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
+  #[tokio::test]
+  async fn the_client_gets_the_realms_with_their_attributes_and_their_levels() {
+    let realm = Realm {
+      id: RealmId(2),
+      name: "Ember".to_owned(),
+      region: "Europe".to_owned(),
+      language: "French".to_owned(),
+      rules: Rules::RolePlay,
+      population: Population::High,
+      queue: 3,
+      login: "localhost:4433".to_owned(),
+    };
+    let listed = realm.clone();
+    let answers = [
+      FromLogin::Realms(vec![listed]),
+      FromLogin::Refused(Refusal::Throttled),
+      FromLogin::Session { token: TOKEN },
+    ];
+    let mut got = Vec::new();
+    for answer in answers {
+      let fake = Fake::start(|mut peer| async move {
+        assert_eq!(peer.read::<ToLogin>().await, ToLogin::Realms);
+        peer.write(&answer).await;
+        peer
+      });
+      got.push(realms(&fake.trust, &fake.address).await.map_err(|fault| fault.to_string()));
+      fake.end().await;
+    }
+    let garbling = Fake::start(|mut peer| async move {
+      peer.read::<ToLogin>().await;
+      peer.write_raw(&frame(&[0xff, 0xff, 0xff]).expect("a frame")).await;
+      peer
+    });
+    got.push(realms(&garbling.trust, &garbling.address).await.map_err(|fault| fault.to_string()));
+    garbling.end().await;
+    let stopping = Fake::raw(|mut peer| async move {
+      Hello::decode(&peer.payload().await).expect("a hello of this version");
+      peer.stop();
+      peer.write_raw(&frame(&Hello { build: 7 }.encode()).expect("a frame")).await;
+      peer
+    });
+    got.push(realms(&stopping.trust, &stopping.address).await.map_err(|fault| fault.to_string()));
+    let nowhere = realms(&stopping.trust, "127.0.0.1:0").await;
+    got.push(nowhere.map_err(|fault| fault.to_string()));
+    stopping.end().await;
+    let session = format!("Session {{ token: {TOKEN:?} }}");
+    assert_eq!(
+      got,
+      [
+        Ok(vec![realm]),
+        Err("the login service refuses: Throttled".to_owned()),
+        Err(format!("the login service answers {session}, which the client did not ask")),
+        Err("the bytes are not a message of this version of the protocol".to_owned()),
+        Err("the client cannot write to the stream: sending stopped by peer: error 0".to_owned()),
+        Err("the client cannot connect: invalid remote address: 127.0.0.1:0".to_owned()),
+      ]
+    );
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]

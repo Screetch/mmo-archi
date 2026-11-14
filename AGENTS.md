@@ -203,8 +203,8 @@ fix what your change broke, and report what was broken before.
   and 56379, in `$TMPDIR/mmo-local`, so a store that already runs on 5432 or 6379 keeps its data. It needs initdb,
   postgres, psql, redis-server, redis-cli, openssl and nc, and it goes through `script/build-slot.sh`, so give its bash
   a timeout of 2400 seconds. Each process writes its log and its pid in that folder, and the other commands read them:
-  `sh script/local.sh check` makes an account and a character through the login service, links to the gateway and waits
-  for a snapshot of the zone, with the binary `mmo-check` and no window (the login service takes 5 new accounts an hour
+  `sh script/local.sh check` prints the list of the realms that a client gets, makes an account and a character through
+  the login service, links to the gateway and waits for a snapshot of the zone, with the binary `mmo-check` and no window (the login service takes 5 new accounts an hour
   from one address, so restart the stack to make more); `sh script/local.sh status` lists the processes; `sh
   script/local.sh stop` ends those pids alone, then checks that none stays. The variables `MMO_LOCAL_DIR`,
   `MMO_LOCAL_PG_PORT`, `MMO_LOCAL_REDIS_PORT`, `MMO_LOCAL_KEEPER_PORT`, `MMO_LOCAL_LOGIN_PORT`, `MMO_LOCAL_ZONE_PORT`,
@@ -212,8 +212,10 @@ fix what your change broke, and report what was broken before.
   PostgreSQL. Set the same ports for `check` and `stop`. `sh script/local.sh bots <count>` runs the load test of
   `mmo-bots` against the stack, with the variables `MMO_BOTS_*` that its doc lists, and prints its report.
   `MMO_LOCAL_REALMS` (1) sets the count of realms, `MMO_LOCAL_REALM_CAP` (100) the cap of each realm and
-  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, and `MMO_LOCAL_ZONES` (1) the count of zones, each on the next square
-  of one row of the map. The stack runs a login service and a pool of layer writers for each realm, the writers on the
+  `MMO_LOCAL_LAYER_CAP` (20) the cap of a layer, `MMO_LOCAL_ZONES` (1) the count of zones, each on the next square
+  of one row of the map, and `MMO_LOCAL_ATTRIBUTES` the attributes of each realm, one word `region:language:rules` for
+  each in its order, as `Europe:French:normal America:English:role-play` (a realm with no word takes
+  `Europe:French:normal`). The stack runs a login service and a pool of layer writers for each realm, the writers on the
   ports from `MMO_LOCAL_ZONE_PORT` up. The bots go round the realms, and their report
   gives the layers that opened in each realm and the players on each. Set the same `MMO_LOCAL_REALMS` for `bots` as for
   `start`. `sh script/report.sh <report> <count> <realms> [<waiting> [<recover>]]` reads that report and fails on a bot

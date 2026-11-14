@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use mmo_protocol::{AccountId, RealmId, Token};
+use mmo_protocol::{AccountId, Population, Realm, RealmId, Rules, Token};
 use mmo_store::keys;
 use redis::Script;
 use redis::aio::ConnectionManager;
@@ -28,12 +28,40 @@ const MARK: u64 = 120;
 static ADMIT: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("admit.lua")));
 static PLACE: LazyLock<Script> = LazyLock::new(|| Script::new(include_str!("place.lua")));
 
-/// A realm of the game: its id in the keys of Redis, the most accounts that it admits at one
-/// time, and the most players of each of its layers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Realm {
+/// The name of `rules` in the configuration and in the entry of the realm in Redis.
+const fn named(rules: Rules) -> &'static str {
+  match rules {
+    Rules::Normal => "normal",
+    Rules::PlayerAgainstPlayer => "player-against-player",
+    Rules::RolePlay => "role-play",
+  }
+}
+
+/// The type of rules whose name is `name`, as [`named`] gives it.
+pub(crate) fn ruled(name: &str) -> Option<Rules> {
+  [Rules::Normal, Rules::PlayerAgainstPlayer, Rules::RolePlay]
+    .into_iter()
+    .find(|&rules| named(rules) == name)
+}
+
+/// The entry of the realm that a copy of the login service serves, as its configuration gives it:
+/// the identity of the realm, its three attributes, the address of its login service, and its
+/// caps. It is the one home of the entry: each copy writes it in Redis at each admission, and the
+/// list of the realms reads it there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
   /// The id of the realm, as the keys of `mmo_store::keys` name it.
   pub id: u32,
+  /// The name of the realm, which no other realm holds.
+  pub name: String,
+  /// The region of the realm.
+  pub region: String,
+  /// The language of the realm.
+  pub language: String,
+  /// The type of rules of the realm, a label that no rule of the game reads.
+  pub rules: Rules,
+  /// The address of the login service of the realm that a client reaches, as `host:port`.
+  pub login: String,
   /// The most accounts that hold a slot in the realm at one time.
   pub cap: u32,
   /// The most players of each layer of the realm, 5 at least.
@@ -58,20 +86,22 @@ pub(crate) enum Place {
   },
 }
 
-impl Realm {
+impl Entry {
   /// The id of the realm, whose characters alone its login service lists, makes and places.
-  pub(crate) const fn realm(self) -> RealmId {
+  pub(crate) const fn realm(&self) -> RealmId {
     RealmId(self.id)
   }
 
-  /// Writes the caps of the realm, renews or ends each slot that ended, then admits the head of the
-  /// queue into the free slots.
-  pub(crate) async fn admit(self, redis: &mut ConnectionManager) -> Result<u32, Error> {
+  /// Writes the entry and the caps of the realm, renews or ends each slot that ended, then admits
+  /// the head of the queue into the free slots.
+  pub(crate) async fn admit(&self, redis: &mut ConnectionManager) -> Result<u32, Error> {
+    let rules = named(self.rules);
     let admitted = ADMIT
       .key(keys::queue(self.id))
       .key(keys::admitted(self.id))
       .key(keys::admissions(self.id))
       .key(keys::realm(self.realm()))
+      .key(keys::REALMS)
       .arg(self.cap)
       .arg(BURST)
       .arg(SLOT)
@@ -81,16 +111,29 @@ impl Realm {
       .arg(keys::PRESENCE)
       .arg(keys::QUEUED)
       .arg(keys::ADMIT)
-      .arg(self.layer_cap)
+      .arg(self.id)
+      .arg(&[(keys::NAME, &self.name), (keys::REGION, &self.region)])
+      .arg(&[(keys::LANGUAGE, &self.language), (keys::LOGIN, &self.login)])
+      .arg(&[(keys::RULES, rules)])
+      .arg(&[(keys::CAP, self.cap), (keys::LAYER_CAP, self.layer_cap)])
       .invoke_async(redis)
       .await?;
     Ok(admitted)
   }
 
+  /// The level of population of the realm, from the accounts that its admitted set holds.
+  pub(crate) async fn population(
+    &self,
+    redis: &mut ConnectionManager,
+  ) -> Result<Population, Error> {
+    let admitted: u32 = redis::cmd("ZCARD").arg(keys::admitted(self.id)).query_async(redis).await?;
+    Ok(Population::of(admitted, self.cap))
+  }
+
   /// The place of `account`, which renews its marks. With `enter`, an account with no place
   /// enters at the end of the queue, and an account with a place keeps it.
   pub(crate) async fn place(
-    self,
+    &self,
     redis: &mut ConnectionManager,
     account: AccountId,
     resume: &Token,
@@ -120,6 +163,53 @@ impl Realm {
       _ => Place::Gone,
     })
   }
+}
+
+/// Each realm whose entry Redis holds, by its id, with its level of population and the length of
+/// its queue. A realm whose entry lacks a field, or names a type of rules that this version does
+/// not know, stays out of the list, since a client could not show it.
+pub(crate) async fn realms(redis: &mut ConnectionManager) -> Result<Vec<Realm>, Error> {
+  let mut ids: Vec<u32> = redis::cmd("SMEMBERS").arg(keys::REALMS).query_async(redis).await?;
+  ids.sort_unstable();
+  let mut pipe = redis::pipe();
+  for &id in &ids {
+    let fields = [keys::NAME, keys::REGION, keys::LANGUAGE, keys::RULES, keys::LOGIN, keys::CAP];
+    pipe
+      .cmd("HMGET")
+      .arg(keys::realm(RealmId(id)))
+      .arg(&fields)
+      .zcard(keys::admitted(id))
+      .zcard(keys::queue(id));
+  }
+  let found: Vec<(Vec<Option<String>>, u32, u32)> = pipe.query_async(redis).await?;
+  Ok(
+    ids
+      .into_iter()
+      .zip(found)
+      .filter_map(|(id, (entry, admitted, queue))| listed(id, &entry, admitted, queue))
+      .collect(),
+  )
+}
+
+/// The realm `id` as the list gives it, from the fields of its entry, its count of admitted
+/// accounts and the length of its queue.
+fn listed(id: u32, entry: &[Option<String>], admitted: u32, queue: u32) -> Option<Realm> {
+  let [Some(name), Some(region), Some(language), Some(rules), Some(login), Some(cap)] = entry
+  else {
+    return None;
+  };
+  let rules = ruled(rules)?;
+  let population = Population::of(admitted, cap.parse().ok()?);
+  Some(Realm {
+    id: RealmId(id),
+    name: name.clone(),
+    region: region.clone(),
+    language: language.clone(),
+    rules,
+    population,
+    queue,
+    login: login.clone(),
+  })
 }
 
 /// The seconds until the admission of the account at `rank`, at the pace of the `admissions` of

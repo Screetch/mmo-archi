@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::time::Duration;
 
-use mmo_protocol::{FRAME, Frames, Hello, Position, ZoneId, decode, encode, frame};
+use mmo_protocol::{FRAME, Frames, Hello, Position, Rules, ZoneId, decode, encode, frame};
 use mmo_store::Store;
 use quinn::{Connection, Endpoint, Incoming, RecvStream, SendStream, ServerConfig};
 use redis::aio::ConnectionManager;
@@ -16,7 +16,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sqlx::PgPool;
 use tokio::time::interval;
 
-use crate::{Client, Login, Realm, Start};
+use crate::queue::ruled;
+use crate::{Client, Entry, Login, Start};
 
 /// The signal on which a copy of the login service stops, as the end of `tokio::signal::ctrl_c`.
 pub type Stop = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
@@ -87,7 +88,7 @@ struct Config {
   key: PathBuf,
   database: String,
   redis: String,
-  realm: Realm,
+  realm: Entry,
   start: Start,
 }
 
@@ -95,14 +96,20 @@ impl Config {
   /// Reads each variable of the configuration with `read`.
   fn read(read: &dyn Fn(&str) -> Option<String>) -> Result<Self, Fault> {
     let text = |name: &'static str| read(name).ok_or(Fault::Unset(name));
+    let shown = |name: &'static str| text(name).and_then(|held| filled(name, held));
     Ok(Self {
       address: parsed("MMO_LOGIN_ADDRESS", &text("MMO_LOGIN_ADDRESS")?)?,
       certificate: text("MMO_LOGIN_CERTIFICATE")?.into(),
       key: text("MMO_LOGIN_KEY")?.into(),
       database: text("DATABASE_URL")?,
       redis: text("REDIS_URL")?,
-      realm: Realm {
+      realm: Entry {
         id: parsed("MMO_REALM", &text("MMO_REALM")?)?,
+        name: shown("MMO_REALM_NAME")?,
+        region: shown("MMO_REALM_REGION")?,
+        language: shown("MMO_REALM_LANGUAGE")?,
+        rules: rules(&text("MMO_REALM_RULES")?)?,
+        login: shown("MMO_REALM_LOGIN")?,
         cap: parsed("MMO_REALM_CAP", &text("MMO_REALM_CAP")?)?,
         layer_cap: layer_cap(&text("MMO_LAYER_CAP")?)?,
       },
@@ -139,6 +146,22 @@ fn layer_cap(text: &str) -> Result<u32, Fault> {
   Ok(cap)
 }
 
+/// The type of rules that `text` names.
+fn rules(text: &str) -> Result<Rules, Fault> {
+  ruled(text).ok_or_else(|| {
+    let why = "the type of rules is normal, player-against-player or role-play".to_owned();
+    Fault::Invalid { name: "MMO_REALM_RULES", why }
+  })
+}
+
+/// The text of the variable `name`, which a client shows, so it is not empty.
+fn filled(name: &'static str, text: String) -> Result<String, Fault> {
+  if text.trim().is_empty() {
+    return Err(Fault::Invalid { name, why: "the text is empty".to_owned() });
+  }
+  Ok(text)
+}
+
 /// The position that `text` gives as `x,y,z` in centimetres.
 fn position(name: &'static str, text: &str) -> Result<Position, Fault> {
   let numbers: Vec<i32> = text.split(',').map(|one| parsed(name, one)).collect::<Result<_, _>>()?;
@@ -160,6 +183,12 @@ fn parsed<T: FromStr<Err: Display>>(name: &'static str, text: &str) -> Result<T,
 ///   certificate of TLS and of its key.
 /// - `DATABASE_URL` and `REDIS_URL`: the stores of the game. The keeper migrates the database.
 /// - `MMO_REALM` and `MMO_REALM_CAP`: the id of the realm and the most accounts that it admits.
+/// - `MMO_REALM_NAME`, `MMO_REALM_REGION` and `MMO_REALM_LANGUAGE`: the name of the realm, which no
+///   other realm holds, its region and its language, which the client shows.
+/// - `MMO_REALM_RULES`: the type of rules of the realm, `normal`, `player-against-player` or
+///   `role-play`, a label that the client shows and no rule of the game reads.
+/// - `MMO_REALM_LOGIN`: the address of this login service that a client reaches, as `host:port`,
+///   which the list of the realms gives.
 /// - `MMO_LAYER_CAP`: the most players of each layer of the realm, 5 at least.
 /// - `MMO_START_ZONE` and `MMO_START_POSITION`: the zone, and the point of the zone as `x,y,z` in
 ///   centimetres, where each new character starts.
@@ -284,8 +313,9 @@ mod tests {
   use sqlx::PgPool;
 
   use super::{Config, Fault, run, serve};
+  use crate::game::entry;
   use crate::game::{Game, MEADOW, login};
-  use crate::{Login, Realm};
+  use crate::{Entry, Login};
 
   /// A certificate of TLS for `localhost`, and its files of PEM in a folder of the test alone.
   struct Tls {
@@ -541,6 +571,11 @@ mod tests {
       ("DATABASE_URL", database),
       ("REDIS_URL", "redis://127.0.0.1:1".to_owned()),
       ("MMO_REALM", "1".to_owned()),
+      ("MMO_REALM_NAME", "Realm1".to_owned()),
+      ("MMO_REALM_REGION", "Europe".to_owned()),
+      ("MMO_REALM_LANGUAGE", "French".to_owned()),
+      ("MMO_REALM_RULES", "role-play".to_owned()),
+      ("MMO_REALM_LOGIN", "login1.example:4433".to_owned()),
       ("MMO_REALM_CAP", "5000".to_owned()),
       ("MMO_LAYER_CAP", "500".to_owned()),
       ("MMO_START_ZONE", "7".to_owned()),
@@ -553,8 +588,10 @@ mod tests {
   }
 
   /// A value of a variable that the configuration refuses.
-  const WRONGS: [(&str, &str); 8] = [
+  const WRONGS: [(&str, &str); 10] = [
     ("MMO_LOGIN_ADDRESS", "-1"),
+    ("MMO_REALM_RULES", "Normal"),
+    ("MMO_REALM_REGION", " "),
     ("MMO_REALM", "-1"),
     ("MMO_REALM_CAP", "-1"),
     ("MMO_LAYER_CAP", "4"),
@@ -577,7 +614,7 @@ mod tests {
         key: tls.folder.join("key.pem"),
         database: full["DATABASE_URL"].clone(),
         redis: "redis://127.0.0.1:1".to_owned(),
-        realm: Realm { id: 1, cap: 5000, layer_cap: 500 },
+        realm: Entry { rules: mmo_protocol::Rules::RolePlay, layer_cap: 500, ..entry(1, 5000) },
         start: MEADOW,
       })
     );
@@ -608,6 +645,13 @@ mod tests {
         "the variable MMO_REALM is not set",
         "the variable MMO_REALM_CAP holds no valid value: invalid digit found in string",
         "the variable MMO_REALM_CAP is not set",
+        "the variable MMO_REALM_LANGUAGE is not set",
+        "the variable MMO_REALM_LOGIN is not set",
+        "the variable MMO_REALM_NAME is not set",
+        "the variable MMO_REALM_REGION holds no valid value: the text is empty",
+        "the variable MMO_REALM_REGION is not set",
+        "the variable MMO_REALM_RULES holds no valid value: the type of rules is normal, player-against-player or role-play",
+        "the variable MMO_REALM_RULES is not set",
         "the variable MMO_START_POSITION holds no valid value: a position is x,y,z in whole centimetres",
         "the variable MMO_START_POSITION holds no valid value: invalid digit found in string",
         "the variable MMO_START_POSITION is not set",

@@ -1,5 +1,6 @@
-//! The check of a stack that runs on one machine: it makes an account and a character through the
-//! login service, then links to a gateway and waits for the first snapshot that shows the player.
+//! The check of a stack that runs on one machine: it prints the list of the realms that the login
+//! service gives, makes an account and a character through the login service, then links to a
+//! gateway and waits for the first snapshot that shows the player.
 //!
 //! The binary `mmo-check` runs [`check`], and the variables that it reads are these:
 //!
@@ -12,11 +13,11 @@
 
 use std::time::Duration;
 
-use mmo_protocol::ToClient;
+use mmo_protocol::{Realm, ToClient};
 use tokio::time::timeout;
 
 use crate::settings::Settings;
-use crate::{Down, Failure, Play, enter};
+use crate::{Down, Failure, Play, enter, realms};
 
 /// The time that the check waits for the world: the queue admits an account within 1 s, and the
 /// first snapshot comes within 50 ms of the join of the layer writer.
@@ -33,6 +34,16 @@ async fn check_within(
 ) -> Result<(), Failure> {
   let Settings { trust, login, gateway, account } = Settings::read("MMO_CHECK", read, true)?;
   let seen = async {
+    let listed = realms(&trust, &login).await?;
+    println!("the login service lists {} realms", listed.len());
+    for realm in &listed {
+      let Realm { id, name, region, language, rules, population, queue, login } = realm;
+      println!(
+        "  realm {} {name}: {region}, {language}, {rules:?}, {population:?}, {queue} in its queue, \
+         its login service at {login}",
+        id.0
+      );
+    }
     let session = enter(&trust, &login, &account, &mut |_| ()).await?;
     println!(
       "the login service made {} with {} and gave a session",
@@ -60,8 +71,9 @@ mod tests {
   use std::time::Duration;
 
   use mmo_protocol::{
-    Angle, Attach, Character, CharacterId, Entity, FromLogin, Password, Position, Refusal,
-    Snapshot, Tick, ToClient, ToLogin, Token, Velocity, ZoneId, datagram,
+    Angle, Attach, Character, CharacterId, Entity, FromLogin, Password, Population, Position,
+    Realm, RealmId, Refusal, Rules, Snapshot, Tick, ToClient, ToLogin, Token, Velocity, ZoneId,
+    datagram,
   };
 
   use super::{check, check_within};
@@ -101,7 +113,24 @@ mod tests {
     peer
   }
 
-  /// A login service that refuses the password.
+  /// The list of the realms that the login service of a test gives, before the login.
+  async fn listing(mut peer: Peer) -> Peer {
+    assert_eq!(peer.read::<ToLogin>().await, ToLogin::Realms);
+    let realm = Realm {
+      id: RealmId(1),
+      name: "Ember".to_owned(),
+      region: "Europe".to_owned(),
+      language: "French".to_owned(),
+      rules: Rules::Normal,
+      population: Population::Low,
+      queue: 0,
+      login: "localhost:4433".to_owned(),
+    };
+    peer.write(&FromLogin::Realms(vec![realm])).await;
+    peer
+  }
+
+  /// A login service that refuses each message.
   async fn refusing(mut peer: Peer) -> Peer {
     peer.read::<ToLogin>().await;
     peer.write(&FromLogin::Refused(Refusal::Password)).await;
@@ -164,7 +193,8 @@ mod tests {
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
   #[tokio::test]
   async fn the_check_makes_an_account_and_waits_for_a_snapshot_that_shows_the_player() {
-    let (login, gateway) = (Fake::start(login), Fake::start(|peer| gateway(peer, Gateway::Shows)));
+    let login = Fake::start_twice(listing, login);
+    let gateway = Fake::start(|peer| gateway(peer, Gateway::Shows));
     let (file, vars) = variables(&login, &gateway, "shown");
     check(&var(&vars)).await.expect("the check passes");
     std::fs::remove_file(file).expect("the file goes");
@@ -197,11 +227,16 @@ mod tests {
     let mut found = Vec::new();
     for (name, script, what) in [
       ("refused", 0, Gateway::Shows),
+      ("signed", 2, Gateway::Shows),
       ("attach", 1, Gateway::Shows),
       ("message", 1, Gateway::Says),
       ("garbled", 1, Gateway::Garbles),
     ] {
-      let login = if script == 0 { Fake::start(refusing) } else { Fake::start(login) };
+      let login = match script {
+        0 => Fake::start(refusing),
+        1 => Fake::start_twice(listing, login),
+        _ => Fake::start_twice(listing, refusing),
+      };
       let gateway = Fake::start(move |peer| gateway(peer, what));
       let (file, mut vars) = variables(&login, &gateway, name);
       if name == "attach" {
@@ -210,20 +245,21 @@ mod tests {
       found.push(failed(&vars).await);
       std::fs::remove_file(file).expect("the file goes");
       login.end().await;
-      if name != "attach" && name != "refused" {
+      if !["attach", "refused", "signed"].contains(&name) {
         gateway.end().await;
       }
     }
-    assert_eq!(found[0], "the login service refuses: Password");
-    assert!(found[1].starts_with("the client cannot connect: "));
-    assert_eq!(found[2], "the gateway sends Full { zone: ZoneId(1) } in place of a snapshot");
-    assert_eq!(found[3], "the bytes are not a message of this version of the protocol");
+    assert_eq!(found[..2], ["the login service refuses: Password"; 2]);
+    assert!(found[2].starts_with("the client cannot connect: "));
+    assert_eq!(found[3], "the gateway sends Full { zone: ZoneId(1) } in place of a snapshot");
+    assert_eq!(found[4], "the bytes are not a message of this version of the protocol");
   }
 
   #[expect(clippy::disallowed_methods, reason = "the test starts its runtime once")]
   #[tokio::test]
   async fn the_check_ends_when_the_gateway_shows_nothing_in_time() {
-    let (login, gateway) = (Fake::start(login), Fake::start(|peer| async move { peer }));
+    let login = Fake::start_twice(listing, login);
+    let gateway = Fake::start(|peer| async move { peer });
     let (file, vars) = variables(&login, &gateway, "slow");
     assert_eq!(failed(&vars).await, "the check does not end within 500ms");
     std::fs::remove_file(file).expect("the file goes");
