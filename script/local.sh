@@ -244,7 +244,8 @@ start() {
   started=1
   [ -d "$state/postgres" ] || initdb -D "$state/postgres" -U postgres --auth=trust -E UTF8 >"$state/initdb.log" 2>&1 ||
     die "initdb failed"
-  launch postgres postgres -D "$state/postgres" -h 127.0.0.1 -p "$pg_port" -c unix_socket_directories=
+  # Each layer writer of the pool holds 4 connections, so the default of 100 fails a stack of 2 shards.
+  launch postgres postgres -D "$state/postgres" -h 127.0.0.1 -p "$pg_port" -c unix_socket_directories= -c max_connections=400
   launch redis redis-server --bind 127.0.0.1 --port "$redis_port" --save "" --appendonly no --dir "$state/redis"
   wait_for "PostgreSQL and Redis" 40 stores_up
   game_made

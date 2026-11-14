@@ -743,7 +743,7 @@ the hosts of the servers.
 | 2 | 500, half in a town | 1 shard of cap 500, layers of cap 500, 1 zone | the cap of a layer, and the budget | the zone runs 1 layer; the tick is under 25 ms at the 99th percentile and under 50 ms always; the data down is under 5 KB/s mean and 20 KB/s at the 99th percentile, the data up is under 2 KB/s, and no datagram passes 1100 bytes |
 | 3 | 500, of which 40 cross a border | 2 shards of cap 250, layers of cap 20, 2 zones | the shards, the placement and the hand-over | each shard admits 250 bots and runs 13 layers at least, no layer passes 20 players, no bot sees a bot of the other shard, and each crosser enters the layer with its own number in the next zone |
 | 4 | 300 | 1 shard of cap 200, layers of cap 20, 1 zone | the queue | 100 bots wait, each gets its position each 5 s, and the order of admission is the order of entry |
-| 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, each bot left plays, and each move fell on a safe point of its bot |
+| 5 | 200, then 150 of them log out and the others send no order | 1 shard of cap 200, layers of cap 20, 1 zone | the drain, the move and the close | 150 s after the logouts, no layer holds 5 players or fewer while the other layers have room for them, no layer is empty, and each bot left plays |
 | 6 | 200, with faults | 1 shard of cap 200, layers of cap 20, 1 zone | the recovery | after a stop of a layer writer, its bots play again on the same layer within 10 s and lose 10 s of play at most; after a stop of a gateway, they connect again within 5 s; after 60 s with no keeper, no save is lost |
 
 No test runs more than 500 bots, on a machine or in CI. The stages prove the rules of scale with small caps, so a run
@@ -801,9 +801,9 @@ writers of section 6 for each shard, and `bots` gives the bots one login service
 link for 30 s, so wait 35 s between two runs. Run no stage with more than 500 bots: `MMO_BOTS_COUNT` refuses a larger
 count.
 
-The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4 and 6 on a runner of CI, for each pull request
-that changes a crate of the path of a player. It runs each stage on a new stack of the release build of the base of the
-pull request, then of the change, on the same runner. It fails when a bot of the change cannot play, when a layer of the
+The workflow `load` (`.github/workflows/load.yml`) runs the stages 2, 3, 4, 5 and 6 on a runner of CI, for each pull request
+that changes a crate of the path of a player. It runs the stages 2, 3 and 4 on a new stack of the release build of the
+base of the pull request, then of the change, on the same runner, and the stages 5 and 6 on the change alone. It fails when a bot of the change cannot play, when a layer of the
 change passes its cap, when a shard of the change opens fewer layers than its players need, and, in stage 3, when a bot
 sees a bot of the other shard, when a crosser does not enter the next zone and when a crossing into it does not keep the
 number of its layer, as `sh script/report.sh` reads them from the report of the bots. Its summary gives the report of
@@ -828,9 +828,13 @@ the gateway allows 5 s. For the stop of the keeper, which `fault` holds for 60 s
 after the keeper came back: the version of each character that played must have grown, so no save is lost. The stage
 runs one zone, since the recovery of a layer does not need a second one.
 
-Stage 5 runs nowhere yet, since no bot logs out during a run. The tests of `mmo-zone` prove the drain, the move and
-the close with a cap of 4: a layer of one player drains after 60 s, its writer moves the player to the other layer of
-the zone, which holds 3 players of its cap then, and the layer closes 30 s later.
+Stage 5 runs 200 bots on a new stack of the change. `MMO_BOTS_LEAVERS=150` makes the first 150 bots log out once each
+bot plays, and `MMO_BOTS_PLAY_SECONDS=150` starts the measure at their logouts. The other bots play on and send no
+order, since the game has none, so each tick is a safe point for a move (section 6). The report then prints a `drain:`
+line and 3 lines of the budget: each bot left plays at the end, and the last look at the directory shows no empty layer.
+It also shows no layer of a quarter of its cap or fewer whose players fit in the room of the other layers. `sh
+script/report.sh <report> 200 1 0 0 0 150` fails when one of them is over. The stage runs on the change alone, since a
+base below the drain cannot pass it. The tests of `mmo-zone` prove the same drain, move and close with a cap of 4.
 
 ### The first local results
 

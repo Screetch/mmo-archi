@@ -38,6 +38,12 @@
 //!   as many crossers to a shard as a layer holds. The report fails when a crosser did not enter
 //!   the next zone, and when one entered a layer with another number than its own. The default
 //!   is 0.
+//! - `MMO_BOTS_LEAVERS`: how many of the first bots log out once each bot plays, before the
+//!   measure, as `150`. The others play to the end, and send no order, since the game has none.
+//!   The report then fails when a bot left does not play at the end, and when the last look at the
+//!   directory shows an empty layer, or a layer of a quarter of its cap or fewer whose players fit
+//!   in the room of the other layers of the zone. So a measure of 150 s proves the drain and the
+//!   close of the layers that the leavers emptied. The default is 0.
 //! - `MMO_BOTS_TOWN`: how many of the bots start in one square of 128 m, as `250`. The others
 //!   start anywhere in the zone. The default is 0.
 //! - `MMO_BOTS_RAMP`: the logins that start each second. The default is 50.
@@ -160,7 +166,11 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let reconnect = !config.recover.is_zero();
   let crossers = usize::try_from(config.crossers).unwrap_or(usize::MAX);
   let shards = bots.iter().map(|bot| (bot.character.0, bot.shard)).collect();
-  let shared = Arc::new(Shared { trust, gateway, zone, seed, ready, reconnect, crossers, shards });
+  let (leaving, leave) = watch::channel(false);
+  let leavers = config.leavers;
+  let base =
+    Shared { trust, gateway, zone, seed, ready, reconnect, crossers, shards, leavers, leave };
+  let shared = Arc::new(base);
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
   for bot in bots {
@@ -172,6 +182,7 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
     });
   }
   settle(&shared, tasks.len().saturating_sub(config.waiting as usize), config.join).await;
+  leaving.send_replace(true);
   let before = ticks::read(&mut redis, config.shards(), config.zone).await;
   let mut opened = Seen::new();
   let looked = look_during(&mut redis, config, &mut opened).await;
