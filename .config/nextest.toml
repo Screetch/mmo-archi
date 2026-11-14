@@ -1,0 +1,7 @@
+# The one home of the limit in time of a test. cargo nextest runs each test in a process of its own, and ends the process
+# of a test that runs past its limit, with the name of the test and the line TIMEOUT, so a test that waits for a socket, a
+# channel or a child process fails the run instead of holding it. A test that takes more than one period prints SLOW at
+# each period, and ends at the second one. A step of a test takes milliseconds, so the limit is far over any test that
+# works, and under the time in which a hang costs a slot of builds of the machine.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }

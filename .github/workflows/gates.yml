@@ -102,7 +102,8 @@ jobs:
 
   suite:
     # The tests of the workspace on Linux, in the run that measures their coverage: cargo coverage, whose bar
-    # .cargo/config.toml holds, fails under 100 percent.
+    # .cargo/config.toml holds, fails under 100 percent. Each test runs in a process of its own under the limit of
+    # .config/nextest.toml, so a hung test fails the job at once, and the timeout of the job stays the last bound.
     name: the suite
     needs: scope
     if: needs.scope.outputs.code == 'true'
@@ -115,7 +116,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
       # The tests of mmo-store run against a real PostgreSQL. Each test makes a database of its own and drops it.
       # One action gives the same PostgreSQL on Linux, on macOS and on Windows, where a runner has no service.
       - id: postgres
@@ -158,7 +159,7 @@ jobs:
       - uses: ./.github/actions/setup
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov,cargo-nextest
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - id: postgres
         uses: ikalnytskyi/action-setup-postgres@325155bfd7807b2a21ac9c2c7bb9b9a6eacc44df # v9

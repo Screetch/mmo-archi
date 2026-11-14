@@ -132,7 +132,7 @@ turn a candidate you are not sure of into a cleanup to raise a count.
 
 The commands are in `AGENTS.md`, and the `testing` skill says which one proves which change.
 
-1. Run the tests of the owner and of its siblings: `cargo test -p <crate> <filter>`.
+1. Run the tests of the owner and of its siblings: `cargo nextest run -p <crate> <filter>`.
 2. When you remove a check of the source, run the command that owns the real contract.
 3. Format with `cargo fmt --all`, then run `git diff --check`.
 4. Run the gates that the change needs, and `cargo coverage` for any change of a test.

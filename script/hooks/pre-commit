@@ -28,7 +28,7 @@ else
   root=$tmp/index
   git checkout-index --prefix="$root/" --stdin <"$tmp/files" || exit 1
   # The guards of the Rust run only when the change touches a file that the crates or their tests read.
-  rust=$(grep -cE '\.rs$|^(crates|\.cargo)/|^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|rustfmt\.toml)$' "$tmp/files")
+  rust=$(grep -cE '\.rs$|^(crates|\.cargo|\.config)/|^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml|rustfmt\.toml)$' "$tmp/files")
   width=$(($(grep -c '\.rs$' "$tmp/files") + $(grep -cxF script/rustwidth.sh "$tmp/files")))
 fi
 # The text files of the change, which the guards of the files read: a link or a binary file is no text.
