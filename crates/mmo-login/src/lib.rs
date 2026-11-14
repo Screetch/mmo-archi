@@ -676,6 +676,30 @@ mod tests {
     Ok(())
   }
 
+  /// Accounts that enter in one millisecond, or after the clock of Redis went back, stand in the
+  /// order of their entry, not in the order of their ids. The score of an earlier account is far
+  /// ahead of the clock here, and the accounts that enter later have lower ids.
+  #[sqlx::test(migrations = false)]
+  async fn an_account_stands_behind_each_account_that_entered_before_it(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let (_, _, cy) =
+      (game.account("ada").await, game.account("bob").await, game.account("cy").await);
+    let copy = game.copy(0);
+    let first = game.enter(&copy, &["cy"]).await;
+    let ahead = 4_000_000_000_000_i64;
+    let _: i64 = game.redis.clone().zadd(keys::queue(1), cy.0, ahead).await?;
+    let later = game.enter(&copy, &["ada", "bob"]).await;
+    let none = u32::MAX;
+    let places: Vec<_> = first.iter().chain(&later).map(|(_, answer)| place(answer)).collect();
+    assert_eq!(places, [Some((0, 1, none)), Some((1, 2, none)), Some((2, 3, none))]);
+    let waits = game.waits(&copy, &mut [first, later].concat()).await;
+    let held: Vec<_> = waits.iter().map(place).collect();
+    assert_eq!(held, [Some((0, 3, none)), Some((1, 3, none)), Some((2, 3, none))]);
+    Ok(())
+  }
+
   #[sqlx::test(migrations = false)]
   async fn a_restart_of_a_copy_loses_no_place(pool: PgPool) -> Result<(), Error> {
     let game = Game::new(pool).await;
