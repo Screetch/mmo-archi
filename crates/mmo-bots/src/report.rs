@@ -9,7 +9,7 @@ use mmo_store::keys::{TICK_BUCKET, tick_bucket};
 use tokio::time::Instant;
 
 use crate::bot::{End, Outcome, Role};
-use crate::layers::{Players, Seen, Shard};
+use crate::layers::{Seen, Shard};
 use crate::ticks::Counts;
 
 /// The target of the tick of a layer writer at the 99th percentile, and its hard limit.
@@ -437,16 +437,23 @@ fn millis(d: Duration) -> f64 {
 }
 
 impl Report {
-  /// The line of the report on one shard: its layers and the players on each.
+  /// The line of the report on one shard: its layers and the players on each, zone by zone.
   fn shard_line(&self, id: u32, shard: &Shard) -> String {
-    let now = |layer: &Players| layer.now.map_or("closed".to_owned(), |now| now.to_string());
-    let players: Vec<String> = shard.layers.values().map(now).collect();
+    let mut zones: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+    for ((zone, _), players) in &shard.layers {
+      zones
+        .entry(*zone)
+        .or_default()
+        .push(players.now.map_or("closed".to_owned(), |now| now.to_string()));
+    }
+    let players: Vec<String> =
+      zones.iter().map(|(zone, now)| format!(" of zone {zone}: {}", now.join(" "))).collect();
     format!(
-      "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer: {}",
+      "shard {id}: {} layers of cap {} opened, {} bots played, players on each layer{}",
       shard.layers.len(),
       shard.cap,
       self.shards.get(&id).copied().unwrap_or_default(),
-      players.join(" ")
+      players.join(",")
     )
   }
 }
@@ -582,10 +589,11 @@ mod tests {
     }
   }
 
-  /// A shard of cap `cap`, with the layers `(number, players now, most players)`.
-  fn shard(cap: u32, layers: &[(u32, u32, u32)]) -> Shard {
-    let layers =
-      layers.iter().map(|&(number, now, most)| (number, Players { now: Some(now), most }));
+  /// A shard of cap `cap`, with the layers `(zone, number, players now, most players)`.
+  fn shard(cap: u32, layers: &[(i32, u32, u32, u32)]) -> Shard {
+    let layers = layers
+      .iter()
+      .map(|&(zone, number, now, most)| ((zone, number), Players { now: Some(now), most }));
     Shard { cap, layers: layers.collect() }
   }
 
@@ -654,7 +662,7 @@ mod tests {
       failed("the link fails"),
     ];
     let counts = BTreeMap::from([(10, 90), (60, 9), (120, 1)]);
-    let seen = Seen::from([(1, shard(1, &[(1, 1, 1), (2, 1, 2)]))]);
+    let seen = Seen::from([(1, shard(1, &[(1, 1, 1, 1), (1, 2, 1, 2)]))]);
     let report =
       Report::new(3, 0, Duration::ZERO, &outcomes, &counts, seen, Duration::from_secs(30));
     let lines = [
@@ -668,7 +676,7 @@ mod tests {
       "snapshots 200, refused by the world 2, largest 900 bytes",
       "queue: 0 bots wait of 0 that must, the longest time without a place 0.0 s",
       "ticks of the writers in 30 s: 100, p50 2.75 ms, p99 15.25 ms, max 30.25 ms, 1 over 25 ms, 0 over 50 ms",
-      "shard 1: 2 layers of cap 1 opened, 2 bots played, players on each layer: 1 1",
+      "shard 1: 2 layers of cap 1 opened, 2 bots played, players on each layer of zone 1: 1 1",
       "budget tick p99 at most 25 ms: ok",
       "budget no tick of 50 ms or more: ok",
       "budget data down, mean at most 5000 B/s: ok",
@@ -772,7 +780,7 @@ mod tests {
       Report::new(3, 0, zero, &outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
     let opened = "budget each shard opened the layers that its players need: ";
-    assert!(text(&[(1, 2, 2)]).contains(&format!("{opened}ok")));
+    assert!(text(&[(1, 1, 2, 2)]).contains(&format!("{opened}ok")));
     assert!(text(&[]).contains(&format!("{opened}over")));
   }
 
@@ -874,26 +882,28 @@ mod tests {
     let stays = |end| Outcome { end, ..played(1, 2, 1, 1, 1) };
     let leaves = |end| Outcome { role: Role::Leaver, end, ..played(1, 2, 1, 1, 1) };
     let text = |outcomes: &[Outcome], mut shard: Shard| {
-      shard.layers.insert(9, Players { now: None, most: 20 });
+      shard.layers.insert((1, 9), Players { now: None, most: 20 });
       let seen = Seen::from([(1, shard)]);
       let zero = Duration::ZERO;
       Report::new(outcomes.len(), 0, zero, outcomes, &BTreeMap::new(), seen, zero).to_string()
     };
-    let good =
-      text(&[leaves(End::LoggedOut), stays(End::Playing)], shard(20, &[(1, 17, 20), (3, 5, 13)]));
+    let good = text(
+      &[leaves(End::LoggedOut), stays(End::Playing)],
+      shard(20, &[(1, 1, 17, 20), (1, 3, 5, 13)]),
+    );
     let lines = [
       "drain: 1 of 1 bots logged out, 1 of 1 bots left play, 0 layers stand empty, 0 sparse layers fit in the others",
       "budget each bot left plays: ok",
       "budget no layer stands empty: ok",
       "budget no layer of a quarter of its cap or fewer fits in the other layers: ok",
     ];
-    assert!(good.contains("players on each layer: 17 5 closed\n"), "{good}");
+    assert!(good.contains("players on each layer of zone 1: 17 5 closed\n"), "{good}");
     for line in lines {
       assert!(good.contains(line), "{good} lacks {line}");
     }
     let bad = text(
       &[leaves(End::Playing), stays(End::Unseen)],
-      shard(20, &[(1, 16, 16), (2, 0, 3), (3, 4, 4)]),
+      shard(20, &[(1, 1, 16, 16), (1, 2, 0, 3), (1, 3, 4, 4)]),
     );
     let lines = [
       "drain: 0 of 1 bots logged out, 0 of 1 bots left play, 1 layers stand empty, 1 sparse layers fit in the others",
@@ -904,9 +914,9 @@ mod tests {
     for line in lines {
       assert!(bad.contains(line), "{bad} lacks {line}");
     }
-    let gone = text(&[leaves(End::LoggedOut), stays(End::LoggedOut)], shard(20, &[(1, 17, 20)]));
+    let gone = text(&[leaves(End::LoggedOut), stays(End::LoggedOut)], shard(20, &[(1, 1, 17, 20)]));
     assert!(gone.contains("budget each bot left plays: over"), "{gone}");
-    let none = text(&[stays(End::Playing)], shard(20, &[(1, 1, 1)]));
+    let none = text(&[stays(End::Playing)], shard(20, &[(1, 1, 1, 1)]));
     assert!(!none.contains("drain") && !none.contains("bot left"), "{none}");
   }
 
@@ -920,13 +930,17 @@ mod tests {
     };
     let capped = "budget no layer over its cap: ";
     let opened = "budget each shard opened the layers that its players need: ";
-    let fits = text(shard(2, &[(1, 2, 2)]));
+    let fits = text(shard(2, &[(1, 1, 2, 2)]));
     assert!(fits.contains(&format!("{capped}ok\n{opened}ok")), "{fits}");
-    let few = text(shard(1, &[(1, 1, 1)]));
+    let few = text(shard(1, &[(1, 1, 1, 1)]));
     assert!(few.contains(&format!("{capped}ok\n{opened}over")), "{few}");
     let none = text(Shard::default());
     assert!(none.contains(&format!("{capped}ok\n{opened}over")), "{none}");
-    let over = text(shard(1, &[(1, 1, 1), (2, 2, 2)]));
+    let over = text(shard(1, &[(1, 1, 1, 1), (1, 2, 2, 2)]));
     assert!(over.contains(&format!("{capped}over\n{opened}ok")), "{over}");
+    let crossed = text(shard(1, &[(1, 1, 1, 1), (2, 1, 1, 1)]));
+    let zones = "players on each layer of zone 1: 1, of zone 2: 1\n";
+    assert!(crossed.contains(zones), "{crossed}");
+    assert!(crossed.contains(&format!("{capped}ok\n{opened}ok")), "{crossed}");
   }
 }
