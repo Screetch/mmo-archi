@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.3.0](https://github.com/Screetch/mmo-archi/compare/v0.2.0...v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **bots:** Run stage 7 of the load test on 3 realms and a full realm ([#83](https://github.com/Screetch/mmo-archi/issues/83))
+* **login:** List the realms with their attributes and population ([#82](https://github.com/Screetch/mmo-archi/issues/82))
+* **protocol:** Rename the shard to the realm everywhere ([#79](https://github.com/Screetch/mmo-archi/issues/79))
+* **bots:** Run stage 5 of the load test, the drain of a layer ([#73](https://github.com/Screetch/mmo-archi/issues/73))
+* **zone:** Show the entities near a border to the zone across it ([#68](https://github.com/Screetch/mmo-archi/issues/68))
+* **zone:** Read the zone across each border from the map ([#67](https://github.com/Screetch/mmo-archi/issues/67))
+* **zone:** Hand a player over to the next zone at its border ([#64](https://github.com/Screetch/mmo-archi/issues/64))
+* **store:** Remove the parties that the game does not have ([#61](https://github.com/Screetch/mmo-archi/issues/61))
+* **login:** Keep each character in the shard that it belongs to ([#58](https://github.com/Screetch/mmo-archi/issues/58))
+* **zone:** Close a layer that holds no player for 30 s ([#55](https://github.com/Screetch/mmo-archi/issues/55))
+* **zone:** Run each layer of a zone with its own writer from a pool ([#53](https://github.com/Screetch/mmo-archi/issues/53))
+* **keeper:** Give each layer of a shard its own epoch ([#50](https://github.com/Screetch/mmo-archi/issues/50))
+
+### Features
+
+* **bots:** Check the sight between shards and the layer of crossings ([#70](https://github.com/Screetch/mmo-archi/issues/70)) ([8937559](https://github.com/Screetch/mmo-archi/commit/8937559f8d2dde1fed814c689fa07462b1e100a0))
+* **bots:** Prove the layers and the shards with at most 500 bots ([#57](https://github.com/Screetch/mmo-archi/issues/57)) ([ef0583e](https://github.com/Screetch/mmo-archi/commit/ef0583e6b0cff1befe3dd821bdca0956a469b3b8))
+* **bots:** Prove the queue and the recovery with at most 500 bots ([#62](https://github.com/Screetch/mmo-archi/issues/62)) ([1c1af03](https://github.com/Screetch/mmo-archi/commit/1c1af03f189540c4d6a252595f6f1160b02fafca))
+* **bots:** Run stage 5 of the load test, the drain of a layer ([#73](https://github.com/Screetch/mmo-archi/issues/73)) ([419f9fa](https://github.com/Screetch/mmo-archi/commit/419f9fa01a329fd06c97720d4ede15ecbbd8ec0d))
+* **bots:** Run stage 7 of the load test on 3 realms and a full realm ([#83](https://github.com/Screetch/mmo-archi/issues/83)) ([cbc5192](https://github.com/Screetch/mmo-archi/commit/cbc51922045c5791a5fee49239c7bdf5a75fe039))
+* **keeper:** Give each layer of a shard its own epoch ([#50](https://github.com/Screetch/mmo-archi/issues/50)) ([b249636](https://github.com/Screetch/mmo-archi/commit/b249636e6f4c8bde9184a0e6efb41965273bfedf))
+* **login:** List the realms with their attributes and population ([#82](https://github.com/Screetch/mmo-archi/issues/82)) ([29ccb1d](https://github.com/Screetch/mmo-archi/commit/29ccb1d7c0bb0a2cf7ec3acd109de860622f77fe))
+* **store:** Keep the layers of each zone of a shard in a directory ([#49](https://github.com/Screetch/mmo-archi/issues/49)) ([1c62f61](https://github.com/Screetch/mmo-archi/commit/1c62f6154fb0d4bd2131f4ce24eb48bae5230c83))
+* **store:** Put each zone on a square of the map of the world ([#63](https://github.com/Screetch/mmo-archi/issues/63)) ([6540652](https://github.com/Screetch/mmo-archi/commit/654065299493272ade427c61984fd8bec27eb4d2))
+* **zone:** Close a layer that holds no player for 30 s ([#55](https://github.com/Screetch/mmo-archi/issues/55)) ([8e7c7c9](https://github.com/Screetch/mmo-archi/commit/8e7c7c92e9821bc21286a09cd180dd4462a05b6f))
+* **zone:** Drain a sparse layer and move its players to another layer ([#69](https://github.com/Screetch/mmo-archi/issues/69)) ([21d6a38](https://github.com/Screetch/mmo-archi/commit/21d6a38818b9768bbdc6483225080b83f4d719fa))
+* **zone:** Hand a player over to the next zone at its border ([#64](https://github.com/Screetch/mmo-archi/issues/64)) ([6b3c8ac](https://github.com/Screetch/mmo-archi/commit/6b3c8ac5d78c692472ab037ab2101922168d3bbb))
+* **zone:** Read the zone across each border from the map ([#67](https://github.com/Screetch/mmo-archi/issues/67)) ([bbe7d71](https://github.com/Screetch/mmo-archi/commit/bbe7d71711bf3f23c2af96994d92509f65a998a5))
+* **zone:** Run each layer of a zone with its own writer from a pool ([#53](https://github.com/Screetch/mmo-archi/issues/53)) ([2132d9f](https://github.com/Screetch/mmo-archi/commit/2132d9f7db39ce46ebb6e2e9e6652a46d3bcf2b6))
+* **zone:** Show the entities near a border to the zone across it ([#68](https://github.com/Screetch/mmo-archi/issues/68)) ([fa844e5](https://github.com/Screetch/mmo-archi/commit/fa844e50e37fc8232c266394f72d4b23390c79a2))
+
+
+### Fixes
+
+* **bots:** Refuse a count of bots over 500 ([#56](https://github.com/Screetch/mmo-archi/issues/56)) ([a3a1c21](https://github.com/Screetch/mmo-archi/commit/a3a1c213f7b05169b3cd0636a812891fb62b98e2))
+* **bots:** Seed each bot in the shard that it plays in ([#59](https://github.com/Screetch/mmo-archi/issues/59)) ([dfa9f12](https://github.com/Screetch/mmo-archi/commit/dfa9f120fcc16d9aac212e9ebf74425bd8edf8cb))
+* **bots:** Send no intents before the gateway names the layer ([#80](https://github.com/Screetch/mmo-archi/issues/80)) ([2bdadd0](https://github.com/Screetch/mmo-archi/commit/2bdadd04e4ea82c8d8e130ba00aa34e3c6b68b22))
+* **conductor:** Merge a PR only on a head that holds the current main ([#66](https://github.com/Screetch/mmo-archi/issues/66)) ([dda1a21](https://github.com/Screetch/mmo-archi/commit/dda1a21f64d8cf6e8aa872445f20794d8446f43e))
+* **conductor:** Merge a PR only when the gates and the load passed ([#77](https://github.com/Screetch/mmo-archi/issues/77)) ([9466978](https://github.com/Screetch/mmo-archi/commit/94669789ffe07830a64e193eb7db3d5f3ea03328))
+* **gateway:** Attach a client to the layer that holds its player ([#71](https://github.com/Screetch/mmo-archi/issues/71)) ([baee621](https://github.com/Screetch/mmo-archi/commit/baee6219b874e4b7fb6a0f5bd2de5c8c7ea3b430))
+* **login:** Keep each character in the shard that it belongs to ([#58](https://github.com/Screetch/mmo-archi/issues/58)) ([cc5772c](https://github.com/Screetch/mmo-archi/commit/cc5772cefff8c1eec1eb149c0d9e9e7f75187767))
+* **login:** Keep the order of entry in the queue within a millisecond ([#81](https://github.com/Screetch/mmo-archi/issues/81)) ([da1ef0a](https://github.com/Screetch/mmo-archi/commit/da1ef0a8726f88eb474320c2264b4c380a26c80e))
+* **store:** Remove the parties that the game does not have ([#61](https://github.com/Screetch/mmo-archi/issues/61)) ([0403a1d](https://github.com/Screetch/mmo-archi/commit/0403a1d26e61d899f8459ab5d56833c27bf535b8))
+* **store:** Start Redis again on a new port when its port is taken ([#47](https://github.com/Screetch/mmo-archi/issues/47)) ([2b6cfa6](https://github.com/Screetch/mmo-archi/commit/2b6cfa6acd4f60b3005c68ad01a36acbdb80aa12))
+* **zone:** Call the writer of a layer the layer writer in each crate ([#60](https://github.com/Screetch/mmo-archi/issues/60)) ([52cc9f6](https://github.com/Screetch/mmo-archi/commit/52cc9f63da5a1dfd98e3da1a1e4526d6bc85dfad))
+* **zone:** Keep the entries of a layer writer in order in Redis ([#74](https://github.com/Screetch/mmo-archi/issues/74)) ([4cc0f2e](https://github.com/Screetch/mmo-archi/commit/4cc0f2e399d93b1fa98d1b48532ac1fff5e05b16))
+* **zone:** Let each bot of the load test with crossers play ([#76](https://github.com/Screetch/mmo-archi/issues/76)) ([5061649](https://github.com/Screetch/mmo-archi/commit/50616497b51b8e7f83da78b8b506b96823c77758))
+
+
+### Chores
+
+* **protocol:** Rename the shard to the realm everywhere ([#79](https://github.com/Screetch/mmo-archi/issues/79)) ([830a18f](https://github.com/Screetch/mmo-archi/commit/830a18f85816e36021dd413e0dcb22ba265dde42))
+
 ## [0.2.0](https://github.com/Screetch/mmo-archi/compare/v0.1.0...v0.2.0) (2026-11-12)
 
 
