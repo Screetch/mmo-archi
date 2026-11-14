@@ -162,14 +162,13 @@ async fn measure(config: &Config) -> Result<Report, Failure> {
   let client = redis::Client::open(config.redis.as_str())?;
   let mut redis = client.get_multiplexed_async_connection().await?;
   let gateway = config.gateway.clone();
-  let (zone, seed, ready) = (config.zone, config.seed, AtomicUsize::new(0));
+  let (seed, ready) = (config.seed, AtomicUsize::new(0));
   let reconnect = !config.recover.is_zero();
   let crossers = usize::try_from(config.crossers).unwrap_or(usize::MAX);
   let realms = bots.iter().map(|bot| (bot.character.0, bot.realm)).collect();
   let (leaving, leave) = watch::channel(false);
   let leavers = config.leavers;
-  let base =
-    Shared { trust, gateway, zone, seed, ready, reconnect, crossers, realms, leavers, leave };
+  let base = Shared { trust, gateway, seed, ready, reconnect, crossers, realms, leavers, leave };
   let shared = Arc::new(base);
   let (stop, stopped) = watch::channel(false);
   let mut tasks = JoinSet::new();
