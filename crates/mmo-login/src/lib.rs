@@ -19,16 +19,16 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, FromLogin, Password, Position, Refusal, State, ToLogin, Token,
-  ZoneId,
+  AccountId, Angle, CharacterId, FromLogin, Password, Population, Position, Refusal, State,
+  ToLogin, Token, ZoneId,
 };
 use mmo_store::{Directory, NewCharacter, Placed, Store, keys};
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions};
 use tokio::time;
 
+pub use queue::Entry;
 use queue::Place;
-pub use queue::Realm;
 pub use server::{Fault, Stop, run};
 
 /// The failed logins of one name from one address in one window, after which the login service
@@ -119,14 +119,14 @@ pub enum Client {
 pub struct Login {
   store: Store,
   redis: ConnectionManager,
-  realm: Realm,
+  realm: Entry,
   start: Start,
 }
 
 impl Login {
   /// A copy that keeps the accounts and the characters in `store`, keeps the queue of `realm` in
   /// `redis`, and makes each new character at `start`.
-  pub fn new(store: Store, redis: ConnectionManager, realm: Realm, start: Start) -> Self {
+  pub fn new(store: Store, redis: ConnectionManager, realm: Entry, start: Start) -> Self {
     Self { store, redis, realm, start }
   }
 
@@ -159,6 +159,7 @@ impl Login {
       },
       ToLogin::NewCharacter { name } => self.new_character(client, &name).await,
       ToLogin::Select { character } => self.select(client, character).await,
+      ToLogin::Realms => Ok(FromLogin::Realms(queue::realms(&mut self.redis.clone()).await?)),
     }
   }
 
@@ -260,12 +261,13 @@ impl Login {
     Ok(FromLogin::Characters(listed))
   }
 
-  /// Makes a character of the admitted account in its realm, at its start, and lists
-  /// the characters of the account in the realm again. The name is written with its first letter in
-  /// upper case and the rest in lower case, so two names never differ by their case alone. An
-  /// account holds 8 characters at most over all the realms: the list of the client answers at once
-  /// when it holds 8, and else the store decides, also for two clients of one account that make a
-  /// character together.
+  /// Makes a character of the admitted account in its realm, at its start, and lists the characters
+  /// of the account in the realm again. A realm at the level full makes none, from its admitted
+  /// accounts and its cap, whatever the count of its characters. The name is written with its first
+  /// letter in upper case and the rest in lower case, so two names never differ by their case
+  /// alone. An account holds 8 characters at most over all the realms: the list of the client
+  /// answers at once when it holds 8, and else the store decides, also for two clients of one
+  /// account that make a character together.
   async fn new_character(&self, client: &mut Client, name: &str) -> Result<FromLogin, Error> {
     let Client::Admitted { account, characters } = client else {
       return Ok(Self::expired(client));
@@ -276,6 +278,9 @@ impl Login {
     }
     if !self.redis.clone().exists::<_, bool>(keys::admit(account)).await? {
       return Ok(Self::expired(client));
+    }
+    if self.realm.population(&mut self.redis.clone()).await? == Population::Full {
+      return Ok(FromLogin::Refused(Refusal::Full));
     }
     if held >= mmo_store::CHARACTERS {
       return Ok(FromLogin::Refused(Refusal::Limit));
@@ -383,15 +388,15 @@ mod tests {
   use std::net::{IpAddr, Ipv4Addr};
 
   use mmo_protocol::{
-    Angle, Character, CharacterId, FromLogin, Password, RealmId, Refusal, State, ToLogin, Token,
-    ZoneId,
+    Angle, Character, CharacterId, FromLogin, Password, Population, Realm, RealmId, Refusal, Rules,
+    State, ToLogin, Token, ZoneId,
   };
   use mmo_store::{Saved, Store, keys};
   use redis::AsyncCommands;
   use sqlx::PgPool;
 
-  use super::{Client, Error, Login, Realm};
-  use crate::game::{Game, HOME, MEADOW, login, place, secret};
+  use super::{Client, Entry, Error, Login};
+  use crate::game::{Game, HOME, MEADOW, entry, login, place, secret};
 
   /// The realm of `Game::copy`.
   const REALM: RealmId = RealmId(1);
@@ -493,7 +498,7 @@ mod tests {
   async fn an_account_holds_8_characters_at_most(pool: PgPool) -> Result<(), Error> {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
-    let copy = game.copy(1);
+    let copy = game.copy(2);
     let mut client = Client::default();
     copy.answer(&mut client, HOME, login("ada")).await?;
     copy.admit().await?;
@@ -521,7 +526,7 @@ mod tests {
   ) -> Result<(), Error> {
     let game = Game::new(pool).await;
     let ada = game.account("ada").await;
-    let copy = game.copy(1);
+    let copy = game.copy(2);
     let (mut first, mut second) = (Client::default(), Client::default());
     copy.answer(&mut first, HOME, login("ada")).await?;
     copy.answer(&mut second, HOME, login("ada")).await?;
@@ -552,7 +557,7 @@ mod tests {
     let ada = game.account("ada").await;
     let bob = game.account("bob").await;
     game.character(bob, REALM, "Dara").await;
-    let copy = game.copy(1);
+    let copy = game.copy(2);
     let mut client = Client::default();
     copy.answer(&mut client, HOME, login("ada")).await?;
     let queued = copy.answer(&mut client.clone(), HOME, new_character("Brom")).await?;
@@ -599,7 +604,7 @@ mod tests {
     let brom = game.character(ada, REALM, "Brom").await;
     let cael = game.character(ada, RealmId(2), "Cael").await;
     game.layer(RealmId(2), ZoneId(7)).await;
-    let copy = game.realm(2, 1);
+    let copy = game.realm(2, 2);
     let mut client = Client::default();
     copy.answer(&mut client, HOME, login("ada")).await?;
     copy.admit().await?;
@@ -642,6 +647,108 @@ mod tests {
         field("zone", 7)
       ]
     );
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn the_list_gives_each_realm_with_its_attributes_its_level_and_its_queue(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let names = ["ada", "bob", "cy", "dee", "eve"];
+    for name in names {
+      game.account(name).await;
+    }
+    let other = Entry {
+      region: "America".to_owned(),
+      language: "English".to_owned(),
+      rules: Rules::RolePlay,
+      ..entry(3, 5)
+    };
+    let entries = [entry(1, 2), entry(2, 5), other];
+    let copies: Vec<_> = entries
+      .iter()
+      .map(|one| Login::new(game.store.clone(), game.redis.clone(), one.clone(), MEADOW))
+      .collect();
+    let mut queued = game.enter(&copies[0], &names[..3]).await;
+    game.enter(&copies[1], &names[3..]).await;
+    for copy in &copies {
+      copy.admit().await?;
+    }
+    let mut redis = game.redis.clone();
+    let whole = [
+      ("name", "Lost"),
+      ("region", "Europe"),
+      ("language", "French"),
+      ("rules", "normal"),
+      ("login", "lost:1"),
+      ("cap", "5"),
+    ];
+    let broken = [(7, "rules", Some("chaos")), (8, "login", None), (9, "cap", Some("many"))];
+    for (id, broke, value) in broken {
+      let fields: Vec<_> = whole
+        .iter()
+        .filter_map(|&(field, held)| {
+          if field == broke { value.map(|one| (field, one)) } else { Some((field, held)) }
+        })
+        .collect();
+      let () = redis.hset_multiple(keys::realm(RealmId(id)), &fields).await?;
+      let () = redis.sadd(keys::REALMS, id).await?;
+    }
+    let (client, _) = queued.pop().expect("the client of cy");
+    let mut asked = client.clone();
+    let answer = copies[2].answer(&mut asked, HOME, ToLogin::Realms).await?;
+    let listed = |one: &Entry, population, queue| Realm {
+      id: RealmId(one.id),
+      name: one.name.clone(),
+      region: one.region.clone(),
+      language: one.language.clone(),
+      rules: one.rules,
+      population,
+      queue,
+      login: one.login.clone(),
+    };
+    assert_eq!(
+      answer,
+      FromLogin::Realms(vec![
+        listed(&entries[0], Population::Full, 1),
+        listed(&entries[1], Population::Medium, 0),
+        listed(&entries[2], Population::Low, 0),
+      ])
+    );
+    assert_eq!(asked, client);
+    Ok(())
+  }
+
+  #[sqlx::test(migrations = false)]
+  async fn a_full_realm_makes_no_character_and_its_characters_still_enter_through_its_queue(
+    pool: PgPool,
+  ) -> Result<(), Error> {
+    let game = Game::new(pool).await;
+    let ada = game.account("ada").await;
+    let bob = game.account("bob").await;
+    let brom = game.character(bob, REALM, "Brom").await;
+    game.layer(REALM, ZoneId(7)).await;
+    let copy = game.copy(1);
+    let (mut first, mut second) = (Client::default(), Client::default());
+    copy.answer(&mut first, HOME, login("ada")).await?;
+    copy.admit().await?;
+    copy.ready(&mut first).await?;
+    let waits = copy.answer(&mut second, HOME, login("bob")).await?;
+    let held = first.clone();
+    let refused = copy.answer(&mut first, HOME, new_character("Cael")).await?;
+    assert_eq!([place(&waits), None], [Some((0, 1, 600)), place(&refused)]);
+    assert_eq!((refused, first), (FromLogin::Refused(Refusal::Full), held));
+    assert_eq!(game.store.characters(ada, REALM).await?.len(), 0);
+    let mut redis = game.redis.clone();
+    let () = redis.zrem(keys::admitted(1), ada.0).await?;
+    let () = redis.del(keys::admit(ada)).await?;
+    copy.admit().await?;
+    let character = Character { id: brom, name: "Brom".to_owned() };
+    assert_eq!(copy.ready(&mut second).await?, Some(FromLogin::Characters(vec![character])));
+    let select = ToLogin::Select { character: brom };
+    let session = copy.answer(&mut second, HOME, select).await?;
+    assert!(matches!(session, FromLogin::Session { .. }), "a session of Brom, not {session:?}");
     Ok(())
   }
 
@@ -944,16 +1051,17 @@ mod tests {
     let closed = PgPool::connect_with(pool.connect_options().as_ref().clone()).await;
     let closed = closed.map_err(mmo_store::Error::from)?;
     let store = Store::open(closed.clone()).await?;
-    let unreachable =
-      Login::new(store, game.redis.clone(), Realm { id: 1, cap: 1, layer_cap: 20 }, MEADOW);
+    let unreachable = Login::new(store, game.redis.clone(), entry(1, 2), MEADOW);
     closed.close().await;
-    let [no_get, no_set, no_script, no_exists, no_del, no_hmset] = [
+    let [no_get, no_set, no_script, no_exists, no_del, no_hmset, no_zcard, no_smembers] = [
       game.denied("-get").await,
       game.denied("-set").await,
       game.denied("-@scripting").await,
       game.denied("-exists").await,
       game.denied("-del").await,
       game.denied("-hmset").await,
+      game.denied("-zcard").await,
+      game.denied("-smembers").await,
     ];
     let wrong = ToLogin::Login { name: "ada".to_owned(), password: Password("guess".to_owned()) };
     let select = ToLogin::Select { character: brom };
@@ -971,11 +1079,14 @@ mod tests {
       unreachable.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_exists.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
       unreachable.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
+      no_zcard.answer(&mut admitted.clone(), HOME, new_character("Cael")).await.err(),
       no_script.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_del.answer(&mut admitted.clone(), HOME, select.clone()).await.err(),
       no_hmset.answer(&mut admitted.clone(), HOME, select).await.err(),
       no_set.answer(&mut Client::Out, HOME, new_account("eve")).await.err(),
       unreachable.answer(&mut Client::Out, HOME, new_account("eve")).await.err(),
+      no_smembers.answer(&mut Client::Out, HOME, ToLogin::Realms).await.err(),
+      no_zcard.answer(&mut Client::Out, HOME, ToLogin::Realms).await.err(),
     ];
     let texts: Vec<_> =
       faults.iter().map(|fault| fault.as_ref().map(ToString::to_string)).collect();
@@ -1007,11 +1118,16 @@ mod tests {
         closed.clone(),
         denied("exists", "exists"),
         closed.clone(),
+        denied("zcard", "zcard"),
         denied("@scripting", "evalsha"),
         denied("del", "del"),
         aborted("hmset", "hmset"),
         aborted("set", "set"),
         closed,
+        denied("smembers", "smembers"),
+        denied("zcard", "zcard").map(|text| {
+          format!("Pipeline failures: [(Index 1, error: {text}), (Index 2, error: {text})]")
+        }),
       ]
     );
     Ok(())

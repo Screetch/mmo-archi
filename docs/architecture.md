@@ -892,10 +892,11 @@ stack stay as the artifact `bots`.
 make their accounts in PostgreSQL, since the login service makes 5 new accounts an hour for one address. Then each bot
 logs in through the login service, as a player does. Set `MMO_LOCAL_PROFILE=release` for the numbers of this document,
 `MMO_LOCAL_REALMS` for the count of realms, `MMO_LOCAL_REALM_CAP` for the cap of each realm, `MMO_LOCAL_LAYER_CAP` for
-the cap of a layer, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of one row of the map, and the
-variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as `MMO_BOTS_TOWN` for the bots that start in one square of 128
-m, and `MMO_BOTS_CROSSERS` for the first bots, which log in before the others and walk east from near the east border of
-the zone. The stack runs the login service and the pool of writers of section 6 for each realm, and `bots` gives the
+the cap of a layer, `MMO_LOCAL_ATTRIBUTES` for the region, the language and the type of rules of each realm, as
+`Europe:French:normal America:English:role-play`, `MMO_LOCAL_ZONES` for the count of zones, each on the next square of
+one row of the map, and the variables `MMO_BOTS_*` that the doc of `mmo-bots` lists, as `MMO_BOTS_TOWN` for the bots
+that start in one square of 128 m, and `MMO_BOTS_CROSSERS` for the first bots, which log in before the others and walk
+east from near the east border of the zone. The stack runs the login service and the pool of writers of section 6 for each realm, and `bots` gives the
 bots one login service for each realm. The caps start small, 100 for a realm and 20 for a layer, so that a few bots open
 many layers. A layer writer keeps the player of a closed link for 30 s, so wait 35 s between two runs. Run no stage with
 more than 500 bots: `MMO_BOTS_COUNT` refuses a larger count.

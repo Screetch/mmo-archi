@@ -40,7 +40,7 @@ pub use connect::Trust;
 pub use fault::Fault;
 pub use game::{Game, Scene, Wire};
 pub use input::{Direction, Keys};
-pub use login::{Account, Place, Session, enter};
+pub use login::{Account, Place, Session, enter, realms};
 pub use play::{Down, Play, Up};
 pub use predict::Predictor;
 pub use settings::Failure;

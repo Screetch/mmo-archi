@@ -3,8 +3,8 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use mmo_protocol::{
-  AccountId, Angle, CharacterId, Epoch, FromLogin, Password, Position, RealmId, State, ToLogin,
-  ZoneId,
+  AccountId, Angle, CharacterId, Epoch, FromLogin, Password, Position, RealmId, Rules, State,
+  ToLogin, ZoneId,
 };
 use mmo_store::testing::Redis;
 use mmo_store::{Directory, Lease, NewCharacter, Store, keys};
@@ -12,7 +12,7 @@ use redis::AsyncCommands;
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 
-use crate::{Client, Login, Realm, Start};
+use crate::{Client, Entry, Login, Start};
 
 pub(crate) const START: State =
   State { position: Position { x: 0, y: 0, z: 0 }, yaw: Angle(0), hit_points: 100 };
@@ -20,6 +20,20 @@ pub(crate) const START: State =
 /// The start of the new characters of realm 1, in the zone that [`Game::new`] adds.
 pub(crate) const MEADOW: Start =
   Start { zone: ZoneId(7), position: Position { x: 1200, y: -300, z: 50 } };
+
+/// The entry of the realm `id` of the tests, with a cap of `cap` accounts and layers of 20.
+pub(crate) fn entry(id: u32, cap: u32) -> Entry {
+  Entry {
+    id,
+    name: format!("Realm{id}"),
+    region: "Europe".to_owned(),
+    language: "French".to_owned(),
+    rules: Rules::Normal,
+    login: format!("login{id}.example:4433"),
+    cap,
+    layer_cap: 20,
+  }
+}
 
 /// The address of the clients of the tests.
 pub(crate) const HOME: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -61,7 +75,7 @@ impl Game {
   /// A copy of the login service of the realm `id`, with a cap of `cap`
   /// accounts.
   pub(crate) fn realm(&self, id: u32, cap: u32) -> Login {
-    Login::new(self.store.clone(), self.redis.clone(), Realm { id, cap, layer_cap: 20 }, MEADOW)
+    Login::new(self.store.clone(), self.redis.clone(), entry(id, cap), MEADOW)
   }
 
   /// A copy whose user of Redis has each command but those that the rule of ACL `denied` takes.
@@ -69,7 +83,7 @@ impl Game {
     let user = format!("denied{denied}");
     self.deny(&user, denied).await;
     let redis = Self::connect(self.server.port(), &user).await;
-    Login::new(self.store.clone(), redis, Realm { id: 1, cap: 1, layer_cap: 20 }, MEADOW)
+    Login::new(self.store.clone(), redis, entry(1, 1), MEADOW)
   }
 
   /// Takes from `user` of Redis the commands that the rule of ACL `denied` names.

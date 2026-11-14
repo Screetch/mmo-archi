@@ -17,10 +17,19 @@ use mmo_protocol::{AccountId, Layer, RealmId, Token};
 /// gave a writer, as [`layer`] names it.
 pub const DIRECTORY: &str = "directory";
 
-/// The fields of [`realm`], which the login service writes: the name of the realm, the most
-/// accounts that it admits, and the most players of each of its layers. The scripts of the
-/// directory read [`LAYER_CAP`] by this name.
+/// The set of the id of each realm, which the login service of each realm writes, and which the
+/// list of the realms reads.
+pub const REALMS: &str = "realms";
+
+/// The fields of [`realm`], which the login service of the realm writes: the entry of the realm,
+/// its name, its region, its language, its type of rules and the address of its login service, and
+/// its caps, the most accounts that it admits and the most players of each of its layers. The
+/// scripts of the directory read [`LAYER_CAP`] by this name.
 pub const NAME: &str = "name";
+pub const REGION: &str = "region";
+pub const LANGUAGE: &str = "language";
+pub const RULES: &str = "rules";
+pub const LOGIN: &str = "login";
 pub const CAP: &str = "cap";
 pub const LAYER_CAP: &str = "layer_cap";
 
@@ -61,7 +70,8 @@ pub fn presence(account: AccountId) -> String {
   format!("{PRESENCE}{}", account.0)
 }
 
-/// The caps of `realm`, a hash of its [`NAME`], its [`CAP`] and its [`LAYER_CAP`].
+/// The entry and the caps of `realm`, a hash of its [`NAME`], [`REGION`], [`LANGUAGE`], [`RULES`],
+/// [`LOGIN`], [`CAP`] and [`LAYER_CAP`].
 pub fn realm(realm: RealmId) -> String {
   format!("realm:{}", realm.0)
 }

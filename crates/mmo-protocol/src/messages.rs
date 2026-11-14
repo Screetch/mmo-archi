@@ -46,6 +46,9 @@ pub enum ToLogin {
     /// The character to play.
     character: CharacterId,
   },
+  /// Asks for the list of the realms in [`FromLogin::Realms`]. Any copy of the login service
+  /// answers it, in each state of the client, and the state stays.
+  Realms,
 }
 
 /// A message of the login service to a client, on a stream.
@@ -72,6 +75,8 @@ pub enum FromLogin {
     /// The token of the session.
     token: Token,
   },
+  /// The realms of the game, by their ids.
+  Realms(Vec<Realm>),
 }
 
 /// Why the login service refuses a message of a client.
@@ -98,6 +103,79 @@ pub enum Refusal {
   Weak,
   /// The account holds 8 characters already, so [`ToLogin::NewCharacter`] makes no more.
   Limit,
+  /// The realm is at the level [`Population::Full`], so [`ToLogin::NewCharacter`] makes no
+  /// character there. A character that stands in the realm still logs in, through its queue.
+  Full,
+}
+
+/// A realm as the list of [`FromLogin::Realms`] gives it to a client.
+///
+/// Each combination of the three attributes is valid, and two realms can hold the same three, so
+/// no part of the game finds a realm by its attributes.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Realm {
+  /// The id of the realm.
+  pub id: RealmId,
+  /// The name of the realm, which no other realm holds.
+  pub name: String,
+  /// The region of the realm, as Europe or America.
+  pub region: String,
+  /// The language of the realm, as French or English.
+  pub language: String,
+  /// The type of rules of the realm.
+  pub rules: Rules,
+  /// The level of population of the realm, as [`Population::of`] gives it.
+  pub population: Population,
+  /// The count of the accounts that wait in the queue of the realm.
+  pub queue: u32,
+  /// The address of the login service of the realm, as `host:port`, to which the client sends
+  /// [`ToLogin::NewAccount`] or [`ToLogin::Login`].
+  pub login: String,
+}
+
+/// The type of rules of a realm. It is a label that the client shows: no rule of the game reads
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Rules {
+  /// The rules of the game as they stand.
+  Normal,
+  /// Players fight other players.
+  PlayerAgainstPlayer,
+  /// Players play the role of their characters.
+  RolePlay,
+}
+
+/// The level of population of a realm, from its admitted players and its cap alone, and never from
+/// the count of its characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Population {
+  /// Fewer than 2 fifths of the cap.
+  Low,
+  /// From 2 fifths of the cap, and fewer than 4 fifths.
+  Medium,
+  /// From 4 fifths of the cap, and fewer than the cap.
+  High,
+  /// The cap: the queue admits no more, and the realm makes no new character.
+  Full,
+}
+
+impl Population {
+  /// The level of a realm that admits `admitted` players, online or with a slot, of its `cap`. It
+  /// uses integers alone, so each caller gets the same level from the same numbers.
+  #[must_use]
+  pub fn of(admitted: u32, cap: u32) -> Self {
+    let (admitted, cap) = (u64::from(admitted), u64::from(cap));
+    let fifths = 5 * admitted;
+    if admitted >= cap {
+      Self::Full
+    } else if fifths >= 4 * cap {
+      Self::High
+    } else if fifths >= 2 * cap {
+      Self::Medium
+    } else {
+      Self::Low
+    }
+  }
 }
 
 /// A character of an account, as the login service lists it.
@@ -445,8 +523,8 @@ mod tests {
 
   use super::{
     Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, FromNeighbour,
-    Input, Intents, KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient,
-    ToKeeper, ToLogin, ToNeighbour, ToZone,
+    Input, Intents, KeeperRefusal, Population, Realm, Refusal, Relayed, Rules, SAVES, Save,
+    Snapshot, State, ToClient, ToKeeper, ToLogin, ToNeighbour, ToZone,
   };
   use crate::{
     AccountId, Angle, CharacterId, Epoch, FRAME, Layer, Link, Offset, Password, Position, RealmId,
@@ -503,6 +581,7 @@ mod tests {
       ToLogin::Wait,
       ToLogin::NewCharacter { name: "Brom".to_owned() },
       ToLogin::Select { character: CharacterId(42) },
+      ToLogin::Realms,
     ]);
     let refusals = [
       Refusal::Password,
@@ -514,6 +593,7 @@ mod tests {
       Refusal::Expired,
       Refusal::Weak,
       Refusal::Limit,
+      Refusal::Full,
     ];
     round_trip(&refusals.map(FromLogin::Refused));
     round_trip(&[
@@ -524,7 +604,55 @@ mod tests {
         Character { id: CharacterId(i64::MAX), name: "Grace".to_owned() },
       ]),
       FromLogin::Session { token: TOKEN },
+      FromLogin::Realms(vec![]),
+      FromLogin::Realms(vec![
+        realm(1, Rules::Normal, Population::Low),
+        realm(2, Rules::PlayerAgainstPlayer, Population::Full),
+        Realm {
+          id: RealmId(u32::MAX),
+          queue: u32::MAX,
+          ..realm(3, Rules::RolePlay, Population::High)
+        },
+        realm(4, Rules::Normal, Population::Medium),
+      ]),
     ]);
+  }
+
+  fn realm(id: u32, rules: Rules, population: Population) -> Realm {
+    Realm {
+      id: RealmId(id),
+      name: format!("Realm {id}"),
+      region: "Europe".to_owned(),
+      language: "French".to_owned(),
+      rules,
+      population,
+      queue: 7,
+      login: "login.example:4433".to_owned(),
+    }
+  }
+
+  #[test]
+  fn the_level_of_population_changes_at_each_bound_of_the_rule() {
+    use Population::{Full, High, Low, Medium};
+    let levels = |cap: u32, admitted: &[u32]| -> Vec<Population> {
+      admitted.iter().map(|&count| Population::of(count, cap)).collect()
+    };
+    assert_eq!(
+      levels(100, &[0, 39, 40, 79, 80, 99, 100, 101]),
+      [Low, Low, Medium, Medium, High, High, Full, Full]
+    );
+    assert_eq!(
+      levels(20, &[0, 7, 8, 15, 16, 19, 20, 21]),
+      [Low, Low, Medium, Medium, High, High, Full, Full]
+    );
+    assert_eq!(levels(5, &[1, 2, 3, 4, 5]), [Low, Medium, Medium, High, Full]);
+    assert_eq!(levels(1, &[0, 1]), [Low, Full]);
+    assert_eq!(levels(0, &[0]), [Full]);
+    let most = u32::MAX;
+    assert_eq!(
+      levels(most, &[most / 5 * 2, most / 5 * 4, most - 1, most]),
+      [Medium, High, High, Full]
+    );
   }
 
   #[test]

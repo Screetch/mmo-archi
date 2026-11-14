@@ -4,8 +4,9 @@
 #   sh script/local.sh start    builds the servers, then starts PostgreSQL, Redis, the keeper, one login service and
 #                               one pool of layer writers for each realm, and one gateway, and prints the addresses
 #                               that a client uses.
-#   sh script/local.sh check    makes an account and a character through the login service, links to the gateway,
-#                               and waits for the first snapshot of the zone, with the headless binary mmo-check.
+#   sh script/local.sh check    prints the list of the realms that a client gets, makes an account and a character
+#                               through the login service of the realm 1, links to the gateway, and waits for the first
+#                               snapshot of the zone, with the headless binary mmo-check.
 #   sh script/local.sh status   says which processes of the stack run.
 #   sh script/local.sh stop     ends the processes of the stack, and no other process.
 #   sh script/local.sh fault <gateway|keeper|writer> [seconds]
@@ -29,6 +30,9 @@
 # map, so each zone shares a border with the zone before it and the zone after it. The zone 1 is the meadow, where the
 # new characters start. The pool of each realm holds one writer for each zone, one for each layer that the cap of the
 # realm fills, and 2 more.
+# `MMO_LOCAL_ATTRIBUTES` gives the attributes of each realm, one word for each in its order, as region:language:rules,
+# where rules is normal, player-against-player or role-play: `Europe:French:normal America:English:role-play`. A realm
+# with no word takes Europe:French:normal, and the realm n takes the name Realm<n>.
 # The stores need initdb, postgres, pg_isready, psql, redis-server and redis-cli: `MMO_LOCAL_PG_BIN` names the folder
 # of the programs of PostgreSQL when it is not in the PATH. The TLS material needs openssl.
 set -eu
@@ -47,6 +51,7 @@ realms=${MMO_LOCAL_REALMS:-1}
 realm_cap=${MMO_LOCAL_REALM_CAP:-100}
 layer_cap=${MMO_LOCAL_LAYER_CAP:-20}
 zones=${MMO_LOCAL_ZONES:-1}
+attributes=${MMO_LOCAL_ATTRIBUTES:-}
 # The pool of the layer writers of each realm, as section 6 of docs/architecture.md says: one for each zone, one for
 # each layer that the cap of the realm fills, and 2 for the recovery.
 pool=$((zones + (realm_cap + layer_cap - 1) / layer_cap + 2))
@@ -164,6 +169,11 @@ logins() { names login "$realms" "${1:-}"; }
 # The port of the login service of the realm $1: the first takes MMO_LOCAL_LOGIN_PORT, and each next one 100 more.
 login_at() { echo $((login_port + 100 * ($1 - 1))); }
 
+# The attributes of the realm $1 as region:language:rules: the word $1 of MMO_LOCAL_ATTRIBUTES, or the default.
+attributes() {
+  printf '%s\n' "$attributes" | awk -v n="$1" '{ print (NF >= n ? $n : "Europe:French:normal") }'
+}
+
 # An authority and one certificate for each server of the stack, for local work only. The certificate holds the names
 # localhost and 127.0.0.1, and serves as a server and as a client, so each process shows it to its peers.
 make_tls() {
@@ -256,8 +266,17 @@ start() {
   number=0
   for name in $(logins); do
     number=$((number + 1))
+    words=$(attributes "$number")
+    region=${words%%:*}
+    rest=${words#*:}
+    language=${rest%%:*}
+    rules=${rest#*:}
+    [ "$rest" != "$words" ] && [ "$rules" != "$rest" ] ||
+      die "the word $words of MMO_LOCAL_ATTRIBUTES is not region:language:rules"
     launch "$name" env MMO_LOGIN_ADDRESS="127.0.0.1:$(login_at "$number")" MMO_LOGIN_CERTIFICATE="$tls/leaf.pem" \
       MMO_LOGIN_KEY="$tls/leaf.key" DATABASE_URL="$database" REDIS_URL="$redis" MMO_REALM="$number" \
+      MMO_REALM_NAME="Realm$number" MMO_REALM_REGION="$region" MMO_REALM_LANGUAGE="$language" \
+      MMO_REALM_RULES="$rules" MMO_REALM_LOGIN="localhost:$(login_at "$number")" \
       MMO_REALM_CAP="$realm_cap" MMO_LAYER_CAP="$layer_cap" MMO_START_ZONE=1 MMO_START_POSITION=10000,0,10000 \
       "$bin/mmo-login"
   done
@@ -276,7 +295,7 @@ start() {
   say "the stack runs. A client uses these addresses, all on QUIC over UDP except the two stores:"
   number=1
   while [ "$number" -le "$realms" ]; do
-    echo "  login      localhost:$(login_at "$number")  (realm $number, cap $realm_cap, layers of cap $layer_cap, $zones zones)"
+    echo "  login      localhost:$(login_at "$number")  (realm $number, $(attributes "$number"), cap $realm_cap, layers of cap $layer_cap, $zones zones)"
     number=$((number + 1))
   done
   echo "  gateway    localhost:$gateway_port"

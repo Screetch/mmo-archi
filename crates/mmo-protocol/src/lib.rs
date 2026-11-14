@@ -5,7 +5,8 @@
 //! makes it: on a stream in a [`frame`], which [`Frames`] reads, and alone in a datagram, as
 //! [`datagram`] makes it.
 //!
-//! - A client and the login service: [`ToLogin`] and [`FromLogin`], on a stream.
+//! - A client and the login service: [`ToLogin`] and [`FromLogin`], on a stream. [`Realm`] lists
+//!   a realm with its level of [`Population`].
 //! - A client and a gateway: [`Attach`], [`FromClient`] and [`ToClient`] on stream 0, and
 //!   [`Intents`] and [`Snapshot`] in datagrams.
 //! - A gateway and a layer writer: [`ToZone`] and a [`Relayed`] [`ToClient`] on a stream, and the
@@ -26,8 +27,8 @@ pub use codec::{
 };
 pub use messages::{
   Attach, Batch, Change, Character, Entity, FromClient, FromKeeper, FromLogin, FromNeighbour,
-  Input, Intents, KeeperRefusal, Refusal, Relayed, SAVES, Save, Snapshot, State, ToClient,
-  ToKeeper, ToLogin, ToNeighbour, ToZone,
+  Input, Intents, KeeperRefusal, Population, Realm, Refusal, Relayed, Rules, SAVES, Save, Snapshot,
+  State, ToClient, ToKeeper, ToLogin, ToNeighbour, ToZone,
 };
 pub use values::{
   AccountId, Angle, CharacterId, Epoch, Layer, Link, Offset, Password, Position, RealmId,
@@ -38,4 +39,4 @@ pub use values::{
 ///
 /// A change of a message, of the codec, of the version of bitcode or of the step of `mmo-collide`
 /// raises it. A new version needs a restart of the world, since a side accepts only its own.
-pub const PROTOCOL: u16 = 8;
+pub const PROTOCOL: u16 = 9;

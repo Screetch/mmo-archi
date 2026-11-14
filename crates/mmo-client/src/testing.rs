@@ -51,6 +51,11 @@ impl Peer {
     self.send.write_all(bytes).await.expect("the stream takes the bytes");
   }
 
+  /// Asks the client to stop sending on its stream, so its next write fails.
+  pub fn stop(&mut self) {
+    self.recv.stop(0_u32.into()).expect("the stream is open");
+  }
+
   /// Ends the stream of the server.
   pub fn finish(&mut self) {
     self.send.finish().expect("the stream is open");
