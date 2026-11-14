@@ -48,8 +48,8 @@ login_port=${MMO_LOCAL_LOGIN_PORT:-54434}
 zone_port=${MMO_LOCAL_ZONE_PORT:-54440}
 gateway_port=${MMO_LOCAL_GATEWAY_PORT:-54436}
 realms=${MMO_LOCAL_REALMS:-1}
-realm_cap=${MMO_LOCAL_REALM_CAP:-100}
-layer_cap=${MMO_LOCAL_LAYER_CAP:-20}
+realm_cap=${MMO_LOCAL_REALM_CAP:-20}
+layer_cap=${MMO_LOCAL_LAYER_CAP:-5}
 zones=${MMO_LOCAL_ZONES:-1}
 attributes=${MMO_LOCAL_ATTRIBUTES:-}
 # The pool of the layer writers of each realm, as section 6 of docs/architecture.md says: one for each zone, one for
